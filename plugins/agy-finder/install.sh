@@ -117,9 +117,13 @@ TMP_SIDECAR="$TARGET_DIR/sidecars/tree/.sidecar.json.tmp.$$"
 cp "$SCRIPT_DIR/sidecars/tree/sidecar.json" "$TMP_SIDECAR"
 mv -f "$TMP_SIDECAR" "$TARGET_DIR/sidecars/tree/sidecar.json"
 
+if [[ -z "$ORIG_PLUGINS_DIR" ]] && [[ "$(uname -s)" == "Darwin" ]] && /usr/bin/swiftc -version >/dev/null 2>&1; then
+  node "$TARGET_DIR/sidecars/tree/cli.mjs" --ensure-hotkey >/dev/null 2>&1 || true
+fi
+
 if [[ -z "$ORIG_PLUGINS_DIR" ]] && command -v agy >/dev/null 2>&1; then
   agy plugin enable agy-finder >/dev/null 2>&1 || true
 fi
 
 echo "[agy-finder] 安装完成：$TARGET_DIR"
-echo "插件已自动加载并启用，可在 Antigravity 的 Customizations -> Installed 中管理状态"
+echo "插件已自动加载并启用（可在 Customizations -> Installed 管理）：按 ⌘⇧E 开关独立抽屉，按 ⌥⌘E 直达 AGY 右侧辅助栏目录树，或运行 agy-finder aux / agy-finder --help。"

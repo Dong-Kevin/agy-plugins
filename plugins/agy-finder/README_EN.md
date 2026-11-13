@@ -2,7 +2,7 @@
 
 # AGY Finder (`agy-finder`)
 
-[![Version](https://img.shields.io/badge/version-v0.1.0-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
+[![Version](https://img.shields.io/badge/version-v0.2.0-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-818cf8)](#installation)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D%2018-22c55e)](#installation)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-a855f7)](#key-features)
@@ -27,10 +27,10 @@ Designed to give Antigravity Desktop a persistent workspace explorer and instant
       <sub>Collects mentioned files into quick chips; one click expands the tree, highlights the file, and offers copy / preview actions</sub>
     </td>
     <td width="33%" align="center" valign="top">
-      <img src="docs/images/finder-shortcuts.png" width="268" alt="AGY Finder Conflict-Free Hotkeys and Keyboard Navigation" />
+      <img src="docs/images/finder-shortcuts.png" width="268" alt="AGY Finder Dual Custom Hotkeys and Keyboard Navigation" />
       <br/>
-      <b>Conflict-Free Hotkeys (<code>⌘⇧E</code>) & Nav</b><br/>
-      <sub>Active only when Antigravity is frontmost; supports <code>⌘⇧E</code> / <code>⌘⌥E</code> / <code>⌃⇧E</code> / <code>⌘⇧Y</code> presets and full keyboard nav</sub>
+      <b>Dual Custom Hotkeys (<code>⌘⇧E</code> / <code>⌥⌘E</code>) & Nav</b><br/>
+      <sub>Click-to-record hotkeys for Standalone Drawer & AGY Right Aux Pane, frontmost/global scope, and full keyboard nav</sub>
     </td>
     <td width="33%" align="center" valign="top">
       <img src="docs/images/finder-quick-preview.png" width="268" alt="AGY Finder Inline Code Preview Modal" />
@@ -47,19 +47,23 @@ Designed to give Antigravity Desktop a persistent workspace explorer and instant
 
 | Trigger | Default Hotkey / Command | Behavior |
 | :--- | :--- | :--- |
-| **Right-Side Floating Drawer (macOS)** | **`⌘⇧E`** | Uses Carbon `RegisterEventHotKey` active **only when `Antigravity` is frontmost** — zero conflicts and **zero Accessibility permission prompts**. Switchable via `⌨` (`⌘⌥E`, `⌃⇧E`, `⌘⇧Y`, `off`). |
+| **Right-Side Floating Drawer (macOS)** | **`⌘⇧E`** | Uses Carbon `RegisterEventHotKey` active **only when `Antigravity` is frontmost** by default — zero conflicts and **zero Accessibility permission prompts**. Click-to-record custom chords, presets (`⌘⌥E`, `⌃⇧E`, `⌘⇧Y`), or global scope via `⌨`. |
+| **AGY Right Aux Pane Direct Jump (macOS)** | **`⌥⌘E`** | Brings Antigravity's native Right Aux Pane to **AGY Finder File Tree** directly (click-to-record custom chord via `⌨` or `agy-finder aux-shortcut`, or trigger via `agy-finder aux`). |
 | **Host Auxiliary Pane Toggle** | **`⌘⇧B`** (macOS)<br/>**`Ctrl+Shift+B`** (Win / Linux) | Toggles Antigravity's native Right Aux Pane; right-click the tab to `Pin Tab`. |
 | **In-Chat Slash & Deep Links** | **`/agy-finder`**<br/>Click **`[📂]`** or [`sidecar://agy-finder/tree/`](sidecar://agy-finder/tree/) | Opens the file tree panel or reveals & highlights the exact target path from chat replies. |
-| **Cross-Platform Terminal CLI** | **`agy-finder`** (alias for `agy-finder toggle`) | Toggles the floating drawer from terminal or OS hotkey tools (e.g., bind `Ctrl+Shift+E` on Windows / Linux). |
+| **Cross-Platform Terminal CLI** | **`agy-finder`** (drawer)<br/>**`agy-finder aux`** (Aux Pane) | Toggles the floating drawer or jumps into AGY's Right Aux Pane File Tree from terminal or OS hotkey tools (e.g., bind `Ctrl+Shift+E` / `Ctrl+Alt+E` on Win / Linux). |
 | **In-Panel Keyboard Navigation** | `↑` / `↓` · `←` / `→` · `Enter` · `/` · `⌘/Ctrl+.` · `?` · `Esc` | Move rows, collapse/expand, preview/toggle, search files, toggle dotfiles, show shortcuts, dismiss modal/drawer. |
 
 ```bash
-agy-finder                     # Same as agy-finder toggle: show/hide right-side file tree drawer
-agy-finder open [path]         # Open the drawer and optionally reveal a path
-agy-finder close               # Hide the drawer
-agy-finder status [--json]     # Inspect drawer & hotkey state
-agy-finder hotkey <preset>     # Set hotkey preset: cmd+shift+e | cmd+alt+e | ctrl+shift+e | cmd+shift+y | off
-agy-finder quit                # Stop the background drawer daemon
+agy-finder                              # Same as agy-finder toggle: show/hide right-side floating drawer
+agy-finder open [path]                  # Open the floating drawer and optionally reveal a path
+agy-finder aux [path]                   # Reveal/switch Antigravity Right Aux Pane to File Tree (+ optional path)
+agy-finder close                        # Hide the floating drawer
+agy-finder status [--json]              # Inspect drawer, Aux Pane & dual shortcut state
+agy-finder shortcut [<combo>|off|reset]      # View or customize floating drawer shortcut
+agy-finder aux-shortcut [<combo>|off|reset]  # View or customize AGY Aux Pane shortcut
+agy-finder hotkey <preset>              # Set drawer preset: cmd+shift+e | cmd+alt+e | ctrl+shift+e | cmd+shift+y | off
+agy-finder quit                         # Stop the background drawer daemon
 ```
 
 ---

@@ -2,7 +2,7 @@
 
 # Antigravity Context & Token Viewer (`agy-context-viewer`)
 
-[![Version](https://img.shields.io/badge/version-v1.6.3-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
+[![Version](https://img.shields.io/badge/version-v1.7.0-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-818cf8)](#quick-install)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D%2018-22c55e)](#quick-install)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-a855f7)](#privacy--security)
@@ -32,10 +32,10 @@ Zero client binary patching, zero external runtime dependencies, and 100% local 
       <sub>Switch between Context %, Speed & Duration, and 5h/Weekly Quota; auto-follows active conversations; left-click toggles window in <code>&lt;5ms</code></sub>
     </td>
     <td width="52%" align="center" valign="middle">
-      <img src="docs/images/customizer-drawer.png" width="290" alt="Quick Entry Modes, ⌥⌘K Shortcut Recorder & Appearance Customizer" />
+      <img src="docs/images/customizer-drawer.png" width="290" alt="Dual Shortcut Recorders, Quick Entry Modes & Appearance Customizer" />
       <br/>
-      <b>Quick Entry, <code>⌥⌘K</code> Shortcut Recorder & Themes</b><br/>
-      <sub>Toggle Menu Bar badge, record custom toggle chords, pick host-only/global scope, and pick from light/dark themes + 5 heatmap palettes</sub>
+      <b>Dual Shortcut Recorders (<code>⌥⌘K</code> / <code>⌃⌥K</code>) & Themes</b><br/>
+      <sub>Click-to-record hotkeys for Floating Window & AGY Aux Pane, pick host-only/global scope, and pick from 5 heatmap palettes</sub>
     </td>
   </tr>
 </table>
@@ -95,8 +95,8 @@ Zero client binary patching, zero external runtime dependencies, and 100% local 
     3. **5-Hour / Weekly Quota Remaining**: `⏳ 5h 99%·周93%`
   - **Automatic Conversation Follow**: Clicking any conversation in the Antigravity sidebar (including idle historical threads without sending a new message) automatically syncs the Menu Bar badge and floating window within `~1.5s`. Manual session locking is also supported via the dropdown selector.
   - **Compact 4-Section Hover Tooltip & `<5ms` Toggle**: Hover for a clean summary of active conversation/model, context & speed stats, `5h + Weekly` model pool quotas, and shortcuts; **left-click** toggles the dashboard window in `<5ms`, and **right-click** opens the native quick-switch menu.
-- **Right-Side Pinned Floating Window (`📌`) & Customizable Toggle Shortcut (`⌥⌘K`)**
-  - Pin the dashboard directly to the right edge of your screen so it remains visible even when the IDE's right Auxiliary Pane is displaying Artifacts, Diffs, or Terminals. On macOS, press **`⌥⌘K`** anytime while Antigravity or the dashboard is focused to open or close the docked panel in `<5ms` (**zero macOS Accessibility TCC permission prompt**, customizable via click-to-record in the palette drawer or `agy-context shortcut`, with optional global scope).
+- **Right-Side Pinned Floating Window (`📌` `⌥⌘K`) & AGY Aux Pane Direct Jump (`⌃⌥K`)**
+  - Pin the dashboard directly to the right edge of your screen so it remains visible even when the IDE's right Auxiliary Pane is displaying Artifacts, Diffs, or Terminals. On macOS, press **`⌥⌘K`** anytime while Antigravity or the dashboard is focused to toggle the floating window, or **`⌃⌥K`** to jump straight into Antigravity's Right Aux Pane on the Context Dashboard (**zero macOS Accessibility TCC permission prompt**, customizable via click-to-record in the palette drawer or `agy-context shortcut` / `aux-shortcut`, with optional global scope).
   - Toggle always-on-top anytime via the title bar pill, the `📌` toolbar icon, or `Cmd+Shift+P` (`⌥⌘K` or `Cmd+W` to hide).
 - **Dual-Window Quota Pools (`5h + Weekly`) & Realistic Subscription Modeling**
   - Queries both read-only `GetUserStatus` and `RetrieveUserQuotaSummary` local language-server RPCs to display **5-hour rolling burst limits** alongside **Weekly shared tier pools** and exact reset timestamps for Gemini and Claude / GPT families.
@@ -153,7 +153,7 @@ cd agy-plugins
 ./install.sh agy-context-viewer   # On Windows PowerShell: .\install.ps1 -Plugin agy-context-viewer
 ```
 
-Or download `context-viewer-v1.6.3.zip` and `context-viewer-v1.6.3.zip.sha256` from [Releases](https://github.com/Dong-Kevin/agy-plugins/releases), verify the checksum via `shasum -a 256 -c context-viewer-v1.6.3.zip.sha256`, extract it, and run `./context-viewer/install.sh` (or `agy plugin install ./context-viewer`).
+Or download `context-viewer-v1.7.0.zip` and `context-viewer-v1.7.0.zip.sha256` from [Releases](https://github.com/Dong-Kevin/agy-plugins/releases), verify the checksum via `shasum -a 256 -c context-viewer-v1.7.0.zip.sha256`, extract it, and run `./context-viewer/install.sh` (or `agy plugin install ./context-viewer`).
 
 ---
 
@@ -164,10 +164,11 @@ Or download `context-viewer-v1.6.3.zip` and `context-viewer-v1.6.3.zip.sha256` f
 | Trigger | Default Hotkey / Command | Behavior |
 | :--- | :--- | :--- |
 | **Pinned Floating Window (macOS)** | **`⌥⌘K`** | Toggle the right-side pinned floating window (Host-frontmost by default; click-to-record custom chord or switch to global scope; `Ctrl+Alt+K` inside dashboard on Win / Linux) |
+| **AGY Right Aux Pane Direct Jump** | **`⌃⌥K`** (`Ctrl+Alt+Shift+K` on Win / Linux) | Reveal and switch Antigravity's Right Aux Pane straight to the Context Dashboard (click-to-record custom chord or run `agy-context aux` / `aux-shortcut`) |
 | **Pin Toggle / Dismiss** | **`⌘⇧P`** · **`⌘W`** | Toggle always-on-top level / dismiss the floating dashboard |
 | **macOS Menu Bar Badge** | **Left-click** / **Right-click** | Left-click toggles the dashboard in `<5ms`; right-click switches 3 live metrics or pin state |
 | **Host Aux Pane & In-Chat** | **`⌘⇧B`** (`Ctrl+Shift+B` on Win / Linux)<br/>**`/context-viewer`** · [`sidecar://context-viewer/dashboard/`](sidecar://context-viewer/dashboard/) | Toggle Aux Pane or open the dashboard directly from chat |
-| **Terminal CLI Commands** | **`agy-context`** · `float` · `menubar` · `shortcut` · `turns` · `json` · `web` | Terminal ANSI dashboard, float/menubar/hotkey control, per-turn audit & standalone web UI |
+| **Terminal CLI Commands** | **`agy-context`** · `aux` · `float` · `menubar` · `shortcut` · `aux-shortcut` · `turns` · `json` · `web` | Terminal ANSI dashboard, Aux Pane jump, float/menubar/hotkey control, per-turn audit & standalone web UI |
 
 ### 1. In Antigravity Desktop / IDE
 
@@ -175,12 +176,13 @@ Or download `context-viewer-v1.6.3.zip` and `context-viewer-v1.6.3.zip.sha256` f
    - **Left-click** the top-right menu bar badge to show or hide the floating dashboard in `<5ms`;
    - **Right-click** the badge to switch live display modes (**Context % / Speed & Duration / 5h & Weekly Quota**), toggle window pin state, or hide the menu bar icon;
    - You can also configure everything visually inside the dashboard's top-right palette customizer drawer.
-2. **Right-Side Pinned Floating Window (`📌`) & Toggle Shortcut (`⌥⌘K`)**
-   - Press **`⌥⌘K`** on macOS (`Ctrl+Alt+K` inside the dashboard on Windows / Linux), click the **`📌` button** in the dashboard header, or run `agy-context float` in your terminal to open or close the right-side panel;
-   - Open the top-right palette drawer to click-and-record any custom key chord, switch between **Host App Only** (default, conflict-free) and **Global** scope, or reset / disable the shortcut;
+2. **Right-Side Pinned Floating Window (`📌` `⌥⌘K`) & AGY Aux Pane Jump (`⌃⌥K`)**
+   - Press **`⌥⌘K`** on macOS (`Ctrl+Alt+K` inside the dashboard on Windows / Linux), click the **`📌` button** in the dashboard header, or run `agy-context float` in your terminal to toggle the floating window;
+   - Press **`⌃⌥K`** (or run `agy-context aux`) to reveal and switch Antigravity's native Right Aux Pane straight to the Context Dashboard;
+   - Open the top-right palette drawer to click-and-record custom key chords for both **Floating Window** and **AGY Aux Pane**, switch between **Host App Only** (default, conflict-free) and **Global** scope, or reset / disable either shortcut;
    - Click the title-bar `📌` pill (or press `Cmd+Shift+P`) to toggle always-on-top; press `⌥⌘K` again, `Cmd+W`, left-click the menu bar badge, or run `agy-context float close` to dismiss.
 3. **Embedded Auxiliary Pane Sidecar**
-   - Ensure the plugin is enabled under **Customizations → Plugins**, then click its icon in the right Auxiliary Pane (or open `sidecar://context-viewer/dashboard/`).
+   - Ensure the plugin is enabled under **Customizations → Plugins**, then click its icon in the right Auxiliary Pane (or press `⌃⌥K` / open `sidecar://context-viewer/dashboard/`).
 
 ### 2. In Terminal & `agy` CLI
 
@@ -189,12 +191,14 @@ Or download `context-viewer-v1.6.3.zip` and `context-viewer-v1.6.3.zip.sha256` f
 
 ```bash
 agy-context                  # Rich ANSI summary (context gauge, speed, last 5 turns ±Delta, 5h/Weekly quotas)
+agy-context aux              # Reveal and switch Antigravity's Right Aux Pane straight to Context Dashboard
 agy-context menubar context  # Menu Bar mode: Context Window % (◈ 86%)
 agy-context menubar speed    # Menu Bar mode: Latest Speed & Duration (⚡ 46t/s·33s)
 agy-context menubar quota    # Menu Bar mode: 5h / Weekly Quota Remaining (⏳ 5h 99%·周93%)
 agy-context menubar off      # Hide Menu Bar badge (pass 'on' to re-enable, 'status' to inspect)
 agy-context float            # Open / toggle the right-side pinned floating window ('close' to hide, 'quit' to stop daemon)
-agy-context shortcut         # View or customize the panel toggle shortcut (e.g. 'opt+cmd+l', 'reset', 'off', '--global')
+agy-context shortcut         # View or customize floating window shortcut (e.g. 'opt+cmd+l', 'reset', 'off', '--global')
+agy-context aux-shortcut     # View or customize AGY Aux Pane shortcut (e.g. 'ctrl+opt+l', 'reset', 'off', '--global')
 agy-context turns            # Inspect the last 20 turns with context ±Delta, cache hit %, and tool calls
 agy-context json             # Structured JSON summary (append --full for complete raw telemetry payload)
 agy-context web              # Start standalone local web UI on 127.0.0.1:18970 and open in default browser
@@ -270,7 +274,7 @@ agy-context-viewer/
 
 ```bash
 node scripts/verify.mjs           # Manifest spec, JS syntax, pattern + PNG metadata check, CSS isolation & behavioral tests
-node scripts/package-release.mjs  # Build lightweight dist/context-viewer-v1.6.3.zip + .sha256
+node scripts/package-release.mjs  # Build lightweight dist/context-viewer-v1.7.0.zip + .sha256
 ```
 
 ---

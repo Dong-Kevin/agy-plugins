@@ -12,6 +12,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  ackAuxPaneTrigger,
   collectTokenHistory,
   createLoopbackSessionToken,
   getMenubarMode,
@@ -21,11 +22,15 @@ import {
   injectCsrfMeta,
   launchCliTerminal,
   LOOPBACK_SECURITY_HEADERS,
+  markAuxPaneSwitched,
   readLoopbackJsonBody,
+  recordAuxActiveConversation,
   saveSettings,
   scanConversation,
   setSidebarEntrypoint,
-  updateActiveSessionHint
+  updateActiveSessionHint,
+  waitForAuxPaneTrigger,
+  writeAuxPaneTrigger
 } from './collector.mjs';
 import { controlFloatWindow, getFloatWindowStatus } from './float_window.mjs';
 
@@ -80,6 +85,33 @@ function createHandlers(getDefaultConvId, makeResponse) {
     apiLaunchCli: async (data = {}) => launchCliTerminal(data),
     apiFloatStatus: async () => getFloatWindowStatus(),
     apiFloatControl: async (data = {}) => controlFloatWindow(data),
+    apiAuxTriggerGet: async (data = {}) => {
+      const since = Number(data.since || 0);
+      const waitMs = Number(data.waitMs ?? data.timeoutMs ?? 8000);
+      return waitForAuxPaneTrigger({ since, timeoutMs: waitMs });
+    },
+    apiAuxTriggerPost: async (data = {}) => {
+      if (data.action === 'ack') {
+        return ackAuxPaneTrigger({
+          seq: Number(data.seq || 0),
+          plugin: String(data.plugin || 'context-viewer')
+        });
+      }
+      if (data.action === 'switched') {
+        return markAuxPaneSwitched({ seq: Number(data.seq || 0) });
+      }
+      if (data.action === 'hello') {
+        return recordAuxActiveConversation({ convId: String(data.convId || '') });
+      }
+      const trigger = writeAuxPaneTrigger({
+        targetPlugin: String(data.targetPlugin || 'context-viewer'),
+        uri: String(data.uri || 'sidecar://context-viewer/dashboard/'),
+        action: String(data.action || 'toggle'),
+        convId: typeof data.convId === 'string' ? data.convId : '',
+        revealPath: typeof data.revealPath === 'string' ? data.revealPath : ''
+      });
+      return { ok: true, trigger };
+    },
     apiEntrypointsStatus: async () => {
       const fw = getFloatWindowStatus();
       return {
@@ -90,11 +122,20 @@ function createHandlers(getDefaultConvId, makeResponse) {
         menubarSupported: fw.menubarSupported,
         shortcut: fw.shortcut,
         shortcutActive: fw.shortcutActive,
+        auxShortcut: fw.auxShortcut,
+        auxShortcutActive: fw.auxShortcutActive,
         floatWindow: fw
       };
     },
     apiEntrypointsControl: async (data = {}) => {
-      const isShortcutUpdate = (
+      const isAuxShortcutUpdate = (
+        data.target === 'aux-shortcut' ||
+        data.auxShortcutReset === true ||
+        data.auxAccelerator !== undefined ||
+        data.auxShortcutAccelerator !== undefined ||
+        typeof data.auxShortcutEnabled === 'boolean'
+      );
+      const isShortcutUpdate = !isAuxShortcutUpdate && (
         data.target === 'shortcut' ||
         data.shortcutReset === true ||
         data.reset === true ||
@@ -114,6 +155,7 @@ function createHandlers(getDefaultConvId, makeResponse) {
         await controlFloatWindow({ action: 'refresh-session' }).catch(() => {});
         if (
           !isShortcutUpdate &&
+          !isAuxShortcutUpdate &&
           typeof data.menubarEnabled !== 'boolean' &&
           typeof data.menubarMode !== 'string' &&
           typeof data.sidebarEnabled !== 'boolean' &&
@@ -128,9 +170,26 @@ function createHandlers(getDefaultConvId, makeResponse) {
             menubarSupported: fw.menubarSupported,
             shortcut: fw.shortcut,
             shortcutActive: fw.shortcutActive,
+            auxShortcut: fw.auxShortcut,
+            auxShortcutActive: fw.auxShortcutActive,
             floatWindow: fw
           };
         }
+      }
+
+      if (isAuxShortcutUpdate) {
+        const res = await controlFloatWindow({
+          action: 'set-aux-shortcut',
+          enabled: typeof data.enabled === 'boolean' ? data.enabled : data.auxShortcutEnabled,
+          accelerator: data.accelerator ?? data.auxAccelerator ?? data.auxShortcutAccelerator,
+          scope: data.scope ?? data.shortcutScope,
+          reset: Boolean(data.reset || data.auxShortcutReset)
+        });
+        return {
+          ...getSidebarEntryStatus(),
+          ...res,
+          floatWindow: getFloatWindowStatus()
+        };
       }
 
       if (isShortcutUpdate) {
@@ -224,6 +283,8 @@ async function startOfficialSidecar() {
   app.api('/api/float-window', h.apiFloatControl, 'POST');
   app.api('/api/entrypoints', h.apiEntrypointsStatus, 'GET');
   app.api('/api/entrypoints', h.apiEntrypointsControl, 'POST');
+  app.api('/api/aux-pane-trigger', h.apiAuxTriggerGet, 'GET');
+  app.api('/api/aux-pane-trigger', h.apiAuxTriggerPost, 'POST');
 
   if (process.platform === 'darwin') {
     const t = setTimeout(() => {
@@ -270,7 +331,9 @@ async function startStandaloneServer() {
     ['GET:/api/float-window', h.apiFloatStatus],
     ['POST:/api/float-window', h.apiFloatControl],
     ['GET:/api/entrypoints', h.apiEntrypointsStatus],
-    ['POST:/api/entrypoints', h.apiEntrypointsControl]
+    ['POST:/api/entrypoints', h.apiEntrypointsControl],
+    ['GET:/api/aux-pane-trigger', h.apiAuxTriggerGet],
+    ['POST:/api/aux-pane-trigger', h.apiAuxTriggerPost]
   ]);
 
   const server = createServer(async (req, res) => {

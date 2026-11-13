@@ -19,6 +19,7 @@ import {
   realpathSync,
   renameSync,
   statSync,
+  watch,
   writeFileSync
 } from 'node:fs';
 import http from 'node:http';
@@ -630,6 +631,8 @@ function getSidecarManifestPath() {
 export const MENUBAR_MODES = ['context', 'speed', 'quota'];
 export const DEFAULT_SHORTCUT_MAC = 'Alt+Meta+K';
 export const DEFAULT_SHORTCUT_OTHER = 'Ctrl+Alt+K';
+export const DEFAULT_AUX_SHORTCUT_MAC = 'Ctrl+Alt+K';
+export const DEFAULT_AUX_SHORTCUT_OTHER = 'Ctrl+Alt+Shift+K';
 export const SHORTCUT_SCOPES = ['app', 'global'];
 
 // Exact macOS Carbon HIToolbox virtual keycodes (<Carbon/HIToolbox/Events.h>)
@@ -725,6 +728,15 @@ const RESERVED_OTHER_CTRL_ONLY_KEYS = new Set(['A', 'C', 'V', 'W', 'X', 'Z']);
 
 export function getDefaultShortcut(platform = process.platform) {
   return platform === 'darwin' ? DEFAULT_SHORTCUT_MAC : DEFAULT_SHORTCUT_OTHER;
+}
+
+export function getDefaultAuxShortcut(platform = process.platform, standaloneAccelerator = '') {
+  const primary = platform === 'darwin' ? DEFAULT_AUX_SHORTCUT_MAC : DEFAULT_AUX_SHORTCUT_OTHER;
+  const alt = platform === 'darwin' ? 'Alt+Shift+Meta+K' : 'Ctrl+Shift+K';
+  if (standaloneAccelerator && standaloneAccelerator === primary) {
+    return alt;
+  }
+  return primary;
 }
 
 function canonicalizeKeyToken(rawToken) {
@@ -970,6 +982,15 @@ export function setShortcutConfig(patch = {}, platform = process.platform) {
     }
   }
 
+  const auxCur = getAuxShortcutConfig(platform);
+  if (nextEnabled && auxCur.enabled && nextAccelerator === auxCur.accelerator) {
+    return {
+      ok: false,
+      error: `快捷键 ${formatShortcutDisplay(nextAccelerator, platform)} 已被「AGY 侧栏看板」占用，请先更换另一个组合键`,
+      shortcut: cur
+    };
+  }
+
   settings.uiPreferences = {
     ...prevPrefs,
     shortcutEnabled: nextEnabled,
@@ -979,6 +1000,265 @@ export function setShortcutConfig(patch = {}, platform = process.platform) {
   };
   writeJsonAtomic(getSettingsPath(), settings);
   return { ok: true, shortcut: getShortcutConfig(platform) };
+}
+
+export function getAuxShortcutConfig(platform = process.platform) {
+  const settings = loadRawSettings();
+  const prefs = settings.uiPreferences || {};
+  const standalone = getShortcutConfig(platform);
+  const defaultAccelerator = getDefaultAuxShortcut(platform, standalone.accelerator);
+  const defaultDisplay = formatShortcutDisplay(defaultAccelerator, platform);
+  const enabled = typeof prefs.auxShortcutEnabled === 'boolean' ? prefs.auxShortcutEnabled : true;
+  const scope = SHORTCUT_SCOPES.includes(prefs.shortcutScope) ? prefs.shortcutScope : 'app';
+
+  let accelerator = defaultAccelerator;
+  if (typeof prefs.auxShortcutAccelerator === 'string' && prefs.auxShortcutAccelerator.trim()) {
+    const parsed = normalizeShortcutSpec(prefs.auxShortcutAccelerator, platform);
+    if (parsed.ok && !parsed.disabled) {
+      accelerator = parsed.accelerator;
+    }
+  }
+  const display = formatShortcutDisplay(accelerator, platform);
+
+  return {
+    enabled,
+    accelerator,
+    display,
+    defaultAccelerator,
+    defaultDisplay,
+    isDefault: enabled === true && accelerator === defaultAccelerator && scope === 'app',
+    scope,
+    nativeGlobalSupported: platform === 'darwin',
+    macCarbon: shortcutToMacCarbon(accelerator)
+  };
+}
+
+export function setAuxShortcutConfig(patch = {}, platform = process.platform) {
+  const settings = loadRawSettings();
+  const prevPrefs = settings.uiPreferences || {};
+  const cur = getAuxShortcutConfig(platform);
+  const standalone = getShortcutConfig(platform);
+
+  let nextEnabled = cur.enabled;
+  let nextAccelerator = cur.accelerator;
+  let nextScope = cur.scope;
+
+  if (patch.reset === true || patch.auxShortcutReset === true) {
+    nextEnabled = true;
+    nextAccelerator = getDefaultAuxShortcut(platform, standalone.enabled ? standalone.accelerator : '');
+  } else {
+    const rawAcc = patch.accelerator ?? patch.auxAccelerator ?? patch.auxShortcutAccelerator;
+    if (rawAcc !== undefined) {
+      const parsed = normalizeShortcutSpec(rawAcc, platform);
+      if (!parsed.ok) {
+        return { ok: false, error: parsed.error, auxShortcut: cur };
+      }
+      if (parsed.disabled) {
+        nextEnabled = false;
+      } else {
+        nextAccelerator = parsed.accelerator;
+        if (typeof patch.enabled !== 'boolean' && typeof patch.auxShortcutEnabled !== 'boolean') {
+          nextEnabled = true;
+        }
+      }
+    }
+
+    const rawEnabled = typeof patch.enabled === 'boolean'
+      ? patch.enabled
+      : (typeof patch.auxShortcutEnabled === 'boolean' ? patch.auxShortcutEnabled : undefined);
+    if (typeof rawEnabled === 'boolean') {
+      nextEnabled = rawEnabled;
+    }
+
+    const rawScope = patch.scope ?? patch.shortcutScope;
+    if (rawScope !== undefined) {
+      const normScope = String(rawScope).trim().toLowerCase();
+      if (!SHORTCUT_SCOPES.includes(normScope)) {
+        return { ok: false, error: '无效的快捷键生效范围（仅支持 app 或 global）', auxShortcut: cur };
+      }
+      nextScope = normScope;
+    }
+  }
+
+  if (nextEnabled && standalone.enabled && nextAccelerator === standalone.accelerator) {
+    return {
+      ok: false,
+      error: `快捷键 ${formatShortcutDisplay(nextAccelerator, platform)} 已被「独立悬浮窗」占用，请先更换另一个组合键`,
+      auxShortcut: cur
+    };
+  }
+
+  settings.uiPreferences = {
+    ...prevPrefs,
+    auxShortcutEnabled: nextEnabled,
+    auxShortcutAccelerator: nextAccelerator,
+    shortcutScope: nextScope,
+    updatedAt: new Date().toISOString()
+  };
+  writeJsonAtomic(getSettingsPath(), settings);
+  return { ok: true, auxShortcut: getAuxShortcutConfig(platform) };
+}
+
+export function getSharedAuxTriggerPath() {
+  const override = String(process.env.AGY_AUX_TRIGGER_PATH || '').trim();
+  if (override) return resolve(override);
+
+  const dirs = [
+    process.env.AGY_FINDER_DATA_DIR,
+    process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR
+  ].filter((v) => typeof v === 'string' && v.trim());
+
+  for (const rawDir of dirs) {
+    for (let d = resolve(rawDir); d !== dirname(d); d = dirname(d)) {
+      if (basename(d) === 'sidecar_data') {
+        return join(d, 'agy_aux_pane_trigger.json');
+      }
+    }
+    return join(resolve(rawDir), 'agy_aux_pane_trigger.json');
+  }
+  return join(findAppDataDir(), 'sidecar_data', 'agy_aux_pane_trigger.json');
+}
+
+export function readAuxPaneTrigger() {
+  const raw = readJsonSafe(getSharedAuxTriggerPath(), null);
+  return {
+    seq: Number(raw?.seq || 0),
+    targetPlugin: typeof raw?.targetPlugin === 'string' ? raw.targetPlugin : '',
+    uri: typeof raw?.uri === 'string' ? raw.uri : '',
+    action: typeof raw?.action === 'string' ? raw.action : 'toggle',
+    convId: typeof raw?.convId === 'string' ? raw.convId : '',
+    revealPath: typeof raw?.revealPath === 'string' ? raw.revealPath : '',
+    at: Number(raw?.at || 0),
+    ackSeq: Number(raw?.ackSeq || 0),
+    ackAt: Number(raw?.ackAt || 0),
+    ackPlugin: typeof raw?.ackPlugin === 'string' ? raw.ackPlugin : '',
+    switchedSeq: Number(raw?.switchedSeq || 0),
+    activeConvId: typeof raw?.activeConvId === 'string' ? raw.activeConvId : ''
+  };
+}
+
+export function writeAuxPaneTrigger({ targetPlugin = 'context-viewer', uri = '', action = 'toggle', convId = '', revealPath = '' } = {}) {
+  const filePath = getSharedAuxTriggerPath();
+  const cur = readAuxPaneTrigger();
+  const hint = readActiveSessionHint();
+  const resolvedActive = (typeof convId === 'string' && CONV_ID_RE.test(convId.trim()))
+    ? convId.trim()
+    : (cur.activeConvId || (CONV_ID_RE.test(String(hint.userFocusedConvId || '')) ? hint.userFocusedConvId : '') || (CONV_ID_RE.test(String(hint.resolvedConvId || '')) ? hint.resolvedConvId : '') || '');
+  const next = {
+    seq: Math.max(0, Number(cur.seq || 0)) + 1,
+    targetPlugin: String(targetPlugin || 'context-viewer'),
+    uri: String(uri || ''),
+    action: String(action || 'toggle'),
+    convId: (typeof convId === 'string' && convId.trim()) ? convId.trim() : resolvedActive,
+    revealPath: typeof revealPath === 'string' ? revealPath : '',
+    at: Date.now(),
+    ackSeq: cur.ackSeq,
+    ackAt: cur.ackAt,
+    ackPlugin: cur.ackPlugin,
+    switchedSeq: 0,
+    activeConvId: resolvedActive
+  };
+  writeJsonAtomic(filePath, next);
+  return next;
+}
+
+export function ackAuxPaneTrigger({ seq, plugin = 'context-viewer' } = {}) {
+  const targetSeq = Number(seq || 0);
+  const cur = readAuxPaneTrigger();
+  if (!targetSeq || targetSeq < cur.seq || cur.ackSeq >= targetSeq) {
+    return { ok: true, claimed: false, trigger: cur };
+  }
+  const next = {
+    ...cur,
+    ackSeq: targetSeq,
+    ackAt: Date.now(),
+    ackPlugin: String(plugin || 'context-viewer')
+  };
+  writeJsonAtomic(getSharedAuxTriggerPath(), next);
+  return { ok: true, claimed: true, trigger: next };
+}
+
+export function markAuxPaneSwitched({ seq } = {}) {
+  const targetSeq = Number(seq || 0);
+  const cur = readAuxPaneTrigger();
+  if (!targetSeq || targetSeq <= cur.switchedSeq) {
+    return { ok: true, claimed: false, trigger: cur };
+  }
+  const next = {
+    ...cur,
+    switchedSeq: targetSeq
+  };
+  writeJsonAtomic(getSharedAuxTriggerPath(), next);
+  return { ok: true, claimed: true, trigger: next };
+}
+
+export function recordAuxActiveConversation({ convId = '' } = {}) {
+  const cleanId = String(convId || '').trim();
+  if (!CONV_ID_RE.test(cleanId)) {
+    return { ok: false, activeConvId: '' };
+  }
+  const filePath = getSharedAuxTriggerPath();
+  const raw = readJsonSafe(filePath, null);
+  const cur = readAuxPaneTrigger();
+  if (raw && cur.activeConvId === cleanId) {
+    return { ok: true, activeConvId: cleanId };
+  }
+  writeJsonAtomic(filePath, {
+    ...cur,
+    activeConvId: cleanId
+  });
+  return { ok: true, activeConvId: cleanId };
+}
+
+export function waitForAuxPaneTrigger({ since = 0, timeoutMs = 8000 } = {}) {
+  const sinceSeq = Math.max(0, Number(since || 0));
+  const clampedMs = Math.max(0, Math.min(9500, Number(timeoutMs ?? 8000) || 0));
+  const initial = readAuxPaneTrigger();
+  if (initial.seq > sinceSeq || clampedMs === 0) {
+    return Promise.resolve({ ok: true, changed: initial.seq > sinceSeq, trigger: initial });
+  }
+
+  const filePath = getSharedAuxTriggerPath();
+  const dir = dirname(filePath);
+  const name = basename(filePath);
+  try { mkdirSync(dir, { recursive: true }); } catch {}
+
+  return new Promise((resolvePromise) => {
+    let settled = false;
+    let watcher = null;
+    let pollTimer = null;
+    let timeoutTimer = null;
+
+    const finish = (trigger) => {
+      if (settled) return;
+      settled = true;
+      try { watcher?.close(); } catch {}
+      if (pollTimer) clearInterval(pollTimer);
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      resolvePromise({ ok: true, changed: trigger.seq > sinceSeq, trigger });
+    };
+
+    const checkNow = () => {
+      const cur = readAuxPaneTrigger();
+      if (cur.seq > sinceSeq) finish(cur);
+    };
+
+    try {
+      watcher = watch(dir, (_ev, filename) => {
+        if (!filename || String(filename) === name) {
+          checkNow();
+        }
+      });
+      watcher.on('error', () => {});
+    } catch {}
+
+    pollTimer = setInterval(checkNow, 90);
+    pollTimer.unref?.();
+    timeoutTimer = setTimeout(() => {
+      finish(readAuxPaneTrigger());
+    }, clampedMs);
+    timeoutTimer.unref?.();
+  });
 }
 
 export function getMenubarPreference() {
@@ -1076,6 +1356,7 @@ export function getSidebarEntryStatus() {
     menubarMode: getMenubarMode(),
     menubarSupported: process.platform === 'darwin',
     shortcut: getShortcutConfig(),
+    auxShortcut: getAuxShortcutConfig(),
     pinnedConvId: hint.pinnedConvId || '',
     sidebarEnabled,
     viewsCount: views.length

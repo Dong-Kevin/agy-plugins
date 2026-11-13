@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   collectTokenHistory,
+  getAuxShortcutConfig,
   getMenubarMode,
   getShortcutConfig,
   getSidebarEntryStatus,
@@ -34,9 +35,9 @@ const PLUGIN_ROOT = resolve(__dirname, '..', '..');
 const PLUGIN_DIR_ID = basename(PLUGIN_ROOT);
 const PLUGIN_VERSION = (() => {
   try {
-    return JSON.parse(readFileSync(join(PLUGIN_ROOT, 'plugin.json'), 'utf-8')).version || '1.6.3';
+    return JSON.parse(readFileSync(join(PLUGIN_ROOT, 'plugin.json'), 'utf-8')).version || '1.7.0';
   } catch {
-    return '1.6.3';
+    return '1.7.0';
   }
 })();
 
@@ -114,7 +115,9 @@ function printHelp() {
     '  agy-context menubar [context|speed|quota]       定制 macOS 顶部菜单栏显示：上下文占比 / 速度与耗时 / 5h或Week额度',
     '  agy-context menubar [on|off|toggle|status]      开启、关闭或查看顶部菜单栏常驻图标（切换会话时自动跟随）',
     '  agy-context float [toggle|close|quit]           切换屏幕右侧独立置顶小窗（不受右侧栏切换影响，随时可取消置顶或收回）',
-    '  agy-context shortcut [combo|reset|off|--global] 查看或自定义侧栏看板开关快捷键（macOS 默认 ⌥⌘K，零辅助功能权限）',
+    '  agy-context aux [toggle|open]                   一键打开或切换 Antigravity 右侧辅助栏「上下文看板」',
+    '  agy-context shortcut [combo|reset|off|--global] 查看或自定义独立悬浮窗快捷键（macOS 默认 ⌥⌘K，零辅助功能权限）',
+    '  agy-context aux-shortcut [combo|reset|off]      查看或自定义 AGY 右侧辅助栏看板快捷键（macOS 默认 ⌃⌥K）',
     '  agy-context turns [conversationId]              查看最近 20 轮每轮上下文涨跌 (±Delta) 与工具调用明细',
     '  agy-context json [conversationId]               输出结构化 JSON 摘要（加 --full 输出完整原始快照）',
     '  agy-context web [--port 18970]                  启动独立本地 Web 看板并自动在浏览器打开（适合纯 CLI 用户）',
@@ -261,7 +264,25 @@ async function runFloatCommand(rawArgs) {
   console.log(formatZh(`${c.green}✓${c.reset} ${res.message || (res.running ? '已打开独立看板' : '已收回独立看板')}`));
 }
 
-async function runShortcutCommand(rawArgs) {
+async function runAuxCommand(rawArgs) {
+  const positionals = rawArgs.filter((a) => !a.startsWith('-'));
+  const sub = (positionals[1] || 'toggle').toLowerCase();
+  const action = sub === 'open' ? 'open-aux' : 'toggle-aux';
+  const convId = process.env.ANTIGRAVITY_CONVERSATION_ID || '';
+  const res = await controlFloatWindow({ action, convId });
+  if (rawArgs.includes('--json')) {
+    console.log(JSON.stringify(res, null, 2));
+    return;
+  }
+  if (!res.ok) {
+    console.error(formatZh(`${c.red}✗${c.reset} ${res.error || '切换 AGY 侧栏看板失败'}`));
+    process.exitCode = 1;
+    return;
+  }
+  console.log(formatZh(`${res.acked ? c.green + '✓' : c.cyan + '◈'}${c.reset} ${res.message}`));
+}
+
+async function runShortcutCommand(rawArgs, { isAux = false } = {}) {
   const positionals = rawArgs.filter((a) => !a.startsWith('-'));
   const rawSub = positionals[1] || '';
   const sub = rawSub.toLowerCase();
@@ -271,6 +292,7 @@ async function runShortcutCommand(rawArgs) {
   const hasOffFlag = rawArgs.includes('--off') || ['off', 'disable', 'disabled', 'false', '0'].includes(sub);
   const hasOnFlag = rawArgs.includes('--on') || ['on', 'enable', 'enabled', 'true', '1'].includes(sub);
 
+  const label = isAux ? 'AGY 侧栏看板快捷键' : '独立悬浮窗快捷键';
   const isPureStatus =
     rawArgs.includes('--status') ||
     sub === 'status' ||
@@ -278,25 +300,29 @@ async function runShortcutCommand(rawArgs) {
 
   if (isPureStatus) {
     const fw = getFloatWindowStatus();
-    const sc = fw.shortcut || getShortcutConfig();
+    const sc = isAux ? (fw.auxShortcut || getAuxShortcutConfig()) : (fw.shortcut || getShortcutConfig());
+    const active = isAux ? fw.auxShortcutActive : fw.shortcutActive;
     if (rawArgs.includes('--json')) {
-      console.log(JSON.stringify({ ok: true, shortcut: sc, floatWindow: fw }, null, 2));
+      const payload = isAux
+        ? { ok: true, auxShortcut: sc, floatWindow: fw }
+        : { ok: true, shortcut: sc, floatWindow: fw };
+      console.log(JSON.stringify(payload, null, 2));
       return;
     }
     const scopeLbl = sc.scope === 'global' ? '全局生效' : '仅宿主前台生效';
     console.log(
       formatZh(
         !sc.enabled
-          ? `${c.dim}○${c.reset} 侧栏看板快捷键当前状态：已停用（已保存键位：${sc.display}，默认：${sc.defaultDisplay}）`
-          : fw.shortcutActive
-            ? `${c.green}●${c.reset} 侧栏看板快捷键运行中：${c.bold}${sc.display}${c.reset}（${scopeLbl} · PID ${fw.pid}）`
-            : `${c.cyan}◈${c.reset} 侧栏看板快捷键已配置：${c.bold}${sc.display}${c.reset}（${scopeLbl}${sc.isDefault ? ' · 默认' : ''}）`
+          ? `${c.dim}○${c.reset} ${label}当前状态：已停用（已保存键位：${sc.display}，默认：${sc.defaultDisplay}）`
+          : active
+            ? `${c.green}●${c.reset} ${label}运行中：${c.bold}${sc.display}${c.reset}（${scopeLbl} · PID ${fw.pid}）`
+            : `${c.cyan}◈${c.reset} ${label}已配置：${c.bold}${sc.display}${c.reset}（${scopeLbl}${sc.isDefault ? ' · 默认' : ''}）`
       )
     );
     return;
   }
 
-  const patch = { action: 'set-shortcut' };
+  const patch = { action: isAux ? 'set-aux-shortcut' : 'set-shortcut' };
   if (hasResetFlag) {
     patch.reset = true;
   } else {
@@ -549,11 +575,21 @@ async function main() {
   }
 
   const firstPositional = rawArgs.find((a) => !a.startsWith('-')) || 'status';
-  const knownCmds = new Set(['status', 'turns', 'json', 'web', 'serve', 'open', 'float', 'pin', 'menubar', 'sidebar', 'shortcut', 'hotkey']);
+  const knownCmds = new Set(['status', 'turns', 'json', 'web', 'serve', 'open', 'float', 'pin', 'aux', 'menubar', 'sidebar', 'shortcut', 'hotkey', 'aux-shortcut', 'aux-hotkey']);
   const cmd = knownCmds.has(firstPositional.toLowerCase()) ? firstPositional.toLowerCase() : 'status';
 
+  if (cmd === 'aux') {
+    await runAuxCommand(rawArgs);
+    return;
+  }
+
+  if (cmd === 'aux-shortcut' || cmd === 'aux-hotkey') {
+    await runShortcutCommand(rawArgs, { isAux: true });
+    return;
+  }
+
   if (cmd === 'shortcut' || cmd === 'hotkey') {
-    await runShortcutCommand(rawArgs);
+    await runShortcutCommand(rawArgs, { isAux: false });
     return;
   }
 

@@ -20,6 +20,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  watch,
   writeFileSync
 } from 'node:fs';
 import { createServer } from 'node:http';
@@ -42,7 +43,7 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = resolve(__dirname, '..', '..');
 
-export const DAEMON_VERSION = 1;
+export const DAEMON_VERSION = 2;
 
 export const HOTKEY_PRESETS = [
   { id: 'cmd+shift+e', macLabel: '⌘⇧E', winLabel: 'Ctrl+Shift+E', desc: '默认快捷键' },
@@ -53,6 +54,294 @@ export const HOTKEY_PRESETS = [
 ];
 
 const VALID_PRESETS = new Set(HOTKEY_PRESETS.map((p) => p.id));
+
+export const DEFAULT_DRAWER_SHORTCUT_MAC = 'Shift+Meta+E';
+export const DEFAULT_DRAWER_SHORTCUT_OTHER = 'Ctrl+Shift+E';
+export const DEFAULT_AUX_SHORTCUT_MAC = 'Alt+Meta+E';
+export const DEFAULT_AUX_SHORTCUT_OTHER = 'Ctrl+Alt+E';
+export const SHORTCUT_SCOPES = ['app', 'global'];
+
+const PRESET_TO_ACCELERATOR = Object.freeze({
+  'cmd+shift+e': 'Shift+Meta+E',
+  'cmd+alt+e': 'Alt+Meta+E',
+  'ctrl+shift+e': 'Ctrl+Shift+E',
+  'cmd+shift+y': 'Shift+Meta+Y'
+});
+
+const ACCELERATOR_TO_PRESET = Object.freeze({
+  'Shift+Meta+E': 'cmd+shift+e',
+  'Alt+Meta+E': 'cmd+alt+e',
+  'Ctrl+Shift+E': 'ctrl+shift+e',
+  'Shift+Meta+Y': 'cmd+shift+y'
+});
+
+const MAC_CARBON_KEYCODES = Object.freeze({
+  A: 0, B: 11, C: 8, D: 2, E: 14, F: 3, G: 5, H: 4, I: 34, J: 38,
+  K: 40, L: 37, M: 46, N: 45, O: 31, P: 35, Q: 12, R: 15, S: 1, T: 17,
+  U: 32, V: 9, W: 13, X: 7, Y: 16, Z: 6,
+  '0': 29, '1': 18, '2': 19, '3': 20, '4': 21,
+  '5': 23, '6': 22, '7': 26, '8': 28, '9': 25,
+  F1: 122, F2: 120, F3: 99, F4: 118, F5: 96, F6: 97,
+  F7: 98, F8: 100, F9: 101, F10: 109, F11: 103, F12: 111,
+  Space: 49,
+  Backquote: 50,
+  Minus: 27,
+  Equal: 24,
+  BracketLeft: 33,
+  BracketRight: 30,
+  Backslash: 42,
+  Semicolon: 41,
+  Quote: 39,
+  Comma: 43,
+  Period: 47,
+  Slash: 44
+});
+
+const MAC_CARBON_MODS = Object.freeze({
+  Meta: 256,
+  Shift: 512,
+  Alt: 2048,
+  Ctrl: 4096
+});
+
+const SHORTCUT_KEY_DISPLAY = Object.freeze({
+  Space: 'Space',
+  Backquote: '`',
+  Minus: '-',
+  Equal: '=',
+  BracketLeft: '[',
+  BracketRight: ']',
+  Backslash: '\\',
+  Semicolon: ';',
+  Quote: "'",
+  Comma: ',',
+  Period: '.',
+  Slash: '/'
+});
+
+const SHORTCUT_KEY_ALIASES = Object.freeze({
+  space: 'Space',
+  spacebar: 'Space',
+  '`': 'Backquote',
+  '~': 'Backquote',
+  backquote: 'Backquote',
+  grave: 'Backquote',
+  tilde: 'Backquote',
+  '-': 'Minus',
+  '_': 'Minus',
+  minus: 'Minus',
+  '=': 'Equal',
+  equal: 'Equal',
+  plus: 'Equal',
+  '[': 'BracketLeft',
+  '{': 'BracketLeft',
+  bracketleft: 'BracketLeft',
+  ']': 'BracketRight',
+  '}': 'BracketRight',
+  bracketright: 'BracketRight',
+  '\\': 'Backslash',
+  '|': 'Backslash',
+  backslash: 'Backslash',
+  ';': 'Semicolon',
+  ':': 'Semicolon',
+  semicolon: 'Semicolon',
+  "'": 'Quote',
+  '"': 'Quote',
+  quote: 'Quote',
+  ',': 'Comma',
+  '<': 'Comma',
+  comma: 'Comma',
+  '.': 'Period',
+  '>': 'Period',
+  period: 'Period',
+  dot: 'Period',
+  '/': 'Slash',
+  '?': 'Slash',
+  slash: 'Slash'
+});
+
+const RESERVED_MAC_META_ONLY_KEYS = new Set([
+  'A', 'C', 'F', 'H', 'M', 'N', 'Q', 'R', 'S', 'T', 'V', 'W', 'X', 'Z', 'Space'
+]);
+const RESERVED_OTHER_CTRL_ONLY_KEYS = new Set(['A', 'C', 'V', 'W', 'X', 'Z']);
+
+export function getDefaultDrawerShortcut(platform = process.platform) {
+  return platform === 'darwin' ? DEFAULT_DRAWER_SHORTCUT_MAC : DEFAULT_DRAWER_SHORTCUT_OTHER;
+}
+
+export function getDefaultAuxShortcut(platform = process.platform, drawerAccelerator = '') {
+  const primary = platform === 'darwin' ? DEFAULT_AUX_SHORTCUT_MAC : DEFAULT_AUX_SHORTCUT_OTHER;
+  const alt = platform === 'darwin' ? 'Ctrl+Alt+E' : 'Ctrl+Alt+Shift+E';
+  if (drawerAccelerator && drawerAccelerator === primary) {
+    return alt;
+  }
+  return primary;
+}
+
+function canonicalizeKeyToken(rawToken) {
+  const trimmed = String(rawToken || '').trim();
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+  if (SHORTCUT_KEY_ALIASES[lower]) return SHORTCUT_KEY_ALIASES[lower];
+  if (/^key([a-z])$/i.test(trimmed)) return trimmed.slice(3).toUpperCase();
+  if (/^[a-z]$/i.test(trimmed)) return trimmed.toUpperCase();
+  if (/^digit([0-9])$/i.test(trimmed)) return trimmed.slice(5);
+  if (/^[0-9]$/.test(trimmed)) return trimmed;
+  if (/^f([1-9]|1[0-2])$/i.test(trimmed)) return trimmed.toUpperCase();
+  return null;
+}
+
+export function formatShortcutDisplay(spec, platform = process.platform) {
+  const raw = String(spec || '').trim();
+  if (!raw || /^(off|none|disabled?)$/i.test(raw)) return '已关闭';
+  const parts = raw.split('+').filter(Boolean);
+  if (!parts.length) return '已关闭';
+  const keyPart = parts[parts.length - 1];
+  const modSet = new Set(parts.slice(0, -1));
+  const keyLabel = SHORTCUT_KEY_DISPLAY[keyPart] || keyPart;
+  if (platform === 'darwin') {
+    let out = '';
+    if (modSet.has('Ctrl')) out += '⌃';
+    if (modSet.has('Alt')) out += '⌥';
+    if (modSet.has('Shift')) out += '⇧';
+    if (modSet.has('Meta')) out += '⌘';
+    return `${out}${keyLabel}`;
+  }
+  const mods = [];
+  if (modSet.has('Ctrl')) mods.push('Ctrl');
+  if (modSet.has('Alt')) mods.push('Alt');
+  if (modSet.has('Shift')) mods.push('Shift');
+  if (modSet.has('Meta')) mods.push(platform === 'win32' ? 'Win' : 'Super');
+  return [...mods, keyLabel].join('+');
+}
+
+export function shortcutToMacCarbon(spec) {
+  const raw = String(spec || '').trim();
+  if (!raw) return null;
+  const parts = raw.split('+').filter(Boolean);
+  if (!parts.length) return null;
+  const keyPart = parts[parts.length - 1];
+  const keyCode = MAC_CARBON_KEYCODES[keyPart];
+  if (typeof keyCode !== 'number') return null;
+  let modifiers = 0;
+  for (const mod of parts.slice(0, -1)) {
+    if (MAC_CARBON_MODS[mod]) {
+      modifiers |= MAC_CARBON_MODS[mod];
+    }
+  }
+  return { keyCode, modifiers };
+}
+
+export function normalizeShortcutSpec(raw, platform = process.platform) {
+  const str = String(raw ?? '').trim();
+  if (!str) {
+    return { ok: false, error: '快捷键不能为空' };
+  }
+  if (/^(off|none|disable|disabled)$/i.test(str)) {
+    return {
+      ok: true,
+      disabled: true,
+      accelerator: '',
+      display: '已关闭',
+      modifiers: { ctrl: false, alt: false, shift: false, meta: false },
+      key: '',
+      macCarbon: null
+    };
+  }
+
+  const expanded = str
+    .replace(/⌃/g, 'Ctrl+')
+    .replace(/⌥/g, 'Alt+')
+    .replace(/⇧/g, 'Shift+')
+    .replace(/⌘/g, 'Meta+')
+    .replace(/\+\s*\+$/g, '+Equal');
+
+  const rawTokens = expanded.split('+').map((t) => t.trim()).filter(Boolean);
+  const mods = { ctrl: false, alt: false, shift: false, meta: false };
+  const keys = [];
+
+  for (const tok of rawTokens) {
+    const low = tok.toLowerCase();
+    if (['ctrl', 'control', 'ctl'].includes(low)) {
+      mods.ctrl = true;
+    } else if (['alt', 'opt', 'option'].includes(low)) {
+      mods.alt = true;
+    } else if (['shift', 'shft'].includes(low)) {
+      mods.shift = true;
+    } else if (['meta', 'cmd', 'command', 'super', 'win'].includes(low)) {
+      mods.meta = true;
+    } else {
+      const canonKey = canonicalizeKeyToken(tok);
+      if (!canonKey) {
+        return {
+          ok: false,
+          error: `不支持的按键「${tok}」，请使用字母 A-Z、数字 0-9、F1-F12 或常用符号键`
+        };
+      }
+      keys.push(canonKey);
+    }
+  }
+
+  if (keys.length === 0) {
+    return {
+      ok: false,
+      error: '请按下包含修饰键（如 ⌘ / ⌥ / ⌃）与单个主键的组合键'
+    };
+  }
+  if (keys.length > 1) {
+    return {
+      ok: false,
+      error: '快捷键只能包含一个主键，请使用「修饰键 + 单个按键」组合'
+    };
+  }
+
+  const key = keys[0];
+  const isFunctionKey = /^F([1-9]|1[0-2])$/.test(key);
+  const hasPrimaryMod = mods.ctrl || mods.alt || mods.meta;
+  if (!hasPrimaryMod && !isFunctionKey) {
+    return {
+      ok: false,
+      error: '快捷键需至少包含 ⌘ / ⌥ / ⌃ 修饰键之一（或使用 F1-F12），避免干扰正常文字输入'
+    };
+  }
+
+  if (platform === 'darwin') {
+    const onlyMeta = mods.meta && !mods.alt && !mods.ctrl && !mods.shift;
+    const onlyMetaShift = mods.meta && mods.shift && !mods.alt && !mods.ctrl;
+    if ((onlyMeta && RESERVED_MAC_META_ONLY_KEYS.has(key)) || (onlyMetaShift && key === 'Z')) {
+      return {
+        ok: false,
+        error: '该组合键为系统保留或基础编辑快捷键（如复制/粘贴/退出），请换用带 ⌥ 或 ⌃ 的组合（如 ⌥⌘E）'
+      };
+    }
+  } else {
+    const onlyCtrl = mods.ctrl && !mods.alt && !mods.meta && !mods.shift;
+    if (onlyCtrl && RESERVED_OTHER_CTRL_ONLY_KEYS.has(key)) {
+      return {
+        ok: false,
+        error: '该组合键为基础编辑快捷键（如复制/粘贴/撤销），请换用 Ctrl+Alt 组合（如 Ctrl+Alt+E）'
+      };
+    }
+  }
+
+  const orderedParts = [];
+  if (mods.ctrl) orderedParts.push('Ctrl');
+  if (mods.alt) orderedParts.push('Alt');
+  if (mods.shift) orderedParts.push('Shift');
+  if (mods.meta) orderedParts.push('Meta');
+  orderedParts.push(key);
+  const accelerator = orderedParts.join('+');
+
+  return {
+    ok: true,
+    disabled: false,
+    accelerator,
+    display: formatShortcutDisplay(accelerator, platform),
+    modifiers: mods,
+    key,
+    macCarbon: shortcutToMacCarbon(accelerator)
+  };
+}
 
 const DAEMON_RUNTIME_FILES = [
   'drawer.mjs',
@@ -137,17 +426,248 @@ function isPidAlive(pid) {
   }
 }
 
-export function getShortcutSettings() {
-  const raw = readJsonSafe(getSettingsPath());
-  const rawPreset = String(raw?.hotkeyPreset || 'cmd+shift+e').toLowerCase();
-  const hotkeyPreset = VALID_PRESETS.has(rawPreset) ? rawPreset : 'cmd+shift+e';
-  const drawerPinned = raw?.drawerPinned !== undefined ? Boolean(raw.drawerPinned) : true;
-  return { hotkeyPreset, drawerPinned };
+export function getDrawerShortcutConfig(platform = process.platform) {
+  const raw = readJsonSafe(getSettingsPath()) || {};
+  const defaultAccelerator = getDefaultDrawerShortcut(platform);
+  const defaultDisplay = formatShortcutDisplay(defaultAccelerator, platform);
+  const scope = SHORTCUT_SCOPES.includes(raw.shortcutScope) ? raw.shortcutScope : 'app';
+
+  let enabled;
+  if (typeof raw.drawerShortcutEnabled === 'boolean') {
+    enabled = raw.drawerShortcutEnabled;
+  } else if (typeof raw.hotkeyPreset === 'string') {
+    enabled = raw.hotkeyPreset.trim().toLowerCase() !== 'off';
+  } else {
+    enabled = true;
+  }
+
+  let accelerator = defaultAccelerator;
+  if (typeof raw.drawerShortcutAccelerator === 'string' && raw.drawerShortcutAccelerator.trim()) {
+    const parsed = normalizeShortcutSpec(raw.drawerShortcutAccelerator, platform);
+    if (parsed.ok && !parsed.disabled) {
+      accelerator = parsed.accelerator;
+    }
+  } else if (typeof raw.hotkeyPreset === 'string') {
+    const presetAcc = PRESET_TO_ACCELERATOR[raw.hotkeyPreset.trim().toLowerCase()];
+    if (presetAcc) accelerator = presetAcc;
+  }
+
+  const display = formatShortcutDisplay(accelerator, platform);
+  const presetId = !enabled ? 'off' : (ACCELERATOR_TO_PRESET[accelerator] || 'custom');
+  return {
+    enabled,
+    accelerator,
+    display,
+    defaultAccelerator,
+    defaultDisplay,
+    isDefault: enabled === true && accelerator === defaultAccelerator && scope === 'app',
+    scope,
+    presetId,
+    nativeGlobalSupported: platform === 'darwin',
+    macCarbon: shortcutToMacCarbon(accelerator)
+  };
 }
 
-export function saveShortcutSettings(patch = {}) {
-  const current = getShortcutSettings();
+export function getAuxShortcutConfig(platform = process.platform) {
+  const raw = readJsonSafe(getSettingsPath()) || {};
+  const drawer = getDrawerShortcutConfig(platform);
+  const defaultAccelerator = getDefaultAuxShortcut(platform, drawer.accelerator);
+  const defaultDisplay = formatShortcutDisplay(defaultAccelerator, platform);
+  const enabled = typeof raw.auxShortcutEnabled === 'boolean' ? raw.auxShortcutEnabled : true;
+  const scope = SHORTCUT_SCOPES.includes(raw.shortcutScope) ? raw.shortcutScope : 'app';
+
+  let accelerator = defaultAccelerator;
+  if (typeof raw.auxShortcutAccelerator === 'string' && raw.auxShortcutAccelerator.trim()) {
+    const parsed = normalizeShortcutSpec(raw.auxShortcutAccelerator, platform);
+    if (parsed.ok && !parsed.disabled) {
+      accelerator = parsed.accelerator;
+    }
+  }
+  const display = formatShortcutDisplay(accelerator, platform);
+
+  return {
+    enabled,
+    accelerator,
+    display,
+    defaultAccelerator,
+    defaultDisplay,
+    isDefault: enabled === true && accelerator === defaultAccelerator && scope === 'app',
+    scope,
+    nativeGlobalSupported: platform === 'darwin',
+    macCarbon: shortcutToMacCarbon(accelerator)
+  };
+}
+
+export function setDrawerShortcutConfig(patch = {}, platform = process.platform) {
+  const raw = readJsonSafe(getSettingsPath()) || {};
+  const cur = getDrawerShortcutConfig(platform);
+  let nextEnabled = cur.enabled;
+  let nextAccelerator = cur.accelerator;
+  let nextScope = cur.scope;
+
+  if (patch.reset === true || patch.drawerShortcutReset === true) {
+    nextEnabled = true;
+    nextAccelerator = getDefaultDrawerShortcut(platform);
+  } else {
+    const rawAcc = patch.accelerator ?? patch.drawerAccelerator ?? patch.drawerShortcutAccelerator;
+    if (rawAcc !== undefined) {
+      const parsed = normalizeShortcutSpec(rawAcc, platform);
+      if (!parsed.ok) {
+        return { ok: false, error: parsed.error, shortcut: cur, drawerShortcut: cur };
+      }
+      if (parsed.disabled) {
+        nextEnabled = false;
+      } else {
+        nextAccelerator = parsed.accelerator;
+        if (typeof patch.enabled !== 'boolean' && typeof patch.drawerShortcutEnabled !== 'boolean') {
+          nextEnabled = true;
+        }
+      }
+    }
+
+    const rawEnabled = typeof patch.enabled === 'boolean'
+      ? patch.enabled
+      : (typeof patch.drawerShortcutEnabled === 'boolean' ? patch.drawerShortcutEnabled : undefined);
+    if (typeof rawEnabled === 'boolean') {
+      nextEnabled = rawEnabled;
+    }
+
+    const rawScope = patch.scope ?? patch.shortcutScope;
+    if (rawScope !== undefined) {
+      const normScope = String(rawScope).trim().toLowerCase();
+      if (!SHORTCUT_SCOPES.includes(normScope)) {
+        return { ok: false, error: '无效的快捷键生效范围（仅支持 app 或 global）', shortcut: cur, drawerShortcut: cur };
+      }
+      nextScope = normScope;
+    }
+  }
+
+  const auxCur = getAuxShortcutConfig(platform);
+  if (nextEnabled && auxCur.enabled && nextAccelerator === auxCur.accelerator) {
+    return {
+      ok: false,
+      error: `快捷键 ${formatShortcutDisplay(nextAccelerator, platform)} 已被「AGY 侧栏目录树」占用，请先更换另一个组合键`,
+      shortcut: cur,
+      drawerShortcut: cur
+    };
+  }
+
+  const nextPreset = !nextEnabled ? 'off' : (ACCELERATOR_TO_PRESET[nextAccelerator] || 'cmd+shift+e');
+  const nextRaw = {
+    ...raw,
+    hotkeyPreset: nextPreset,
+    drawerPinned: typeof raw.drawerPinned === 'boolean' ? raw.drawerPinned : true,
+    drawerShortcutEnabled: nextEnabled,
+    drawerShortcutAccelerator: nextAccelerator,
+    shortcutScope: nextScope,
+    updatedAt: new Date().toISOString()
+  };
+  writeJsonFileAtomic(getSettingsPath(), nextRaw);
+  const nextShortcut = getDrawerShortcutConfig(platform);
+  return {
+    ok: true,
+    shortcut: nextShortcut,
+    drawerShortcut: nextShortcut,
+    auxShortcut: getAuxShortcutConfig(platform),
+    hotkeyPreset: nextShortcut.presetId
+  };
+}
+
+export function setAuxShortcutConfig(patch = {}, platform = process.platform) {
+  const raw = readJsonSafe(getSettingsPath()) || {};
+  const cur = getAuxShortcutConfig(platform);
+  const drawerCur = getDrawerShortcutConfig(platform);
+
+  let nextEnabled = cur.enabled;
+  let nextAccelerator = cur.accelerator;
+  let nextScope = cur.scope;
+
+  if (patch.reset === true || patch.auxShortcutReset === true) {
+    nextEnabled = true;
+    nextAccelerator = getDefaultAuxShortcut(platform, drawerCur.enabled ? drawerCur.accelerator : '');
+  } else {
+    const rawAcc = patch.accelerator ?? patch.auxAccelerator ?? patch.auxShortcutAccelerator;
+    if (rawAcc !== undefined) {
+      const parsed = normalizeShortcutSpec(rawAcc, platform);
+      if (!parsed.ok) {
+        return { ok: false, error: parsed.error, auxShortcut: cur };
+      }
+      if (parsed.disabled) {
+        nextEnabled = false;
+      } else {
+        nextAccelerator = parsed.accelerator;
+        if (typeof patch.enabled !== 'boolean' && typeof patch.auxShortcutEnabled !== 'boolean') {
+          nextEnabled = true;
+        }
+      }
+    }
+
+    const rawEnabled = typeof patch.enabled === 'boolean'
+      ? patch.enabled
+      : (typeof patch.auxShortcutEnabled === 'boolean' ? patch.auxShortcutEnabled : undefined);
+    if (typeof rawEnabled === 'boolean') {
+      nextEnabled = rawEnabled;
+    }
+
+    const rawScope = patch.scope ?? patch.shortcutScope;
+    if (rawScope !== undefined) {
+      const normScope = String(rawScope).trim().toLowerCase();
+      if (!SHORTCUT_SCOPES.includes(normScope)) {
+        return { ok: false, error: '无效的快捷键生效范围（仅支持 app 或 global）', auxShortcut: cur };
+      }
+      nextScope = normScope;
+    }
+  }
+
+  if (nextEnabled && drawerCur.enabled && nextAccelerator === drawerCur.accelerator) {
+    return {
+      ok: false,
+      error: `快捷键 ${formatShortcutDisplay(nextAccelerator, platform)} 已被「独立目录树抽屉」占用，请先更换另一个组合键`,
+      auxShortcut: cur
+    };
+  }
+
+  const nextRaw = {
+    ...raw,
+    drawerPinned: typeof raw.drawerPinned === 'boolean' ? raw.drawerPinned : true,
+    auxShortcutEnabled: nextEnabled,
+    auxShortcutAccelerator: nextAccelerator,
+    shortcutScope: nextScope,
+    updatedAt: new Date().toISOString()
+  };
+  writeJsonFileAtomic(getSettingsPath(), nextRaw);
+  return {
+    ok: true,
+    auxShortcut: getAuxShortcutConfig(platform),
+    drawerShortcut: getDrawerShortcutConfig(platform)
+  };
+}
+
+export function getShortcutSettings(platform = process.platform) {
+  const raw = readJsonSafe(getSettingsPath()) || {};
+  const drawerShortcut = getDrawerShortcutConfig(platform);
+  const auxShortcut = getAuxShortcutConfig(platform);
+  const rawPreset = String(raw.hotkeyPreset || '').toLowerCase();
+  const hotkeyPreset = !drawerShortcut.enabled
+    ? 'off'
+    : (ACCELERATOR_TO_PRESET[drawerShortcut.accelerator] || (VALID_PRESETS.has(rawPreset) ? rawPreset : 'custom'));
+  const drawerPinned = raw.drawerPinned !== undefined ? Boolean(raw.drawerPinned) : true;
+  return {
+    hotkeyPreset,
+    drawerPinned,
+    shortcut: drawerShortcut,
+    drawerShortcut,
+    auxShortcut
+  };
+}
+
+export function saveShortcutSettings(patch = {}, platform = process.platform) {
+  const raw = readJsonSafe(getSettingsPath()) || {};
+  const current = getShortcutSettings(platform);
   let nextPreset = current.hotkeyPreset;
+  let nextDrawerEnabled = current.drawerShortcut.enabled;
+  let nextDrawerAcc = current.drawerShortcut.accelerator;
+
   if (typeof patch.hotkeyPreset === 'string') {
     const candidate = patch.hotkeyPreset.trim().toLowerCase();
     if (!VALID_PRESETS.has(candidate)) {
@@ -156,11 +676,194 @@ export function saveShortcutSettings(patch = {}) {
       throw err;
     }
     nextPreset = candidate;
+    if (candidate === 'off') {
+      nextDrawerEnabled = false;
+    } else {
+      nextDrawerEnabled = true;
+      nextDrawerAcc = PRESET_TO_ACCELERATOR[candidate] || getDefaultDrawerShortcut(platform);
+      const auxExplicit = typeof raw.auxShortcutAccelerator === 'string' && raw.auxShortcutAccelerator.trim();
+      const auxCur = getAuxShortcutConfig(platform);
+      if (auxCur.enabled && auxCur.accelerator === nextDrawerAcc && auxExplicit) {
+        const err = new Error(`快捷键 ${formatShortcutDisplay(nextDrawerAcc, platform)} 已被「AGY 侧栏目录树」占用`);
+        err.status = 400;
+        throw err;
+      }
+    }
   }
+
   const nextPinned = typeof patch.drawerPinned === 'boolean' ? patch.drawerPinned : current.drawerPinned;
-  const next = { hotkeyPreset: nextPreset, drawerPinned: nextPinned };
+  const next = {
+    ...raw,
+    hotkeyPreset: nextPreset,
+    drawerPinned: nextPinned,
+    drawerShortcutEnabled: nextDrawerEnabled,
+    drawerShortcutAccelerator: nextDrawerAcc,
+    updatedAt: new Date().toISOString()
+  };
   writeJsonFileAtomic(getSettingsPath(), next);
+  return getShortcutSettings(platform);
+}
+
+export function getSharedAuxTriggerPath() {
+  const override = String(process.env.AGY_AUX_TRIGGER_PATH || '').trim();
+  if (override) return resolve(override);
+
+  const dirs = [
+    process.env.AGY_FINDER_DATA_DIR,
+    process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR
+  ].filter((v) => typeof v === 'string' && v.trim());
+
+  for (const rawDir of dirs) {
+    for (let d = resolve(rawDir); d !== dirname(d); d = dirname(d)) {
+      if (basename(d) === 'sidecar_data') {
+        return join(d, 'agy_aux_pane_trigger.json');
+      }
+    }
+    return join(resolve(rawDir), 'agy_aux_pane_trigger.json');
+  }
+  return join(getAppDataDir(), 'sidecar_data', 'agy_aux_pane_trigger.json');
+}
+
+export function readAuxPaneTrigger() {
+  const raw = readJsonSafe(getSharedAuxTriggerPath());
+  return {
+    seq: Number(raw?.seq || 0),
+    targetPlugin: typeof raw?.targetPlugin === 'string' ? raw.targetPlugin : '',
+    uri: typeof raw?.uri === 'string' ? raw.uri : '',
+    action: typeof raw?.action === 'string' ? raw.action : 'toggle',
+    convId: typeof raw?.convId === 'string' ? raw.convId : '',
+    revealPath: typeof raw?.revealPath === 'string' ? raw.revealPath : '',
+    at: Number(raw?.at || 0),
+    ackSeq: Number(raw?.ackSeq || 0),
+    ackAt: Number(raw?.ackAt || 0),
+    ackPlugin: typeof raw?.ackPlugin === 'string' ? raw.ackPlugin : '',
+    switchedSeq: Number(raw?.switchedSeq || 0),
+    activeConvId: typeof raw?.activeConvId === 'string' ? raw.activeConvId : ''
+  };
+}
+
+export function writeAuxPaneTrigger({ targetPlugin = 'agy-finder', uri = '', action = 'toggle', convId = '', revealPath = '' } = {}) {
+  const filePath = getSharedAuxTriggerPath();
+  const cur = readAuxPaneTrigger();
+  const hint = readActiveContextHint();
+  const resolvedActive = (typeof convId === 'string' && CONV_ID_RE.test(convId.trim()))
+    ? convId.trim()
+    : (cur.activeConvId || (CONV_ID_RE.test(String(hint.conversationId || '')) ? hint.conversationId : '') || '');
+  const next = {
+    seq: Math.max(0, Number(cur.seq || 0)) + 1,
+    targetPlugin: String(targetPlugin || 'agy-finder'),
+    uri: String(uri || ''),
+    action: String(action || 'toggle'),
+    convId: (typeof convId === 'string' && convId.trim()) ? convId.trim() : resolvedActive,
+    revealPath: typeof revealPath === 'string' ? revealPath : '',
+    at: Date.now(),
+    ackSeq: cur.ackSeq,
+    ackAt: cur.ackAt,
+    ackPlugin: cur.ackPlugin,
+    switchedSeq: 0,
+    activeConvId: resolvedActive
+  };
+  writeJsonFileAtomic(filePath, next);
   return next;
+}
+
+export function ackAuxPaneTrigger({ seq, plugin = 'agy-finder' } = {}) {
+  const targetSeq = Number(seq || 0);
+  const cur = readAuxPaneTrigger();
+  if (!targetSeq || targetSeq < cur.seq || cur.ackSeq >= targetSeq) {
+    return { ok: true, claimed: false, trigger: cur };
+  }
+  const next = {
+    ...cur,
+    ackSeq: targetSeq,
+    ackAt: Date.now(),
+    ackPlugin: String(plugin || 'agy-finder')
+  };
+  writeJsonFileAtomic(getSharedAuxTriggerPath(), next);
+  return { ok: true, claimed: true, trigger: next };
+}
+
+export function markAuxPaneSwitched({ seq } = {}) {
+  const targetSeq = Number(seq || 0);
+  const cur = readAuxPaneTrigger();
+  if (!targetSeq || targetSeq <= cur.switchedSeq) {
+    return { ok: true, claimed: false, trigger: cur };
+  }
+  const next = {
+    ...cur,
+    switchedSeq: targetSeq
+  };
+  writeJsonFileAtomic(getSharedAuxTriggerPath(), next);
+  return { ok: true, claimed: true, trigger: next };
+}
+
+export function recordAuxActiveConversation({ convId = '' } = {}) {
+  const cleanId = String(convId || '').trim();
+  if (!CONV_ID_RE.test(cleanId)) {
+    return { ok: false, activeConvId: '' };
+  }
+  const filePath = getSharedAuxTriggerPath();
+  const raw = readJsonSafe(filePath);
+  const cur = readAuxPaneTrigger();
+  if (raw && cur.activeConvId === cleanId) {
+    return { ok: true, activeConvId: cleanId };
+  }
+  writeJsonFileAtomic(filePath, {
+    ...cur,
+    activeConvId: cleanId
+  });
+  return { ok: true, activeConvId: cleanId };
+}
+
+export function waitForAuxPaneTrigger({ since = 0, timeoutMs = 8000 } = {}) {
+  const sinceSeq = Math.max(0, Number(since || 0));
+  const clampedMs = Math.max(0, Math.min(9500, Number(timeoutMs ?? 8000) || 0));
+  const initial = readAuxPaneTrigger();
+  if (initial.seq > sinceSeq || clampedMs === 0) {
+    return Promise.resolve({ ok: true, changed: initial.seq > sinceSeq, trigger: initial });
+  }
+
+  const filePath = getSharedAuxTriggerPath();
+  const dir = dirname(filePath);
+  const name = basename(filePath);
+  try { mkdirSync(dir, { recursive: true }); } catch {}
+
+  return new Promise((resolvePromise) => {
+    let settled = false;
+    let watcher = null;
+    let pollTimer = null;
+    let timeoutTimer = null;
+
+    const finish = (trigger) => {
+      if (settled) return;
+      settled = true;
+      try { watcher?.close(); } catch {}
+      if (pollTimer) clearInterval(pollTimer);
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      resolvePromise({ ok: true, changed: trigger.seq > sinceSeq, trigger });
+    };
+
+    const checkNow = () => {
+      const cur = readAuxPaneTrigger();
+      if (cur.seq > sinceSeq) finish(cur);
+    };
+
+    try {
+      watcher = watch(dir, (_ev, filename) => {
+        if (!filename || String(filename) === name) {
+          checkNow();
+        }
+      });
+      watcher.on('error', () => {});
+    } catch {}
+
+    pollTimer = setInterval(checkNow, 90);
+    pollTimer.unref?.();
+    timeoutTimer = setTimeout(() => {
+      finish(readAuxPaneTrigger());
+    }, clampedMs);
+    timeoutTimer.unref?.();
+  });
 }
 
 export function readActiveContextHint() {
@@ -233,9 +936,11 @@ async function terminateProcessAndWait(pid, timeoutMs = 900) {
 }
 
 export function getDrawerStatus(platform = process.platform) {
-  const settings = getShortcutSettings();
+  const settings = getShortcutSettings(platform);
   const st = readDrawerState();
   const nativeHotkeySupported = platform === 'darwin';
+  const drawerShortcut = settings.drawerShortcut;
+  const auxShortcut = settings.auxShortcut;
   if (!st) {
     return {
       ok: true,
@@ -244,6 +949,9 @@ export function getDrawerStatus(platform = process.platform) {
       windowVisible: false,
       pinned: settings.drawerPinned,
       hotkeyPreset: settings.hotkeyPreset,
+      shortcut: drawerShortcut,
+      drawerShortcut,
+      auxShortcut,
       nativeHotkeySupported,
       mode: null
     };
@@ -258,7 +966,10 @@ export function getDrawerStatus(platform = process.platform) {
     windowVisible,
     pid: st.pid,
     pinned: st.pinned !== undefined ? Boolean(st.pinned) : settings.drawerPinned,
-    hotkeyPreset: VALID_PRESETS.has(st.hotkeyPreset) ? st.hotkeyPreset : settings.hotkeyPreset,
+    hotkeyPreset: (VALID_PRESETS.has(st.hotkeyPreset) || st.hotkeyPreset === 'custom') ? st.hotkeyPreset : settings.hotkeyPreset,
+    shortcut: drawerShortcut,
+    drawerShortcut,
+    auxShortcut,
     nativeHotkeySupported,
     mode: st.mode || (nativeHotkeySupported ? 'native-macos' : 'app-window'),
     cmdSeq: Number(st.cmdSeq || 0),
@@ -333,7 +1044,54 @@ function diagnoseMacCompileFailure() {
   return '未能启动 macOS 原生抽屉守护进程，请确认已安装 Xcode Command Line Tools（xcode-select --install）后重试。';
 }
 
-async function spawnDaemon({ pinned = true, hiddenWindow = false, hotkeyPreset = 'cmd+shift+e', revealPath = '' } = {}) {
+function buildShortcutCliArgs(drawerShortcut, auxShortcut) {
+  const args = [];
+  if (drawerShortcut?.enabled && drawerShortcut?.macCarbon) {
+    args.push(
+      '--drawer-keycode', String(drawerShortcut.macCarbon.keyCode),
+      '--drawer-mods', String(drawerShortcut.macCarbon.modifiers),
+      '--drawer-label', String(drawerShortcut.display || ''),
+      '--drawer-acc', String(drawerShortcut.accelerator || '')
+    );
+  } else {
+    args.push('--no-drawer-shortcut');
+  }
+  if (auxShortcut?.enabled && auxShortcut?.macCarbon) {
+    args.push(
+      '--aux-keycode', String(auxShortcut.macCarbon.keyCode),
+      '--aux-mods', String(auxShortcut.macCarbon.modifiers),
+      '--aux-label', String(auxShortcut.display || ''),
+      '--aux-acc', String(auxShortcut.accelerator || '')
+    );
+  } else {
+    args.push('--no-aux-shortcut');
+  }
+  args.push('--scope', String(drawerShortcut?.scope || auxShortcut?.scope || 'app'));
+  return args;
+}
+
+function buildShortcutDaemonPayload(cfg) {
+  return {
+    enabled: Boolean(cfg?.enabled && cfg?.macCarbon),
+    keyCode: cfg?.macCarbon?.keyCode ?? 0,
+    carbonModifiers: cfg?.macCarbon?.modifiers ?? 0,
+    accelerator: String(cfg?.accelerator || ''),
+    displayLabel: String(cfg?.display || ''),
+    scope: String(cfg?.scope || 'app')
+  };
+}
+
+async function spawnDaemon({
+  pinned = true,
+  hiddenWindow = false,
+  hotkeyPreset = 'cmd+shift+e',
+  revealPath = '',
+  drawerShortcut = null,
+  auxShortcut = null
+} = {}) {
+  const settings = getShortcutSettings();
+  const effDrawer = drawerShortcut || settings.drawerShortcut;
+  const effAux = auxShortcut || settings.auxShortcut;
   const lockPath = getSpawnLockPath();
   if (existsSync(lockPath)) {
     try {
@@ -358,7 +1116,13 @@ async function spawnDaemon({ pinned = true, hiddenWindow = false, hotkeyPreset =
   } catch {}
 
   try {
-    const daemonArgs = [fileURLToPath(import.meta.url), '--daemon', '--preset', hotkeyPreset];
+    const daemonArgs = [
+      fileURLToPath(import.meta.url),
+      '--daemon',
+      '--preset',
+      hotkeyPreset || effDrawer.presetId || 'cmd+shift+e',
+      ...buildShortcutCliArgs(effDrawer, effAux)
+    ];
     if (pinned === false) daemonArgs.push('--unpinned');
     if (hiddenWindow) daemonArgs.push('--hidden-window');
     if (revealPath) daemonArgs.push('--reveal', revealPath);
@@ -402,31 +1166,134 @@ export async function controlDrawer(options = {}, deps = {}) {
     recordActiveContextHint({ lastRevealPath: String(options.revealPath) });
   }
 
+  if (action === 'aux' || action === 'open-aux' || action === 'toggle-aux') {
+    const trigger = writeAuxPaneTrigger({
+      targetPlugin: 'agy-finder',
+      uri: 'sidecar://agy-finder/tree/',
+      action: action === 'open-aux' ? 'open' : 'toggle',
+      convId: String(options.convId || ''),
+      revealPath: String(options.revealPath || '')
+    });
+    const settings = getShortcutSettings(platform);
+    return {
+      ...getDrawerStatus(platform),
+      trigger,
+      message: `已发送切换 AGY 右侧辅助栏「目录树」信号（快捷键 ${settings.auxShortcut.display}）`
+    };
+  }
+
+  if (action === 'set-drawer-shortcut' || action === 'set-aux-shortcut') {
+    const isAux = action === 'set-aux-shortcut';
+    const res = isAux ? setAuxShortcutConfig(options, platform) : setDrawerShortcutConfig(options, platform);
+    if (!res.ok) {
+      return {
+        ...getDrawerStatus(platform),
+        ok: false,
+        error: res.error,
+        shortcut: res.shortcut,
+        drawerShortcut: res.drawerShortcut,
+        auxShortcut: res.auxShortcut
+      };
+    }
+    const nextDrawer = res.drawerShortcut;
+    const nextAux = res.auxShortcut;
+    const shouldStayResident = nextDrawer.enabled || nextAux.enabled;
+    const label = isAux ? nextAux.display : nextDrawer.display;
+    const enabled = isAux ? nextAux.enabled : nextDrawer.enabled;
+    const targetDesc = isAux ? 'AGY 右侧辅助栏目录树' : '独立目录树抽屉';
+
+    if (disableDrawer) {
+      return {
+        ...getDrawerStatus(platform),
+        hotkeyPreset: nextDrawer.presetId,
+        shortcut: nextDrawer,
+        drawerShortcut: nextDrawer,
+        auxShortcut: nextAux,
+        message: enabled ? `已更新${targetDesc}快捷键为 ${label}` : `已关闭${targetDesc}快捷键`
+      };
+    }
+
+    let current = readDrawerState();
+    if (current && !isDaemonStateCurrent(current)) {
+      await terminateProcessAndWait(current.pid);
+      current = null;
+    }
+
+    if (current) {
+      if (!shouldStayResident && !current.windowVisible) {
+        await terminateProcessAndWait(current.pid);
+      } else {
+        await sendDaemonCommand(current, {
+          cmd: isAux ? 'setAuxShortcut' : 'setDrawerShortcut',
+          shortcut: isAux ? buildShortcutDaemonPayload(nextAux) : buildShortcutDaemonPayload(nextDrawer),
+          hotkeyPreset: nextDrawer.presetId
+        });
+      }
+    } else if (platform === 'darwin' && shouldStayResident) {
+      await spawnDaemon({
+        pinned: getShortcutSettings(platform).drawerPinned,
+        hiddenWindow: true,
+        hotkeyPreset: nextDrawer.presetId,
+        drawerShortcut: nextDrawer,
+        auxShortcut: nextAux
+      });
+    }
+
+    return {
+      ...getDrawerStatus(platform),
+      hotkeyPreset: nextDrawer.presetId,
+      shortcut: nextDrawer,
+      drawerShortcut: nextDrawer,
+      auxShortcut: nextAux,
+      message: enabled
+        ? `已生效：按 ${label} 即可切换${targetDesc}`
+        : `已关闭${targetDesc}快捷键`
+    };
+  }
+
   if (action === 'set-hotkey') {
-    const next = saveShortcutSettings({ hotkeyPreset: String(options.hotkeyPreset || '') });
+    const next = saveShortcutSettings({ hotkeyPreset: String(options.hotkeyPreset || '') }, platform);
+    const shouldStayResident = next.drawerShortcut.enabled || next.auxShortcut.enabled;
     if (disableDrawer) {
       return {
         ...getDrawerStatus(platform),
         hotkeyPreset: next.hotkeyPreset,
-        message: next.hotkeyPreset === 'off' ? '已关闭独立抽屉快捷键' : `已更新抽屉快捷键为 ${next.hotkeyPreset}`
+        shortcut: next.drawerShortcut,
+        drawerShortcut: next.drawerShortcut,
+        auxShortcut: next.auxShortcut,
+        message: next.hotkeyPreset === 'off' ? '已关闭独立抽屉快捷键' : `已更新抽屉快捷键为 ${next.drawerShortcut.display}`
       };
     }
     const current = readDrawerState();
     if (current) {
-      const st = await sendDaemonCommand(current, { cmd: 'setHotkey', hotkeyPreset: next.hotkeyPreset });
+      if (!shouldStayResident && !current.windowVisible) {
+        await terminateProcessAndWait(current.pid);
+        return {
+          ...getDrawerStatus(platform),
+          hotkeyPreset: next.hotkeyPreset,
+          message: '已关闭所有快捷键'
+        };
+      }
+      const st = await sendDaemonCommand(current, {
+        cmd: 'setDrawerShortcut',
+        shortcut: buildShortcutDaemonPayload(next.drawerShortcut),
+        hotkeyPreset: next.hotkeyPreset
+      });
       return {
         ...st,
         hotkeyPreset: next.hotkeyPreset,
         message: next.hotkeyPreset === 'off'
-          ? '已关闭全局应用内快捷键（仍可从右侧抽屉按钮打开）'
-          : `已生效：在 Antigravity 内按快捷键即可秒开/收回目录树`
+          ? '已关闭独立抽屉快捷键（仍可从右侧抽屉按钮打开）'
+          : `已生效：在 Antigravity 内按 ${next.drawerShortcut.display} 即可秒开/收回目录树`
       };
     }
-    if (platform === 'darwin' && next.hotkeyPreset !== 'off') {
+    if (platform === 'darwin' && shouldStayResident) {
       const spawned = await spawnDaemon({
         pinned: next.drawerPinned,
         hiddenWindow: true,
-        hotkeyPreset: next.hotkeyPreset
+        hotkeyPreset: next.hotkeyPreset,
+        drawerShortcut: next.drawerShortcut,
+        auxShortcut: next.auxShortcut
       });
       if (spawned) {
         return {
@@ -438,13 +1305,13 @@ export async function controlDrawer(options = {}, deps = {}) {
     return {
       ...getDrawerStatus(platform),
       hotkeyPreset: next.hotkeyPreset,
-      message: `已保存快捷键预设：${next.hotkeyPreset}`
+      message: `已保存快捷键预设：${next.drawerShortcut.display}`
     };
   }
 
   if (action === 'set-pinned') {
-    const nextPinned = typeof options.pinned === 'boolean' ? options.pinned : !getShortcutSettings().drawerPinned;
-    saveShortcutSettings({ drawerPinned: nextPinned });
+    const nextPinned = typeof options.pinned === 'boolean' ? options.pinned : !getShortcutSettings(platform).drawerPinned;
+    saveShortcutSettings({ drawerPinned: nextPinned }, platform);
     const current = readDrawerState();
     if (current && !disableDrawer) {
       return sendDaemonCommand(current, { cmd: 'setPinned', pinned: nextPinned });
@@ -474,20 +1341,26 @@ export async function controlDrawer(options = {}, deps = {}) {
   }
 
   if (action === 'ensure-hotkey') {
-    const settings = getShortcutSettings();
-    if (platform !== 'darwin' || settings.hotkeyPreset === 'off') {
+    const settings = getShortcutSettings(platform);
+    const shouldStayResident = settings.drawerShortcut.enabled || settings.auxShortcut.enabled;
+    if (platform !== 'darwin' || !shouldStayResident) {
       return getDrawerStatus(platform);
     }
     if (current) {
-      if (current.hotkeyPreset !== settings.hotkeyPreset) {
-        return sendDaemonCommand(current, { cmd: 'setHotkey', hotkeyPreset: settings.hotkeyPreset });
-      }
+      await sendDaemonCommand(current, {
+        cmd: 'syncShortcuts',
+        hotkeyPreset: settings.hotkeyPreset,
+        drawerShortcut: buildShortcutDaemonPayload(settings.drawerShortcut),
+        auxShortcut: buildShortcutDaemonPayload(settings.auxShortcut)
+      });
       return getDrawerStatus(platform);
     }
     const st = await spawnDaemon({
       pinned: settings.drawerPinned,
       hiddenWindow: true,
-      hotkeyPreset: settings.hotkeyPreset
+      hotkeyPreset: settings.hotkeyPreset,
+      drawerShortcut: settings.drawerShortcut,
+      auxShortcut: settings.auxShortcut
     });
     return st || getDrawerStatus(platform);
   }
@@ -503,8 +1376,9 @@ export async function controlDrawer(options = {}, deps = {}) {
         message: '独立目录树抽屉当前已处于关闭状态'
       };
     }
-    const settings = getShortcutSettings();
-    if (current.mode === 'native-macos' && settings.hotkeyPreset !== 'off') {
+    const settings = getShortcutSettings(platform);
+    const shouldStayResident = settings.drawerShortcut.enabled || settings.auxShortcut.enabled;
+    if (current.mode === 'native-macos' && shouldStayResident) {
       const st = await sendDaemonCommand(current, { cmd: 'hideWindow' });
       return {
         ...st,
@@ -524,7 +1398,7 @@ export async function controlDrawer(options = {}, deps = {}) {
   }
 
   // Open or reveal in drawer
-  const settings = getShortcutSettings();
+  const settings = getShortcutSettings(platform);
   const revealPath = String(options.revealPath || '');
   if (current) {
     const st = await sendDaemonCommand(current, { cmd: 'showWindow', revealPath });
@@ -539,6 +1413,8 @@ export async function controlDrawer(options = {}, deps = {}) {
     pinned: typeof options.pinned === 'boolean' ? options.pinned : settings.drawerPinned,
     hiddenWindow: false,
     hotkeyPreset: settings.hotkeyPreset,
+    drawerShortcut: settings.drawerShortcut,
+    auxShortcut: settings.auxShortcut,
     revealPath
   });
 
@@ -637,7 +1513,12 @@ function resolveDaemonRoots(data = {}, hint = {}) {
   return { roots, convId };
 }
 
-function buildBundledDrawerHtml({ initialPinned, initialHotkeyPreset }) {
+function buildBundledDrawerHtml({
+  initialPinned,
+  initialHotkeyPreset,
+  initialDrawerShortcut = null,
+  initialAuxShortcut = null
+}) {
   let html = readFileSync(join(__dirname, 'index.html'), 'utf8');
   const css = readFileSync(join(__dirname, 'styles.css'), 'utf8').replace(/<\/style/gi, '<\\/style');
   const js = readFileSync(join(__dirname, 'app.js'), 'utf8').replace(/<\/script/gi, '<\\/script');
@@ -656,12 +1537,18 @@ function buildBundledDrawerHtml({ initialPinned, initialHotkeyPreset }) {
     () => `<style id="af-inline-styles">\n${css}\n</style>`
   );
 
+  const settingsFallback = (!initialDrawerShortcut || !initialAuxShortcut) ? getShortcutSettings() : null;
+  const effDrawer = initialDrawerShortcut || settingsFallback.drawerShortcut;
+  const effAux = initialAuxShortcut || settingsFallback.auxShortcut;
+
   const bridgeScript = `
 <script>
 (() => {
   window.__AF_DRAWER_MODE__ = true;
   window.__AF_DRAWER_PINNED__ = ${initialPinned ? 'true' : 'false'};
   window.__AF_HOTKEY_PRESET__ = ${JSON.stringify(initialHotkeyPreset || 'cmd+shift+e')};
+  window.__AF_DRAWER_SHORTCUT__ = ${JSON.stringify(effDrawer)};
+  window.__AF_AUX_SHORTCUT__ = ${JSON.stringify(effAux)};
   let seq = 1;
   const pending = new Map();
 
@@ -691,6 +1578,11 @@ function buildBundledDrawerHtml({ initialPinned, initialHotkeyPreset }) {
     closeDrawerWindow: () => {
       window.webkit?.messageHandlers?.afBridge?.postMessage(
         JSON.stringify({ kind: "closeWindow" })
+      );
+    },
+    setShortcutRecording: (recording) => {
+      window.webkit?.messageHandlers?.afBridge?.postMessage(
+        JSON.stringify({ kind: "setRecording", recording: Boolean(recording) })
       );
     },
     fetch: (path, opts = {}) => new Promise((resolvePromise, rejectPromise) => {
@@ -780,6 +1672,9 @@ async function dispatchDrawerRpc(rawPath, method, rawBody, stateObj, hooks = {})
       platform: process.platform,
       settings,
       presets: HOTKEY_PRESETS,
+      shortcut: settings.drawerShortcut,
+      drawerShortcut: settings.drawerShortcut,
+      auxShortcut: settings.auxShortcut,
       drawer: {
         ok: true,
         daemonRunning: true,
@@ -787,6 +1682,9 @@ async function dispatchDrawerRpc(rawPath, method, rawBody, stateObj, hooks = {})
         windowVisible: Boolean(stateObj.windowVisible),
         pinned: Boolean(stateObj.pinned),
         hotkeyPreset: stateObj.hotkeyPreset || settings.hotkeyPreset,
+        shortcut: settings.drawerShortcut,
+        drawerShortcut: settings.drawerShortcut,
+        auxShortcut: settings.auxShortcut,
         nativeHotkeySupported: process.platform === 'darwin',
         mode: stateObj.mode
       },
@@ -802,9 +1700,73 @@ async function dispatchDrawerRpc(rawPath, method, rawBody, stateObj, hooks = {})
     if (act === 'set-hotkey') {
       const next = saveShortcutSettings({ hotkeyPreset: String(data.hotkeyPreset || '') });
       stateObj.hotkeyPreset = next.hotkeyPreset;
-      hooks.onSetHotkey?.(next.hotkeyPreset);
+      hooks.onSetDrawerShortcut?.(next.drawerShortcut);
       writeDrawerState(stateObj);
-      return { ok: true, settings: next, hotkeyPreset: next.hotkeyPreset };
+      return {
+        ok: true,
+        settings: next,
+        hotkeyPreset: next.hotkeyPreset,
+        shortcut: next.drawerShortcut,
+        drawerShortcut: next.drawerShortcut,
+        auxShortcut: next.auxShortcut
+      };
+    }
+    if (act === 'set-drawer-shortcut') {
+      const res = setDrawerShortcutConfig(data);
+      if (!res.ok) {
+        return {
+          ok: false,
+          error: res.error,
+          shortcut: res.drawerShortcut,
+          drawerShortcut: res.drawerShortcut
+        };
+      }
+      stateObj.hotkeyPreset = res.hotkeyPreset;
+      hooks.onSetDrawerShortcut?.(res.drawerShortcut);
+      hooks.onSetAuxShortcut?.(res.auxShortcut);
+      writeDrawerState(stateObj);
+      return {
+        ok: true,
+        hotkeyPreset: res.hotkeyPreset,
+        shortcut: res.drawerShortcut,
+        drawerShortcut: res.drawerShortcut,
+        auxShortcut: res.auxShortcut,
+        message: res.drawerShortcut.enabled
+          ? `独立目录树抽屉快捷键已设为 ${res.drawerShortcut.display}`
+          : '已关闭独立目录树抽屉快捷键'
+      };
+    }
+    if (act === 'set-aux-shortcut') {
+      const res = setAuxShortcutConfig(data);
+      if (!res.ok) {
+        return {
+          ok: false,
+          error: res.error,
+          auxShortcut: res.auxShortcut
+        };
+      }
+      hooks.onSetDrawerShortcut?.(res.drawerShortcut);
+      hooks.onSetAuxShortcut?.(res.auxShortcut);
+      writeDrawerState(stateObj);
+      return {
+        ok: true,
+        shortcut: res.drawerShortcut,
+        drawerShortcut: res.drawerShortcut,
+        auxShortcut: res.auxShortcut,
+        message: res.auxShortcut.enabled
+          ? `AGY 侧栏目录树快捷键已设为 ${res.auxShortcut.display}`
+          : '已关闭 AGY 侧栏目录树快捷键'
+      };
+    }
+    if (act === 'trigger-aux' || act === 'aux' || act === 'toggle-aux') {
+      const trigger = writeAuxPaneTrigger({
+        targetPlugin: 'agy-finder',
+        uri: 'sidecar://agy-finder/tree/',
+        action: String(data.auxAction || 'toggle'),
+        convId: String(data.convId || ''),
+        revealPath: String(data.revealPath || '')
+      });
+      return { ok: true, trigger };
     }
     if (act === 'set-pinned') {
       const nextPinned = typeof data.pinned === 'boolean' ? data.pinned : !stateObj.pinned;
@@ -825,6 +1787,36 @@ async function dispatchDrawerRpc(rawPath, method, rawBody, stateObj, hooks = {})
     if (act === 'toggle') {
       hooks.onToggle?.();
       return { ok: true, windowVisible: Boolean(stateObj.windowVisible) };
+    }
+  }
+  if (u.pathname === '/api/aux-pane-trigger') {
+    if (method === 'GET') {
+      const since = Number(data.since || 0);
+      const timeoutMs = Number(data.waitMs ?? data.timeoutMs ?? 8000);
+      return waitForAuxPaneTrigger({ since, timeoutMs });
+    }
+    if (method === 'POST') {
+      const act = String(data.action || 'trigger').toLowerCase();
+      if (act === 'ack') {
+        return ackAuxPaneTrigger({
+          seq: Number(data.seq || 0),
+          plugin: String(data.plugin || 'agy-finder')
+        });
+      }
+      if (act === 'switched') {
+        return markAuxPaneSwitched({ seq: Number(data.seq || 0) });
+      }
+      if (act === 'hello') {
+        return recordAuxActiveConversation({ convId: String(data.convId || '') });
+      }
+      const trigger = writeAuxPaneTrigger({
+        targetPlugin: String(data.targetPlugin || 'agy-finder'),
+        uri: String(data.uri || 'sidecar://agy-finder/tree/'),
+        action: String(data.auxAction || act || 'toggle'),
+        convId: String(data.convId || ''),
+        revealPath: String(data.revealPath || '')
+      });
+      return { ok: true, trigger };
     }
   }
 
@@ -868,7 +1860,17 @@ function ensureCompiledMacBinary() {
   }
 }
 
-async function startMacNativeDaemon({ initialPinned, initialVisible, initialPreset, initialRevealPath }) {
+async function startMacNativeDaemon({
+  initialPinned,
+  initialVisible,
+  initialPreset,
+  initialRevealPath,
+  initialDrawerShortcut = null,
+  initialAuxShortcut = null
+}) {
+  const settings = getShortcutSettings();
+  const effDrawer = initialDrawerShortcut || settings.drawerShortcut;
+  const effAux = initialAuxShortcut || settings.auxShortcut;
   const binPath = ensureCompiledMacBinary();
   if (!binPath) {
     if (initialVisible) {
@@ -886,12 +1888,14 @@ async function startMacNativeDaemon({ initialPinned, initialVisible, initialPres
     pid: process.pid,
     pinned: initialPinned,
     hotkeyPreset: initialPreset,
+    drawerShortcut: effDrawer,
+    auxShortcut: effAux,
     mode: 'native-macos',
     cmdSeq: 0,
     startedAt: new Date().toISOString()
   };
 
-  const args = ['--preset', initialPreset];
+  const args = ['--preset', initialPreset, ...buildShortcutCliArgs(effDrawer, effAux)];
   if (!initialPinned) args.push('--unpinned');
   if (!initialVisible) args.push('--hidden-window');
 
@@ -905,6 +1909,14 @@ async function startMacNativeDaemon({ initialPinned, initialVisible, initialPres
 
   const hooks = {
     onSetHotkey: (preset) => sendToChild({ type: 'setHotkey', hotkeyPreset: preset }),
+    onSetDrawerShortcut: (cfg) => {
+      stateObj.drawerShortcut = cfg;
+      sendToChild({ type: 'setDrawerShortcut', ...buildShortcutDaemonPayload(cfg) });
+    },
+    onSetAuxShortcut: (cfg) => {
+      stateObj.auxShortcut = cfg;
+      sendToChild({ type: 'setAuxShortcut', ...buildShortcutDaemonPayload(cfg) });
+    },
     onSetPinned: (p) => sendToChild({ type: 'setPinned', pinned: p }),
     onHide: () => sendToChild({ type: 'hideWindow' }),
     onShow: (rp) => sendToChild({ type: 'showWindow', revealPath: rp || '' }),
@@ -922,9 +1934,12 @@ async function startMacNativeDaemon({ initialPinned, initialVisible, initialPres
     }
 
     if (msg.type === 'ready') {
+      const latest = getShortcutSettings();
       const html = buildBundledDrawerHtml({
         initialPinned: stateObj.pinned,
-        initialHotkeyPreset: stateObj.hotkeyPreset
+        initialHotkeyPreset: stateObj.hotkeyPreset,
+        initialDrawerShortcut: latest.drawerShortcut,
+        initialAuxShortcut: latest.auxShortcut
       });
       sendToChild({ type: 'loadHtml', html });
       if (initialVisible && initialRevealPath) {
@@ -952,6 +1967,26 @@ async function startMacNativeDaemon({ initialPinned, initialVisible, initialPres
       stateObj.hotkeyPreset = String(msg.hotkeyPreset || 'cmd+shift+e');
       saveShortcutSettings({ hotkeyPreset: stateObj.hotkeyPreset });
       writeDrawerState(stateObj);
+      return;
+    }
+
+    if (msg.type === 'auxHotkeyTriggered') {
+      const latest = getShortcutSettings();
+      const trigger = writeAuxPaneTrigger({
+        targetPlugin: 'agy-finder',
+        uri: 'sidecar://agy-finder/tree/',
+        action: 'toggle'
+      });
+      const checkTimer = setTimeout(() => {
+        const cur = readAuxPaneTrigger();
+        if (cur.seq === trigger.seq && cur.ackSeq < trigger.seq) {
+          sendToChild({
+            type: 'showHud',
+            message: `请先在 Antigravity 主窗口打开对话，再按 ${latest.auxShortcut.display} 打开目录树`
+          });
+        }
+      }, 420);
+      checkTimer.unref?.();
       return;
     }
 
@@ -989,6 +2024,20 @@ async function startMacNativeDaemon({ initialPinned, initialVisible, initialPres
     } else if (cmdObj.cmd === 'setHotkey' && cmdObj.hotkeyPreset) {
       stateObj.hotkeyPreset = String(cmdObj.hotkeyPreset);
       sendToChild({ type: 'setHotkey', hotkeyPreset: stateObj.hotkeyPreset });
+    } else if (cmdObj.cmd === 'setDrawerShortcut' && cmdObj.shortcut) {
+      if (cmdObj.hotkeyPreset) stateObj.hotkeyPreset = String(cmdObj.hotkeyPreset);
+      stateObj.drawerShortcut = getShortcutSettings().drawerShortcut;
+      sendToChild({ type: 'setDrawerShortcut', ...cmdObj.shortcut });
+    } else if (cmdObj.cmd === 'setAuxShortcut' && cmdObj.shortcut) {
+      stateObj.auxShortcut = getShortcutSettings().auxShortcut;
+      sendToChild({ type: 'setAuxShortcut', ...cmdObj.shortcut });
+    } else if (cmdObj.cmd === 'syncShortcuts') {
+      if (cmdObj.hotkeyPreset) stateObj.hotkeyPreset = String(cmdObj.hotkeyPreset);
+      const latest = getShortcutSettings();
+      stateObj.drawerShortcut = latest.drawerShortcut;
+      stateObj.auxShortcut = latest.auxShortcut;
+      if (cmdObj.drawerShortcut) sendToChild({ type: 'setDrawerShortcut', ...cmdObj.drawerShortcut });
+      if (cmdObj.auxShortcut) sendToChild({ type: 'setAuxShortcut', ...cmdObj.auxShortcut });
     } else if (cmdObj.cmd === 'setPinned' && typeof cmdObj.pinned === 'boolean') {
       stateObj.pinned = cmdObj.pinned;
       sendToChild({ type: 'setPinned', pinned: stateObj.pinned });
@@ -1215,7 +2264,14 @@ if (process.argv.includes('--daemon')) {
   const initialRevealPath = rIdx >= 0 && process.argv[rIdx + 1] ? process.argv[rIdx + 1] : '';
 
   if (process.platform === 'darwin') {
-    startMacNativeDaemon({ initialPinned, initialVisible, initialPreset, initialRevealPath });
+    startMacNativeDaemon({
+      initialPinned,
+      initialVisible,
+      initialPreset,
+      initialRevealPath,
+      initialDrawerShortcut: settings.drawerShortcut,
+      initialAuxShortcut: settings.auxShortcut
+    });
   } else {
     startFallbackAppWindowDaemon({ initialPinned, initialPreset, initialRevealPath });
   }

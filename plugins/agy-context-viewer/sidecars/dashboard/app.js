@@ -93,7 +93,23 @@
         nativeGlobalSupported: mac
       };
     })(),
+    auxShortcut: window.__CV_AUX_SHORTCUT_INIT__ || (() => {
+      const mac = /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent || '');
+      const defAcc = mac ? 'Ctrl+Alt+K' : 'Ctrl+Alt+Shift+K';
+      const defDisp = mac ? '⌃⌥K' : 'Ctrl+Alt+Shift+K';
+      return {
+        enabled: true,
+        accelerator: defAcc,
+        display: defDisp,
+        defaultAccelerator: defAcc,
+        defaultDisplay: defDisp,
+        isDefault: true,
+        scope: 'app',
+        nativeGlobalSupported: mac
+      };
+    })(),
     recordingShortcut: false,
+    recordingAuxShortcut: false,
     hostHidden: Boolean(window.__CV_INITIAL_HIDDEN__),
     floatRunning: Boolean(window.__CV_FLOAT_MODE__) && !Boolean(window.__CV_INITIAL_HIDDEN__),
     floatPinned: Boolean(window.__CV_FLOAT_PINNED__ ?? true),
@@ -2277,7 +2293,7 @@
       $('btn-palette')?.setAttribute('aria-expanded', String(willOpen));
     });
     $('btn-close-palette')?.addEventListener('click', () => {
-      if (state.recordingShortcut) stopShortcutRecording();
+      if (state.recordingShortcut || state.recordingAuxShortcut) stopAllShortcutRecording();
       drawer?.classList.add('hidden');
       $('btn-palette')?.setAttribute('aria-expanded', 'false');
     });
@@ -2344,47 +2360,68 @@
     });
 
     $('btn-toggle-shortcut')?.addEventListener('click', () => {
-      if (state.recordingShortcut) stopShortcutRecording();
+      if (state.recordingShortcut || state.recordingAuxShortcut) stopAllShortcutRecording();
       applyShortcutPatch({ enabled: !Boolean(state.shortcut?.enabled) });
     });
 
     $('btn-reset-shortcut')?.addEventListener('click', () => {
-      if (state.recordingShortcut) stopShortcutRecording();
+      if (state.recordingShortcut || state.recordingAuxShortcut) stopAllShortcutRecording();
       applyShortcutPatch({ reset: true });
+    });
+
+    $('btn-record-aux-shortcut')?.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      if (state.recordingAuxShortcut) {
+        stopAuxShortcutRecording();
+      } else {
+        startAuxShortcutRecording();
+      }
+    });
+
+    $('btn-toggle-aux-shortcut')?.addEventListener('click', () => {
+      if (state.recordingShortcut || state.recordingAuxShortcut) stopAllShortcutRecording();
+      applyAuxShortcutPatch({ enabled: !Boolean(state.auxShortcut?.enabled) });
+    });
+
+    $('btn-reset-aux-shortcut')?.addEventListener('click', () => {
+      if (state.recordingShortcut || state.recordingAuxShortcut) stopAllShortcutRecording();
+      applyAuxShortcutPatch({ reset: true });
     });
 
     document.querySelectorAll('#shortcut-scope-seg .seg-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
-        if (state.recordingShortcut) stopShortcutRecording();
+        if (state.recordingShortcut || state.recordingAuxShortcut) stopAllShortcutRecording();
         const nextScope = btn.dataset.shortcutScope || 'app';
         applyShortcutPatch({ scope: nextScope });
       });
     });
 
     document.addEventListener('pointerdown', (ev) => {
-      if (!state.recordingShortcut) return;
+      if (!state.recordingShortcut && !state.recordingAuxShortcut) return;
       const recBtn = $('btn-record-shortcut');
-      if (recBtn && !recBtn.contains(ev.target)) {
-        stopShortcutRecording();
+      const auxBtn = $('btn-record-aux-shortcut');
+      if ((!recBtn || !recBtn.contains(ev.target)) && (!auxBtn || !auxBtn.contains(ev.target))) {
+        stopAllShortcutRecording();
       }
     });
 
     window.addEventListener('blur', () => {
-      if (state.recordingShortcut) stopShortcutRecording();
+      if (state.recordingShortcut || state.recordingAuxShortcut) stopAllShortcutRecording();
     });
 
     window.addEventListener('keydown', (ev) => {
-      if (state.recordingShortcut) {
+      if (state.recordingShortcut || state.recordingAuxShortcut) {
+        const isAux = Boolean(state.recordingAuxShortcut);
         ev.preventDefault();
         ev.stopPropagation();
         if (ev.key === 'Escape' && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
-          stopShortcutRecording();
+          stopAllShortcutRecording();
           showToast('已取消快捷键录制');
           return;
         }
         const parsed = buildAcceleratorFromKeyEvent(ev);
         if (parsed.modifierOnly) {
-          const kbdEl = $('shortcut-kbd-label');
+          const kbdEl = $(isAux ? 'aux-shortcut-kbd-label' : 'shortcut-kbd-label');
           if (kbdEl) setText(kbdEl, parsed.preview || '按下组合键…');
           return;
         }
@@ -2393,8 +2430,12 @@
           syncFloatButtonUi();
           return;
         }
-        stopShortcutRecording();
-        applyShortcutPatch({ accelerator: parsed.accelerator, enabled: true });
+        stopAllShortcutRecording();
+        if (isAux) {
+          applyAuxShortcutPatch({ accelerator: parsed.accelerator, enabled: true });
+        } else {
+          applyShortcutPatch({ accelerator: parsed.accelerator, enabled: true });
+        }
         return;
       }
 
@@ -2423,6 +2464,26 @@
           syncFloatButtonUi();
           showToast(res.message || (res.running ? '已通过快捷键打开右侧看板' : '已通过快捷键收回右侧看板'));
         }).catch(() => {});
+        return;
+      }
+
+      if (state.auxShortcut?.enabled && state.auxShortcut?.accelerator && eventMatchesAccelerator(ev, state.auxShortcut.accelerator)) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (window.sidecar && !window.sidecar.isFloatWindow && !window.__CV_FLOAT_MODE__) {
+          postSidecarCloseKeyEvent();
+        } else {
+          apiFetch('/api/aux-pane-trigger', {
+            method: 'POST',
+            body: {
+              targetPlugin: 'context-viewer',
+              uri: 'sidecar://context-viewer/dashboard/',
+              action: 'toggle'
+            }
+          }).then(() => {
+            showToast('已发送切换 Antigravity 右侧辅助栏「上下文看板」指令');
+          }).catch(() => {});
+        }
       }
     }, true);
 
@@ -2744,6 +2805,7 @@
   }
 
   function startShortcutRecording() {
+    state.recordingAuxShortcut = false;
     state.recordingShortcut = true;
     window.sidecar?.setShortcutRecording?.(true);
     syncFloatButtonUi();
@@ -2756,24 +2818,99 @@
     syncFloatButtonUi();
   }
 
-  async function applyShortcutPatch(patch) {
+  function startAuxShortcutRecording() {
+    state.recordingShortcut = false;
+    state.recordingAuxShortcut = true;
+    window.sidecar?.setShortcutRecording?.(true);
+    syncFloatButtonUi();
+  }
+
+  function stopAuxShortcutRecording() {
+    if (!state.recordingAuxShortcut) return;
+    state.recordingAuxShortcut = false;
+    window.sidecar?.setShortcutRecording?.(false);
+    syncFloatButtonUi();
+  }
+
+  function stopAllShortcutRecording() {
+    if (!state.recordingShortcut && !state.recordingAuxShortcut) return;
+    state.recordingShortcut = false;
+    state.recordingAuxShortcut = false;
+    window.sidecar?.setShortcutRecording?.(false);
+    syncFloatButtonUi();
+  }
+
+  async function applyTargetShortcutPatch(target, patch) {
+    const isAux = target === 'aux-shortcut';
+    const stateKey = isAux ? 'auxShortcut' : 'shortcut';
+    const fallbackMsg = isAux ? '已更新 AGY 侧栏看板快捷键' : '已更新独立悬浮窗快捷键';
     try {
       const res = await apiFetch('/api/entrypoints', {
         method: 'POST',
-        body: { target: 'shortcut', ...patch }
+        body: { target, ...patch }
       });
       if (res?.shortcut && typeof res.shortcut === 'object') {
         state.shortcut = { ...state.shortcut, ...res.shortcut };
+      }
+      if (res?.auxShortcut && typeof res.auxShortcut === 'object') {
+        state.auxShortcut = { ...state.auxShortcut, ...res.auxShortcut };
+      }
+      if (!isAux && res?.shortcut && typeof res.shortcut === 'object') {
+        state[stateKey] = { ...state[stateKey], ...res.shortcut };
       }
       syncFloatButtonUi();
       if (!res?.ok) {
         showToast(res?.error || '设置快捷键失败');
         return;
       }
-      showToast(res.message || '已更新侧栏看板快捷键');
+      showToast(res.message || fallbackMsg);
     } catch (err) {
       syncFloatButtonUi();
       showToast(`设置快捷键失败：${err.message}`);
+    }
+  }
+
+  function applyShortcutPatch(patch) {
+    return applyTargetShortcutPatch('shortcut', patch);
+  }
+
+  function applyAuxShortcutPatch(patch) {
+    return applyTargetShortcutPatch('aux-shortcut', patch);
+  }
+
+  function syncShortcutControlUi({ recBtnId, kbdLblId, recHintId, toggleBtnId, resetBtnId, sc, recording, defaultFallback }) {
+    const enabled = sc?.enabled !== false;
+    const recBtn = $(recBtnId);
+    const kbdLbl = $(kbdLblId);
+    const recHint = $(recHintId);
+    const toggleScBtn = $(toggleBtnId);
+    const resetScBtn = $(resetBtnId);
+
+    if (recBtn) {
+      recBtn.classList.toggle('is-recording', Boolean(recording));
+      recBtn.classList.toggle('is-disabled', !enabled && !recording);
+    }
+    if (kbdLbl) {
+      setText(
+        kbdLbl,
+        recording
+          ? '按下组合键…'
+          : (sc?.display || sc?.defaultDisplay || defaultFallback)
+      );
+    }
+    if (recHint) {
+      setText(
+        recHint,
+        recording
+          ? 'Esc 取消'
+          : (enabled ? '点击修改' : '已停用')
+      );
+    }
+    if (toggleScBtn) {
+      setText(toggleScBtn, enabled ? '已开启' : '已停用');
+    }
+    if (resetScBtn) {
+      resetScBtn.disabled = Boolean(sc?.isDefault);
     }
   }
 
@@ -2795,40 +2932,27 @@
     });
 
     const sc = state.shortcut || {};
-    const scEnabled = sc.enabled !== false;
-    const recBtn = $('btn-record-shortcut');
-    const kbdLbl = $('shortcut-kbd-label');
-    const recHint = $('shortcut-record-hint');
-    const toggleScBtn = $('btn-toggle-shortcut');
-    const resetScBtn = $('btn-reset-shortcut');
+    syncShortcutControlUi({
+      recBtnId: 'btn-record-shortcut',
+      kbdLblId: 'shortcut-kbd-label',
+      recHintId: 'shortcut-record-hint',
+      toggleBtnId: 'btn-toggle-shortcut',
+      resetBtnId: 'btn-reset-shortcut',
+      sc,
+      recording: state.recordingShortcut,
+      defaultFallback: '⌥⌘K'
+    });
+    syncShortcutControlUi({
+      recBtnId: 'btn-record-aux-shortcut',
+      kbdLblId: 'aux-shortcut-kbd-label',
+      recHintId: 'aux-shortcut-record-hint',
+      toggleBtnId: 'btn-toggle-aux-shortcut',
+      resetBtnId: 'btn-reset-aux-shortcut',
+      sc: state.auxShortcut || {},
+      recording: state.recordingAuxShortcut,
+      defaultFallback: '⌃⌥K'
+    });
     const scScopeRow = $('shortcut-scope-row');
-
-    if (recBtn) {
-      recBtn.classList.toggle('is-recording', Boolean(state.recordingShortcut));
-      recBtn.classList.toggle('is-disabled', !scEnabled && !state.recordingShortcut);
-    }
-    if (kbdLbl) {
-      setText(
-        kbdLbl,
-        state.recordingShortcut
-          ? '按下组合键…'
-          : (sc.display || sc.defaultDisplay || '⌥⌘K')
-      );
-    }
-    if (recHint) {
-      setText(
-        recHint,
-        state.recordingShortcut
-          ? 'Esc 取消'
-          : (scEnabled ? '点击修改' : '已停用')
-      );
-    }
-    if (toggleScBtn) {
-      setText(toggleScBtn, scEnabled ? '已开启' : '已停用');
-    }
-    if (resetScBtn) {
-      resetScBtn.disabled = Boolean(sc.isDefault);
-    }
     if (scScopeRow) {
       scScopeRow.classList.toggle('hidden', sc.nativeGlobalSupported === false);
     }
@@ -2852,6 +2976,7 @@
 
     const btn = $('btn-float');
     if (!btn) return;
+    const scEnabled = sc.enabled !== false;
     const scHint = scEnabled && sc.display ? `；快捷键 ${sc.display}` : '';
     if (window.__CV_FLOAT_MODE__) {
       const pinned = Boolean(state.floatPinned) && !window.__CV_BROWSER_FALLBACK__;
@@ -2889,6 +3014,9 @@
       if (res.shortcut && typeof res.shortcut === 'object') {
         state.shortcut = { ...state.shortcut, ...res.shortcut };
       }
+      if (res.auxShortcut && typeof res.auxShortcut === 'object') {
+        state.auxShortcut = { ...state.auxShortcut, ...res.auxShortcut };
+      }
       if (!window.__CV_FLOAT_MODE__ && res.floatWindow) {
         state.floatRunning = Boolean(res.floatWindow.running);
         state.floatPinned = Boolean(res.floatWindow.pinned);
@@ -2915,9 +3043,199 @@
   window.__cvOnHostShortcutChange = (scPatch) => {
     if (scPatch && typeof scPatch === 'object') {
       state.shortcut = { ...state.shortcut, ...scPatch };
+      if (scPatch.scope && state.auxShortcut) {
+        state.auxShortcut = { ...state.auxShortcut, scope: scPatch.scope };
+      }
       syncFloatButtonUi();
     }
   };
+
+  window.__cvOnHostAuxShortcutChange = (scPatch) => {
+    if (scPatch && typeof scPatch === 'object') {
+      state.auxShortcut = { ...state.auxShortcut, ...scPatch };
+      if (scPatch.scope && state.shortcut) {
+        state.shortcut = { ...state.shortcut, scope: scPatch.scope };
+      }
+      syncFloatButtonUi();
+    }
+  };
+
+  function postSidecarCloseKeyEvent() {
+    const isMac = /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent || '');
+    window.parent?.postMessage({
+      type: 'sidecar-key-event',
+      payload: {
+        eventType: 'keydown',
+        key: 'b',
+        code: 'KeyB',
+        ctrlKey: !isMac,
+        metaKey: isMac,
+        altKey: false,
+        shiftKey: true,
+        repeat: false
+      }
+    }, '*');
+  }
+
+  function startAuxPaneBridgeCoordinator() {
+    if (
+      !window.sidecar ||
+      window.sidecar.isFloatWindow ||
+      window.__CV_FLOAT_MODE__ ||
+      typeof window.sidecar.ui?.toggleAuxPane !== 'function' ||
+      String(location.pathname || '').endsWith('/sidebar')
+    ) {
+      return;
+    }
+
+    let visibleSince = (window.innerWidth > 40 && window.innerHeight > 40) ? Date.now() : 0;
+    let lastSeenSeq = 0;
+
+    const reportHello = () => {
+      const convId = window.sidecar.conversationId || state.hostConvId || '';
+      if (convId) {
+        apiFetch('/api/aux-pane-trigger', {
+          method: 'POST',
+          body: { action: 'hello', convId }
+        }).catch(() => {});
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      const nowVisible = window.innerWidth > 40 && window.innerHeight > 40;
+      if (nowVisible) {
+        const becameVisible = !visibleSince;
+        if (becameVisible) {
+          visibleSince = Date.now();
+          reportHello();
+          apiFetch('/api/aux-pane-trigger?waitMs=0').then(async (res) => {
+            const trig = res?.trigger;
+            if (
+              trig?.seq &&
+              (Date.now() - Number(trig.at || 0)) < 2500 &&
+              trig.targetPlugin &&
+              trig.targetPlugin !== 'context-viewer' &&
+              Number(trig.switchedSeq || 0) < trig.seq &&
+              trig.uri
+            ) {
+              const sw = await apiFetch('/api/aux-pane-trigger', {
+                method: 'POST',
+                body: { action: 'switched', seq: trig.seq }
+              }).catch(() => null);
+              if (sw?.claimed !== false) {
+                window.sidecar.ui.toggleAuxPane({ tabType: 'sidecarView', uri: trig.uri });
+              }
+            }
+          }).catch(() => {});
+        }
+      } else {
+        visibleSince = 0;
+      }
+    };
+
+    reportHello();
+
+    if (typeof ResizeObserver === 'function') {
+      const ro = new ResizeObserver(handleVisibilityChange);
+      ro.observe(document.documentElement);
+    }
+
+    const handleTrigger = async (trigger) => {
+      const seq = Number(trigger?.seq || 0);
+      if (!seq || seq <= lastSeenSeq) return;
+      const sessionAck = Number(sessionStorage.getItem('agy_aux_last_ack_seq') || '0');
+      if (seq <= sessionAck || seq <= Number(trigger?.ackSeq || 0)) {
+        lastSeenSeq = seq;
+        return;
+      }
+      lastSeenSeq = seq;
+      if ((Date.now() - Number(trigger.at || 0)) > 5000) return;
+
+      const isVisibleNow = window.innerWidth > 40 && window.innerHeight > 40;
+      const wasAlreadyVisible = visibleSince > 0 && visibleSince <= Number(trigger.at || 0) - 40;
+
+      if (trigger.targetPlugin !== 'context-viewer') {
+        if (isVisibleNow && trigger.uri) {
+          const ackRes = await apiFetch('/api/aux-pane-trigger', {
+            method: 'POST',
+            body: { action: 'ack', seq, plugin: 'context-viewer' }
+          }).catch(() => null);
+          if (ackRes?.claimed === false) return;
+          await apiFetch('/api/aux-pane-trigger', {
+            method: 'POST',
+            body: { action: 'switched', seq }
+          }).catch(() => null);
+          sessionStorage.setItem('agy_aux_last_ack_seq', String(seq));
+          window.sidecar.ui.toggleAuxPane({ tabType: 'sidecarView', uri: trigger.uri });
+        }
+        return;
+      }
+
+      if (trigger.action !== 'open' && isVisibleNow && wasAlreadyVisible) {
+        const ackRes = await apiFetch('/api/aux-pane-trigger', {
+          method: 'POST',
+          body: { action: 'ack', seq, plugin: 'context-viewer' }
+        }).catch(() => null);
+        if (ackRes?.claimed === false) return;
+        sessionStorage.setItem('agy_aux_last_ack_seq', String(seq));
+        postSidecarCloseKeyEvent();
+        return;
+      }
+
+      if (!isVisibleNow) {
+        const myConvId = window.sidecar.conversationId || state.hostConvId || '';
+        const targetConvId = trigger.convId || myConvId;
+        const waitBeforeClaim = (!trigger.convId || !myConvId || myConvId === trigger.convId) ? 110 : 200;
+        await new Promise((r) => setTimeout(r, waitBeforeClaim));
+
+        const recheck = await apiFetch('/api/aux-pane-trigger?waitMs=0').catch(() => null);
+        const latestTrig = recheck?.trigger;
+        if (latestTrig && Number(latestTrig.ackSeq || 0) >= seq) return;
+        if (window.innerWidth > 40 && window.innerHeight > 40) return;
+
+        if (!targetConvId || typeof window.sidecar.ui?.toggleConversation !== 'function') return;
+
+        const ackRes = await apiFetch('/api/aux-pane-trigger', {
+          method: 'POST',
+          body: { action: 'ack', seq, plugin: 'context-viewer' }
+        }).catch(() => null);
+        if (!ackRes?.claimed) return;
+
+        sessionStorage.setItem('agy_aux_last_ack_seq', String(seq));
+        window.sidecar.ui.toggleConversation(targetConvId);
+      }
+    };
+
+    (async () => {
+      try {
+        const initRes = await apiFetch('/api/aux-pane-trigger?waitMs=0');
+        const initTrig = initRes?.trigger;
+        if (initTrig?.seq) {
+          const sessionAck = Number(sessionStorage.getItem('agy_aux_last_ack_seq') || '0');
+          if (
+            initTrig.seq > sessionAck &&
+            initTrig.seq > Number(initTrig.ackSeq || 0) &&
+            (Date.now() - Number(initTrig.at || 0)) < 3500
+          ) {
+            await handleTrigger(initTrig);
+          } else {
+            lastSeenSeq = Number(initTrig.seq || 0);
+          }
+        }
+      } catch {}
+
+      while (true) {
+        try {
+          const res = await apiFetch(`/api/aux-pane-trigger?since=${lastSeenSeq}&waitMs=8500`);
+          if (res?.trigger) {
+            await handleTrigger(res.trigger);
+          }
+        } catch {
+          await new Promise((r) => setTimeout(r, 650));
+        }
+      }
+    })();
+  }
 
   window.__cvOnHostVisibility = (visible) => {
     const vis = Boolean(visible);
@@ -2948,6 +3266,7 @@
     syncFloatButtonUi();
     wireEvents();
     initWorkspaceTracking();
+    startAuxPaneBridgeCoordinator();
 
     await Promise.allSettled([
       loadInitialSettings(),

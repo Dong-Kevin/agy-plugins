@@ -18,8 +18,8 @@ Every plugin is built strictly on Antigravity's official `plugin.json` and `side
 
 | Directory | Plugin `name` | Version | Default Shortcuts & Quick Commands | Purpose | Docs |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| [`plugins/agy-finder`](./plugins/agy-finder) | `agy-finder` | `v0.1.0` | `⌘⇧E` (drawer) · `/agy-finder` · `[📂]` · `agy-finder toggle` | Right-side Project File Tree & Instant Path Reveal | [README](./plugins/agy-finder/README_EN.md) |
-| [`plugins/agy-context-viewer`](./plugins/agy-context-viewer) | `context-viewer` | `v1.6.3` | `⌥⌘K` (window) · Left-click Menu Bar · `/context-viewer` · `agy-context` | Context Window, Speed, `5h + Weekly` Quotas & Token Analytics | [README](./plugins/agy-context-viewer/README_EN.md) |
+| [`plugins/agy-finder`](./plugins/agy-finder) | `agy-finder` | `v0.2.0` | `⌘⇧E` (drawer) · `⌥⌘E` (Aux Pane) · `/agy-finder` · `[📂]` · `agy-finder aux` | Right-side Project File Tree & Instant Path Reveal | [README](./plugins/agy-finder/README_EN.md) |
+| [`plugins/agy-context-viewer`](./plugins/agy-context-viewer) | `context-viewer` | `v1.7.0` | `⌥⌘K` (window) · `⌃⌥K` (Aux Pane) · `/context-viewer` · `agy-context aux` | Context Window, Speed, `5h + Weekly` Quotas & Token Analytics | [README](./plugins/agy-context-viewer/README_EN.md) |
 
 ---
 
@@ -27,11 +27,11 @@ Every plugin is built strictly on Antigravity's official `plugin.json` and `side
 
 | Trigger | `AGY Finder` (`agy-finder`) | `Context & Token Viewer` (`context-viewer`) |
 | :--- | :--- | :--- |
-| **macOS Panel Hotkeys** | **`⌘⇧E`** toggles the right-side file tree drawer (active only when `Antigravity` is frontmost, zero conflicts, no Accessibility prompt; switchable via `⌨` to `⌘⌥E` / `⌃⇧E` / `⌘⇧Y` / `off`) | **`⌥⌘K`** toggles the right-side pinned floating window (Host-frontmost by default, click-to-record custom chords or global scope); **`⌘⇧P`** toggles pin, **`⌘W`** closes |
-| **Host Pane & Menu Bar** | **`⌘⇧B`** (macOS) / **`Ctrl+Shift+B`** (Win / Linux) toggles Antigravity's Right Aux Pane | macOS Menu Bar badge **left-click (`<5ms`) toggles window**, **right-click switches 3 live metrics / pin**; **`⌘⇧B`** / **`Ctrl+Shift+B`** for Aux Pane; **`Ctrl+Alt+K`** inside dashboard on Win / Linux |
+| **Floating Window / Drawer** | **`⌘⇧E`** toggles the right-side file tree drawer (Host-frontmost by default, supports click-to-record custom chords, `⌘⌥E` / `⌃⇧E` / `⌘⇧Y` presets, or global scope; zero Accessibility prompt) | **`⌥⌘K`** toggles the right-side pinned floating window (Host-frontmost by default, supports click-to-record custom chords or global scope); **`⌘⇧P`** toggles pin, **`⌘W`** closes |
+| **AGY Right Aux Pane & Menu Bar** | **`⌥⌘E`** (Win / Linux: `Ctrl+Alt+E`) opens or switches Antigravity's Right Aux Pane straight to **File Tree** (customizable); **`⌘⇧B`** / **`Ctrl+Shift+B`** toggles the host Aux Pane | **`⌃⌥K`** (Win / Linux: `Ctrl+Alt+Shift+K`) opens or switches Antigravity's Right Aux Pane straight to **Context Dashboard** (customizable); macOS Menu Bar **left-click (`<5ms`) toggles window, right-click cycles 3 metrics** |
 | **In-Chat Slash & Deep Links** | Type **`/agy-finder`**; click `[📂]` next to any file reference or [`sidecar://agy-finder/tree/`](sidecar://agy-finder/tree/) | Type **`/context-viewer`**; or open [`sidecar://context-viewer/dashboard/`](sidecar://context-viewer/dashboard/) |
-| **Terminal CLI Commands** | `agy-finder` (alias for `agy-finder toggle`; bind to `Ctrl+Shift+E` on Win / Linux)<br/>`agy-finder open [path]` · `close` · `hotkey <preset>` · `status [--json]` · `quit` | `agy-context` (rich ANSI terminal dashboard)<br/>`agy-context float [close\|quit]` · `menubar [context\|speed\|quota\|on\|off]` · `shortcut [status\|<combo>\|reset\|off\|--global]` · `turns` · `json [--full]` · `web` |
-| **In-Panel Actions** | `↑` / `↓` move · `←` / `→` collapse/expand · `Enter` preview/toggle · `/` or `⌘/Ctrl+F` search · `⌘/Ctrl+.` dotfiles · `?` shortcuts · `Esc` dismiss | Palette drawer click-to-record shortcut & 5 heatmap themes · Ceiling switcher (`Auto / 200K / 256K / 1M`) · Top capsules jump to views |
+| **Terminal CLI Commands** | `agy-finder` (toggles drawer) · `agy-finder aux [path]` (toggles AGY Aux Pane File Tree)<br/>`agy-finder open [path]` · `close` · `shortcut [<combo>\|off\|reset]` · `aux-shortcut [<combo>\|off\|reset]` · `hotkey <preset>` · `status [--json]` · `quit` | `agy-context` (rich ANSI terminal summary) · `agy-context aux` (toggles AGY Aux Pane Dashboard)<br/>`agy-context float [close\|quit]` · `menubar [context\|speed\|quota\|on\|off]` · `shortcut [status\|<combo>\|reset\|off\|--global]` · `aux-shortcut [status\|<combo>\|reset\|off]` · `turns` · `json [--full]` · `web` |
+| **In-Panel Actions** | `↑` / `↓` move · `←` / `→` collapse/expand · `Enter` preview/toggle · `/` or `⌘/Ctrl+F` search · `⌘/Ctrl+.` dotfiles · `?` shortcuts · `Esc` dismiss | Palette drawer records dual custom shortcuts & 5 heatmap themes · Ceiling switcher (`Auto / 200K / 256K / 1M`) · Top capsules jump to views |
 
 ---
 
@@ -40,7 +40,7 @@ Every plugin is built strictly on Antigravity's official `plugin.json` and `side
 ### 1. `AGY Finder` — Workspace File Tree & Instant Reveal
 
 - **Dual-Safety Reveal**: Bundled `rules/AGENTS.md` pairs `[file](file:///...)` preview links with compact `[📂](sidecar://agy-finder/tree/?path=...)` deep links, while byte-offset incremental `transcript_full.jsonl` parsing surfaces clickable **Mention** chips even on older threads (`0%` CPU when hidden).
-- **Conflict-Free Shortcuts & Actions**: Native macOS **`⌘⇧E`** toggles the right-side drawer only when `Antigravity` is frontmost (zero Accessibility permission prompts); Windows / Linux users can bind `agy-finder toggle` to a global hotkey; includes fuzzy search, clipboard jump, inline preview modal, and OS file manager reveal.
+- **Dual Conflict-Free Shortcuts & Actions**: Native macOS **`⌘⇧E`** toggles the standalone right-side drawer and **`⌥⌘E`** jumps straight into Antigravity's Right Aux Pane File Tree (both click-to-record customizable with zero Accessibility prompts); Windows / Linux users can bind `agy-finder toggle` / `agy-finder aux`; includes fuzzy search, clipboard jump, inline preview modal, and OS file manager reveal.
 
 <table>
   <tr>
@@ -51,10 +51,10 @@ Every plugin is built strictly on Antigravity's official `plugin.json` and `side
       <sub>Aggregates mentioned workspace files at the top; one click expands folders, selects the target, and offers preview / copy / OS reveal</sub>
     </td>
     <td width="50%" align="center" valign="top">
-      <img src="plugins/agy-finder/docs/images/finder-shortcuts.png" width="320" alt="AGY Finder Conflict-Free Hotkey Presets and Keyboard Navigation" />
+      <img src="plugins/agy-finder/docs/images/finder-shortcuts.png" width="320" alt="AGY Finder Dual Customizable Shortcuts and Keyboard Navigation" />
       <br/>
-      <b>Conflict-Free Hotkey Presets (<code>⌘⇧E</code>) & Keyboard Nav</b><br/>
-      <sub>Switch between <code>⌘⇧E</code> / <code>⌘⌥E</code> / <code>⌃⇧E</code> / <code>⌘⇧Y</code>, host <code>⌘⇧B</code> Aux Pane, and full keyboard tree navigation</sub>
+      <b>Dual Customizable Shortcuts (<code>⌘⇧E</code> Drawer / <code>⌥⌘E</code> Aux Pane)</b><br/>
+      <sub>Record custom chords for both the floating drawer and AGY's Right Aux Pane, toggle Host-only vs. global scope, and navigate via keyboard</sub>
     </td>
   </tr>
 </table>
@@ -70,10 +70,10 @@ Every plugin is built strictly on Antigravity's official `plugin.json` and `side
       <sub>Stays pinned beside your editor, Artifacts, and terminal; pairs with a 3-mode macOS Menu Bar indicator</sub>
     </td>
     <td width="50%" align="center" valign="top">
-      <img src="plugins/agy-context-viewer/docs/images/customizer-drawer.png" width="320" alt="Quick Entry Modes, ⌥⌘K Shortcut Recorder & Appearance Customizer" />
+      <img src="plugins/agy-context-viewer/docs/images/customizer-drawer.png" width="320" alt="Dual Shortcut Recorders, Quick Entry Modes & Appearance Customizer" />
       <br/>
-      <b>Quick Entry, <code>⌥⌘K</code> Shortcut Recorder & Themes</b><br/>
-      <sub>Toggle Menu Bar badge, record custom toggle chords, pick host-only/global scope, and customize 5 heatmap palettes</sub>
+      <b>Dual Shortcut Recorders (<code>⌥⌘K</code> Window / <code>⌃⌥K</code> Aux Pane) & Themes</b><br/>
+      <sub>Record custom hotkeys for both the floating window and AGY's Right Aux Pane, pick host-only/global scope, and customize 5 heatmap palettes</sub>
     </td>
   </tr>
   <tr>
@@ -184,8 +184,8 @@ agy-plugins/
 ├── install.sh                         # Unified installer / lister / uninstaller (macOS / Linux)
 ├── install.ps1                        # Unified installer / lister / uninstaller (Windows PowerShell)
 ├── plugins/
-│   ├── agy-finder/                    # Project file tree plugin (v0.1.0)
-│   └── agy-context-viewer/            # Context & token analytics plugin (context-viewer v1.6.3)
+│   ├── agy-finder/                    # Project file tree plugin (v0.2.0)
+│   └── agy-context-viewer/            # Context & token analytics plugin (context-viewer v1.7.0)
 └── scripts/
     ├── verify.mjs                     # Repo-wide schema, privacy, PNG metadata, plugin & installer suite
     ├── package-all.mjs                # Zero-dependency Release ZIP + SHA-256 packager

@@ -160,8 +160,8 @@ try {
   $Ver = (Get-Content (Join-Path $TargetDir "plugin.json") -Raw -Encoding UTF8 | ConvertFrom-Json).version
   Write-Host ""
   Write-Host "[context-viewer] 安装完成！版本：$Ver" -ForegroundColor Green
-  Write-Host "  • Antigravity 桌面端：在 Customizations -> Plugins 中开启「上下文与 Token 看板」，随后从右侧栏打开看板。"
-  Write-Host "  • agy CLI / 终端：在对话中输入 /context-viewer，或在终端运行 `"$CliWrapper`"（加 web 参数可在浏览器打开完整看板）。"
+  Write-Host "  • Antigravity 桌面端：在 Customizations -> Plugins 中开启「上下文与 Token 看板」，可用右侧辅助栏打开，或运行 agy-context float / agy-context aux。"
+  Write-Host "  • agy CLI / 终端：在对话中输入 /context-viewer，或在终端运行 `"$CliWrapper`"（支持 aux / float / shortcut / aux-shortcut / web）。"
 } finally {
   if ($TempDir -and (Test-Path $TempDir)) {
     Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue

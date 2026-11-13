@@ -135,7 +135,7 @@ try {
   }
 
   Write-Host "[agy-finder] 安装完成：$TargetDir"
-  Write-Host "插件已自动加载并启用，可在 Antigravity 的 Customizations -> Installed 中管理状态"
+  Write-Host "插件已自动加载并启用（可在 Customizations -> Installed 管理）：可运行 agy-finder（独立抽屉）或 agy-finder aux（AGY 侧栏目录树），也可绑定 Ctrl+Shift+E / Ctrl+Alt+E。"
 } finally {
   if ($TempDir -and (Test-Path $TempDir)) {
     Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue

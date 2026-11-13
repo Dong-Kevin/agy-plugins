@@ -937,12 +937,15 @@ async function main() {
       DEFAULT_SHORTCUT_MAC,
       DEFAULT_SHORTCUT_OTHER,
       formatShortcutDisplay,
+      getAuxShortcutConfig,
       getDefaultShortcut,
       getShortcutConfig,
       listRecentConversations,
       normalizeShortcutSpec,
       parseModelSettingFromText,
+      readAuxPaneTrigger,
       scanConversation,
+      setAuxShortcutConfig,
       setMenubarPreference,
       setShortcutConfig,
       shortcutToMacCarbon
@@ -1756,6 +1759,7 @@ async function main() {
       AG_DIR: isolatedAgDir,
       AG_CLI_DIR: isolatedCliDir,
       ANTIGRAVITY_EXECUTABLE_DATA_DIR: isolatedStateDir,
+      AGY_CONTEXT_VIEWER_DISABLE_DAEMON: '1',
       ANTIGRAVITY_CONVERSATION_ID: '',
       ANTIGRAVITY_LS_ADDRESS: '',
       ANTIGRAVITY_CSRF_TOKEN: ''
@@ -2121,6 +2125,101 @@ async function main() {
           resetScBody.shortcut?.scope === 'app',
         `POST /api/entrypoints 恢复默认快捷键异常：${rResetSc.body}`
       );
+
+      // Aux-pane shortcut CRUD + collision rejection + /api/aux-pane-trigger bus
+      const rSetAuxSc = await rawHttpRequest({
+        port: fbPort,
+        method: 'POST',
+        path: '/api/entrypoints',
+        headers: {
+          Origin: `http://127.0.0.1:${fbPort}`,
+          'Content-Type': 'application/json',
+          'X-CV-Token': fbToken
+        },
+        body: JSON.stringify({ target: 'aux-shortcut', accelerator: 'Ctrl+Shift+L' })
+      });
+      const setAuxScBody = JSON.parse(rSetAuxSc.body);
+      assert(
+        rSetAuxSc.status === 200 &&
+          setAuxScBody.ok === true &&
+          setAuxScBody.auxShortcut?.accelerator === 'Ctrl+Shift+L',
+        `POST /api/entrypoints aux-shortcut 自定义保存异常：${rSetAuxSc.body}`
+      );
+
+      const defaultStandaloneAcc = resetScBody.shortcut?.accelerator || 'Alt+Meta+K';
+      const rCollideAux = await rawHttpRequest({
+        port: fbPort,
+        method: 'POST',
+        path: '/api/entrypoints',
+        headers: {
+          Origin: `http://127.0.0.1:${fbPort}`,
+          'Content-Type': 'application/json',
+          'X-CV-Token': fbToken
+        },
+        body: JSON.stringify({ target: 'aux-shortcut', accelerator: defaultStandaloneAcc })
+      });
+      const collideBody = JSON.parse(rCollideAux.body);
+      assert(collideBody.ok === false, `侧栏快捷键与独立窗冲突时应拒绝保存：${rCollideAux.body}`);
+
+      await rawHttpRequest({
+        port: fbPort,
+        method: 'POST',
+        path: '/api/entrypoints',
+        headers: {
+          Origin: `http://127.0.0.1:${fbPort}`,
+          'Content-Type': 'application/json',
+          'X-CV-Token': fbToken
+        },
+        body: JSON.stringify({ target: 'aux-shortcut', reset: true })
+      });
+
+      const rAuxTrig = await rawHttpRequest({
+        port: fbPort,
+        method: 'POST',
+        path: '/api/aux-pane-trigger',
+        headers: {
+          Origin: `http://127.0.0.1:${fbPort}`,
+          'Content-Type': 'application/json',
+          'X-CV-Token': fbToken
+        },
+        body: JSON.stringify({ targetPlugin: 'context-viewer', uri: 'sidecar://context-viewer/dashboard/', action: 'toggle' })
+      });
+      const auxTrigBody = JSON.parse(rAuxTrig.body);
+      assert(auxTrigBody.ok === true && auxTrigBody.trigger?.seq > 0, `/api/aux-pane-trigger 触发失败：${rAuxTrig.body}`);
+
+      const rAuxPoll = await rawHttpRequest({
+        port: fbPort,
+        method: 'GET',
+        path: '/api/aux-pane-trigger?since=0&waitMs=0'
+      });
+      const auxPollBody = JSON.parse(rAuxPoll.body);
+      assert(auxPollBody.changed === true && auxPollBody.trigger?.seq === auxTrigBody.trigger.seq, 'GET /api/aux-pane-trigger 未返回最新触发事件');
+
+      const rAuxAck = await rawHttpRequest({
+        port: fbPort,
+        method: 'POST',
+        path: '/api/aux-pane-trigger',
+        headers: {
+          Origin: `http://127.0.0.1:${fbPort}`,
+          'Content-Type': 'application/json',
+          'X-CV-Token': fbToken
+        },
+        body: JSON.stringify({ action: 'ack', seq: auxTrigBody.trigger.seq, plugin: 'context-viewer' })
+      });
+      assert(JSON.parse(rAuxAck.body).claimed === true, 'POST /api/aux-pane-trigger ack 声明失败');
+
+      const rAuxSwitched = await rawHttpRequest({
+        port: fbPort,
+        method: 'POST',
+        path: '/api/aux-pane-trigger',
+        headers: {
+          Origin: `http://127.0.0.1:${fbPort}`,
+          'Content-Type': 'application/json',
+          'X-CV-Token': fbToken
+        },
+        body: JSON.stringify({ action: 'switched', seq: auxTrigBody.trigger.seq })
+      });
+      assert(JSON.parse(rAuxSwitched.body).claimed === true, 'POST /api/aux-pane-trigger switched 声明失败');
     } finally {
       await new Promise((r) => fbServer.close(r));
     }
@@ -2407,9 +2506,26 @@ async function main() {
         '快捷键开启但菜单栏关闭时收回窗口不应杀死原生热键守护进程'
       );
 
-      // When BOTH menubar and shortcut are OFF -> close terminates non-resident daemon, and ensure-menubar does not spawn
+      // When menubar and standalone shortcut are OFF, but auxShortcut is ON -> daemon still stays resident!
       setShortcutConfig({ enabled: false }, 'darwin');
+      setAuxShortcutConfig({ reset: true }, 'darwin');
       visObj.shortcutEnabled = false;
+      visObj.auxShortcutEnabled = true;
+      visObj.windowVisible = true;
+      visObj.running = true;
+      writeFileSync(floatStateFile, JSON.stringify(visObj), 'utf-8');
+      const closeKeepAuxResident = await controlFloatWindow(
+        { action: 'close' },
+        { platform: 'darwin', spawnDaemon: mockScSpawn, sendDaemonCommand: mockScSendCmd }
+      );
+      assert(
+        lastSentCmd?.cmd === 'hideWindow' && isTestPidAlive(scDaemonProc.pid) && closeKeepAuxResident.closed === true,
+        '仅侧栏快捷键开启时收回独立小窗不应杀死原生热键守护进程'
+      );
+
+      // When menubar, standalone shortcut, and auxShortcut are ALL OFF -> close terminates non-resident daemon, and ensure-menubar does not spawn
+      setAuxShortcutConfig({ enabled: false }, 'darwin');
+      visObj.auxShortcutEnabled = false;
       visObj.windowVisible = true;
       visObj.running = true;
       writeFileSync(floatStateFile, JSON.stringify(visObj), 'utf-8');
@@ -2417,14 +2533,15 @@ async function main() {
         { action: 'close' },
         { platform: 'darwin', spawnDaemon: mockScSpawn, sendDaemonCommand: mockScSendCmd }
       );
-      assert(!isTestPidAlive(scDaemonProc.pid), '菜单栏与快捷键均关闭时关闭小窗应退出守护进程');
+      assert(!isTestPidAlive(scDaemonProc.pid), '菜单栏与双快捷键均关闭时关闭小窗应退出守护进程');
 
-      const noSpawnWhenBothOff = await controlFloatWindow(
+      const noSpawnWhenAllOff = await controlFloatWindow(
         { action: 'ensure-menubar' },
         { platform: 'darwin', spawnDaemon: mockScSpawn, sendDaemonCommand: mockScSendCmd }
       );
-      assert(scSpawnCount === 1 && noSpawnWhenBothOff.daemonRunning === false, '菜单栏与快捷键均关闭时 ensure-menubar 不得拉起守护进程');
+      assert(scSpawnCount === 1 && noSpawnWhenAllOff.daemonRunning === false, '菜单栏与双快捷键均关闭时 ensure-menubar 不得拉起守护进程');
       setShortcutConfig({ reset: true }, 'darwin');
+      setAuxShortcutConfig({ reset: true }, 'darwin');
     } finally {
       for (const p of scProcs) {
         try { p.kill('SIGKILL'); } catch {}
@@ -2436,7 +2553,7 @@ async function main() {
     const cliScStatusRaw = execFileSync(process.execPath, [cliEntryPath, 'shortcut', 'status', '--json'], {
       encoding: 'utf-8',
       env: isolatedEnv,
-      timeout: 8000
+      timeout: 15000
     });
     const cliScStatus = JSON.parse(cliScStatusRaw);
     assert(
@@ -2449,12 +2566,49 @@ async function main() {
         encoding: 'utf-8',
         env: isolatedEnv,
         stdio: 'pipe',
-        timeout: 8000
+        timeout: 15000
       });
     } catch (err) {
       badCliRejected = err.status === 1;
     }
     assert(badCliRejected, 'cli.mjs shortcut k 单字母非法快捷键必须返回退出码 1');
+
+    // CLI aux-shortcut & aux trigger bus checks in isolated environment
+    const cliAuxScRaw = execFileSync(process.execPath, [cliEntryPath, 'aux-shortcut', 'status', '--json'], {
+      encoding: 'utf-8',
+      env: isolatedEnv,
+      timeout: 15000
+    });
+    const cliAuxSc = JSON.parse(cliAuxScRaw);
+    assert(cliAuxSc.ok === true && cliAuxSc.auxShortcut?.enabled === true, `cli.mjs aux-shortcut status --json 异常：${cliAuxScRaw}`);
+
+    execFileSync(process.execPath, [cliEntryPath, 'aux-shortcut', 'Ctrl+Shift+L'], {
+      encoding: 'utf-8',
+      env: isolatedEnv,
+      stdio: 'pipe',
+      timeout: 15000
+    });
+    assert(getAuxShortcutConfig().accelerator === 'Ctrl+Shift+L', 'cli.mjs aux-shortcut 设置未持久化');
+    execFileSync(process.execPath, [cliEntryPath, 'aux-shortcut', 'reset'], {
+      encoding: 'utf-8',
+      env: isolatedEnv,
+      stdio: 'pipe',
+      timeout: 15000
+    });
+
+    const cliAuxRaw = execFileSync(process.execPath, [cliEntryPath, 'aux', '--json'], {
+      encoding: 'utf-8',
+      env: isolatedEnv,
+      timeout: 15000
+    });
+    const cliAuxJson = JSON.parse(cliAuxRaw);
+    const busTrig = readAuxPaneTrigger();
+    assert(
+      cliAuxJson.ok === true &&
+        cliAuxJson.trigger?.targetPlugin === 'context-viewer' &&
+        busTrig.seq === cliAuxJson.trigger.seq,
+      `cli.mjs aux --json 触发写入异常：${cliAuxRaw}`
+    );
 
     // macOS Swift native host typecheck
     if (process.platform === 'darwin' && existsSync('/usr/bin/swiftc')) {

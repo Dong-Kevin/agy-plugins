@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy" content="frame-src 'none'; child-src 'none'">
   <title>上下文与 Token 看板</title>
   <script src="/preload.js"></script>
-  <link rel="stylesheet" href="/styles.css?v=1.6.3">
+  <link rel="stylesheet" href="/styles.css?v=1.7.0">
 </head>
 <body>
   <div class="app-shell">
@@ -84,19 +84,31 @@
       </div>
 
       <div id="shortcut-config-row" class="palette-row">
-        <span class="field-lbl" title="按下组合键一键打开或关闭右侧上下文看板，零辅助功能权限弹窗">侧栏看板快捷键</span>
+        <span class="field-lbl" title="按下组合键一键打开或关闭右侧独立置顶看板，零辅助功能权限弹窗">独立悬浮窗快捷键</span>
         <div class="shortcut-ctrl-group">
           <button id="btn-record-shortcut" type="button" class="kbd-record-btn" title="点击后直接按下新的组合键（按 Esc 取消录制）">
             <kbd id="shortcut-kbd-label">⌥⌘K</kbd>
             <span id="shortcut-record-hint" class="kbd-sub">点击修改</span>
           </button>
-          <button id="btn-toggle-shortcut" type="button" class="ghost-btn xs" title="启用或停用看板快捷键">已开启</button>
+          <button id="btn-toggle-shortcut" type="button" class="ghost-btn xs" title="启用或停用独立悬浮窗快捷键">已开启</button>
           <button id="btn-reset-shortcut" type="button" class="ghost-btn xs" title="恢复默认快捷键">默认</button>
         </div>
       </div>
 
+      <div id="aux-shortcut-config-row" class="palette-row">
+        <span class="field-lbl" title="按下组合键一键打开或切换 Antigravity 右侧辅助栏「上下文看板」，零辅助功能权限弹窗">AGY 侧栏看板键</span>
+        <div class="shortcut-ctrl-group">
+          <button id="btn-record-aux-shortcut" type="button" class="kbd-record-btn" title="点击后直接按下新的组合键（按 Esc 取消录制）">
+            <kbd id="aux-shortcut-kbd-label">⌃⌥K</kbd>
+            <span id="aux-shortcut-record-hint" class="kbd-sub">点击修改</span>
+          </button>
+          <button id="btn-toggle-aux-shortcut" type="button" class="ghost-btn xs" title="启用或停用 AGY 右侧辅助栏看板快捷键">已开启</button>
+          <button id="btn-reset-aux-shortcut" type="button" class="ghost-btn xs" title="恢复默认快捷键">默认</button>
+        </div>
+      </div>
+
       <div id="shortcut-scope-row" class="palette-row">
-        <span class="field-lbl" title="默认仅在 Antigravity 或看板处于前台时生效，避免与其他软件快捷键冲突">快捷键生效范围</span>
+        <span class="field-lbl" title="默认仅在 Antigravity 或看板处于前台时生效，避免与其他软件快捷键冲突；同时作用于独立悬浮窗与 AGY 侧栏快捷键">快捷键生效范围</span>
         <div class="seg-group" id="shortcut-scope-seg">
           <button type="button" class="seg-btn active" data-shortcut-scope="app" title="仅当 Antigravity 或看板窗口处于前台时响应">仅宿主前台</button>
           <button type="button" class="seg-btn" data-shortcut-scope="global" title="在任意应用界面下均可呼出或收回右侧看板">全局生效</button>
@@ -662,6 +674,6 @@
       </section>
     </main>
   </div>
-  <script src="/app.js?v=1.6.3"></script>
+  <script src="/app.js?v=1.7.0"></script>
 </body>
 </html>

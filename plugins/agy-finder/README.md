@@ -2,7 +2,7 @@
 
 # AGY Finder 项目目录树 (`agy-finder`)
 
-[![Version](https://img.shields.io/badge/version-v0.1.0-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
+[![Version](https://img.shields.io/badge/version-v0.2.0-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-818cf8)](#安装与启用)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D%2018-22c55e)](#安装与启用)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-a855f7)](#核心特性)
@@ -27,10 +27,10 @@
       <sub>顶部聚合对话提及文件芯片，点击即展开对应目录并脉冲高亮目标文件，支持复制路径 / 原生预览</sub>
     </td>
     <td width="33%" align="center" valign="top">
-      <img src="docs/images/finder-shortcuts.png" width="268" alt="AGY Finder 零冲突快捷键与键盘导航" />
+      <img src="docs/images/finder-shortcuts.png" width="268" alt="AGY Finder 双快捷键自定义与键盘导航" />
       <br/>
-      <b>零冲突快捷键（<code>⌘⇧E</code>）与键位速查</b><br/>
-      <sub>仅在 Antigravity 前台激活，内置 <code>⌘⇧E</code> / <code>⌘⌥E</code> / <code>⌃⇧E</code> / <code>⌘⇧Y</code> 预设与完整键盘导航</sub>
+      <b>双快捷键自定义（<code>⌘⇧E</code> / <code>⌥⌘E</code>）与键位速查</b><br/>
+      <sub>支持点击录制独立抽屉与 AGY 右侧辅助栏双快捷键，仅 AGY 前台 / 全局切换与完整键盘导航</sub>
     </td>
     <td width="33%" align="center" valign="top">
       <img src="docs/images/finder-quick-preview.png" width="268" alt="AGY Finder 独立抽屉行内快速预览" />
@@ -47,19 +47,23 @@
 
 | 触发场景 | 默认快捷键 / 命令 | 说明 |
 | :--- | :--- | :--- |
-| **独立右侧目录树抽屉（macOS）** | **`⌘⇧E`** | 基于 Carbon `RegisterEventHotKey` 仅在 `Antigravity` 前台生效，**零冲突、无需辅助功能权限**；面板右上角 `⌨` 可切换 `⌘⌥E` / `⌃⇧E` / `⌘⇧Y` / `关闭` |
+| **独立右侧目录树抽屉（macOS）** | **`⌘⇧E`** | 基于 Carbon `RegisterEventHotKey` 默认仅在 `Antigravity` 前台生效，**零冲突、无需辅助功能权限**；面板右上角 `⌨` 支持**点击录制任意快捷键**、切换 `⌘⌥E` / `⌃⇧E` / `⌘⇧Y` 预设及「仅 AGY 前台 / 全局生效」 |
+| **AGY 右侧辅助栏直达（macOS）** | **`⌥⌘E`** | 一键唤醒 Antigravity 原生右侧辅助栏并自动切到 **AGY Finder 目录树**（若未固定可一键激活；支持在 `⌨` 面板点击录制自定义，或用 `agy-finder aux`） |
 | **宿主右侧辅助栏原生开关** | **`⌘⇧B`**（macOS）<br/>**`Ctrl+Shift+B`**（Win / Linux） | 开关 Antigravity 原生右侧辅助栏；右键插件标签可 `Pin Tab` 常驻固定 |
 | **对话斜杠与深链接直达** | **`/agy-finder`**<br/>点击回复旁 **`[📂]`** · [`sidecar://agy-finder/tree/`](sidecar://agy-finder/tree/) | 聊天中一键打开目录树面板，或直接展开并脉冲高亮指定文件 |
-| **终端 CLI 快捷命令** | **`agy-finder`**（等同 `agy-finder toggle`） | 跨平台开关右侧目录树抽屉；Windows / Linux 可将 `agy-finder toggle` 绑定为 `Ctrl+Shift+E` 全局热键 |
+| **终端 CLI 快捷命令** | **`agy-finder`**（独立抽屉）<br/>**`agy-finder aux`**（AGY 侧栏） | 跨平台开关独立抽屉或切换 AGY 右侧辅助栏目录树；Windows / Linux 可分别绑定 `agy-finder toggle` / `agy-finder aux` 为全局热键 |
 | **面板内全键盘导航** | `↑` / `↓` · `←` / `→` · `Enter` · `/` · `⌘/Ctrl+.` · `?` · `Esc` | 移动选中、折展目录、预览或展开、搜索过滤、显隐 dotfiles、打开快捷键面板、逐层关闭 |
 
 ```bash
-agy-finder                     # 等同 agy-finder toggle：打开或关闭右侧独立目录树抽屉
-agy-finder open [path]         # 打开抽屉并可选定位到指定路径
-agy-finder close               # 关闭抽屉
-agy-finder status [--json]     # 查看抽屉与快捷键状态
-agy-finder hotkey <preset>     # 设置快捷键预设：cmd+shift+e | cmd+alt+e | ctrl+shift+e | cmd+shift+y | off
-agy-finder quit                # 退出后台抽屉守护进程
+agy-finder                          # 等同 agy-finder toggle：打开或关闭右侧独立目录树抽屉
+agy-finder open [path]              # 打开独立抽屉并可选定位到指定路径
+agy-finder aux [path]               # 唤醒/切换 Antigravity 右侧辅助栏目录树，可选高亮定位路径
+agy-finder close                    # 关闭独立抽屉
+agy-finder status [--json]          # 查看抽屉、AGY 侧栏与双快捷键状态
+agy-finder shortcut [<combo>|off|reset]      # 查看或自定义独立抽屉快捷键
+agy-finder aux-shortcut [<combo>|off|reset]  # 查看或自定义 AGY 侧栏目录树快捷键
+agy-finder hotkey <preset>          # 快速切换预设：cmd+shift+e | cmd+alt+e | ctrl+shift+e | cmd+shift+y | off
+agy-finder quit                     # 退出后台抽屉守护进程
 ```
 
 ---
@@ -125,7 +129,7 @@ cd agy-plugins
 agy plugin install ./plugins/agy-finder
 ```
 
-安装完成后，Antigravity 会自动加载并启用 **AGY Finder 项目目录树**（可在左侧 **Customizations → Installed** 中随时开关管理），按 `⌘⇧E`、点击对话中的 `[AGY Finder 目录树](sidecar://agy-finder/tree/)` 或右侧辅助栏入口即可打开。
+安装完成后，Antigravity 会自动加载并启用 **AGY Finder 项目目录树**（可在左侧 **Customizations → Installed** 中随时开关管理），按 `⌘⇧E`（独立抽屉）、`⌥⌘E`（AGY 右侧辅助栏直达），或点击对话中的 `[AGY Finder 目录树](sidecar://agy-finder/tree/)` 即可打开。
 
 ---
 

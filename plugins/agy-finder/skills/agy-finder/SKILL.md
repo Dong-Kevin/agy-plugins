@@ -14,7 +14,7 @@ description: 在右侧辅助栏打开项目目录树面板，或生成点击直�
 2. **定位指定文件或目录**：对目标路径（相对路径或绝对路径均可）做 `encodeURIComponent` 后附加到 `path` 参数中：
    `[📂 定位 <文件名>](sidecar://agy-finder/tree/?path=<encoded-path>)`
 3. 面板支持直接单击文件高亮路径、双击或点 `↗` 调用原生预览器打开、点 `📋` 复制路径，以及点 `🖥` 在系统文件管理器中定位。
-4. **快捷键开关侧边栏 / 独立抽屉**：
-   - macOS 在 Antigravity 内按 `⌘⇧E`（可在面板顶部 `⌨` 设置为 `⌘⌥E` / `⌃⇧E` / `⌘⇧Y` / `关闭`）秒开/收回右侧独立目录树抽屉；
-   - Antigravity 原生右侧辅助栏开关：`⌘⇧B`（macOS）/ `Ctrl+Shift+B`（Windows/Linux）；
-   - Windows / Linux 可通过 CLI `agy-finder toggle` 绑定到系统快捷键（PowerToys / AutoHotkey / GNOME / KDE）。
+4. **快捷键开关独立抽屉 / 直达 AGY 右侧辅助栏**：
+   - macOS 默认在 Antigravity 内按 `⌘⇧E` 秒开/收回独立右侧目录树抽屉，按 `⌥⌘E` 直接拉起或切到 Antigravity 原生右侧辅助栏并显示目录树；
+   - 在面板右上角 `⌨` 可分别点击录制**独立抽屉**与 **AGY 侧栏**快捷键，并切换「仅 AGY 前台 / 全局生效」或内置预设；
+   - Windows / Linux 可将 `agy-finder toggle`（独立抽屉）或 `agy-finder aux`（AGY 侧栏）绑定到系统快捷键（PowerToys / AutoHotkey / GNOME / KDE）。

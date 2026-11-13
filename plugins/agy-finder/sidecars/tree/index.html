@@ -52,14 +52,42 @@
 
     <section id="shortcut-panel" class="af-shortcut-panel hidden" aria-label="快捷键与侧边栏开关">
       <div class="af-shortcut-row">
-        <span class="af-shortcut-label">独立抽屉开关</span>
-        <select id="hotkey-preset-select" class="af-shortcut-select" aria-label="独立抽屉快捷键"></select>
-        <button id="btn-drawer-action" class="af-mini-btn" type="button">打开抽屉</button>
+        <span class="af-shortcut-label">独立抽屉快捷键</span>
+        <div class="af-shortcut-actions">
+          <button id="btn-record-drawer-shortcut" class="af-kbd-record-btn" type="button" title="点击后直接按下新的组合键（Esc 取消）">
+            <kbd id="drawer-shortcut-kbd-label">⇧⌘E</kbd>
+            <span id="drawer-shortcut-record-hint" class="af-kbd-sub">点击修改</span>
+          </button>
+          <select id="hotkey-preset-select" class="af-shortcut-select" aria-label="独立抽屉快捷预设"></select>
+          <button id="btn-reset-drawer-shortcut" class="af-mini-btn" type="button" title="恢复默认快捷键">默认</button>
+          <button id="btn-drawer-action" class="af-mini-btn" type="button">打开抽屉</button>
+        </div>
+      </div>
+      <div class="af-shortcut-row" id="aux-shortcut-row">
+        <span class="af-shortcut-label">AGY 侧栏目录树</span>
+        <div class="af-shortcut-actions">
+          <button id="btn-record-aux-shortcut" class="af-kbd-record-btn" type="button" title="点击后直接按下新的组合键（Esc 取消）">
+            <kbd id="aux-shortcut-kbd-label">⌥⌘E</kbd>
+            <span id="aux-shortcut-record-hint" class="af-kbd-sub">点击修改</span>
+          </button>
+          <button id="btn-toggle-aux-shortcut" class="af-mini-btn" type="button" title="启用或关闭 AGY 侧栏目录树快捷键">已开启</button>
+          <button id="btn-reset-aux-shortcut" class="af-mini-btn" type="button" title="恢复默认快捷键">默认</button>
+          <button id="btn-aux-open" class="af-mini-btn" type="button" title="在 Antigravity 右侧辅助栏切换显示目录树">切换侧栏</button>
+        </div>
+      </div>
+      <div class="af-shortcut-row" id="shortcut-scope-row">
+        <span class="af-shortcut-label">快捷键范围</span>
+        <div class="af-shortcut-actions">
+          <button id="btn-shortcut-scope" class="af-mini-btn" type="button" title="切换仅 Antigravity 前台生效或系统全局生效">仅 AGY 内</button>
+        </div>
       </div>
       <div id="shortcut-hint" class="af-shortcut-sub"></div>
       <div id="shortcut-cli-row" class="af-shortcut-row hidden">
-        <code class="af-kbd">agy-finder toggle</code>
-        <button id="btn-copy-cli" class="af-mini-btn" type="button">复制系统快捷键命令</button>
+        <span class="af-shortcut-cli-cmds">
+          <code class="af-kbd">agy-finder toggle</code>
+          <code class="af-kbd">agy-finder aux</code>
+        </span>
+        <button id="btn-copy-cli" class="af-mini-btn" type="button">复制侧栏命令</button>
       </div>
       <div class="af-shortcut-row af-shortcut-host">
         <span class="af-shortcut-label">宿主右侧辅助栏</span>

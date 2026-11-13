@@ -7,58 +7,79 @@ import Carbon
 // (zero Accessibility TCC prompts, zero VS Code shortcut conflict, zero TCP ports).
 
 struct HotkeySpec {
-  let preset: String
+  let accelerator: String
   let keyCode: UInt32
   let carbonModifiers: UInt32
   let eventModifiers: NSEvent.ModifierFlags
-  let lowerChar: String
   let displayLabel: String
 }
 
 let kHotKeySignature: OSType = 0x41475946 // 'AGYF'
-let kHotKeyId: UInt32 = 1
+let kDrawerHotKeyId: UInt32 = 1
+let kAuxHotKeyId: UInt32 = 2
+
+func carbonModsToNSEventFlags(_ mods: UInt32) -> NSEvent.ModifierFlags {
+  var flags: NSEvent.ModifierFlags = []
+  if (mods & UInt32(cmdKey)) != 0 { flags.insert(.command) }
+  if (mods & UInt32(optionKey)) != 0 { flags.insert(.option) }
+  if (mods & UInt32(controlKey)) != 0 { flags.insert(.control) }
+  if (mods & UInt32(shiftKey)) != 0 { flags.insert(.shift) }
+  return flags
+}
 
 func parseHotkeyPreset(_ raw: String) -> HotkeySpec? {
   switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
   case "cmd+shift+e":
     return HotkeySpec(
-      preset: "cmd+shift+e",
+      accelerator: "Shift+Meta+E",
       keyCode: UInt32(kVK_ANSI_E),
       carbonModifiers: UInt32(cmdKey | shiftKey),
       eventModifiers: [.command, .shift],
-      lowerChar: "e",
-      displayLabel: "⌘⇧E"
+      displayLabel: "⇧⌘E"
     )
   case "cmd+alt+e":
     return HotkeySpec(
-      preset: "cmd+alt+e",
+      accelerator: "Alt+Meta+E",
       keyCode: UInt32(kVK_ANSI_E),
       carbonModifiers: UInt32(cmdKey | optionKey),
       eventModifiers: [.command, .option],
-      lowerChar: "e",
-      displayLabel: "⌘⌥E"
+      displayLabel: "⌥⌘E"
     )
   case "ctrl+shift+e":
     return HotkeySpec(
-      preset: "ctrl+shift+e",
+      accelerator: "Ctrl+Shift+E",
       keyCode: UInt32(kVK_ANSI_E),
       carbonModifiers: UInt32(controlKey | shiftKey),
       eventModifiers: [.control, .shift],
-      lowerChar: "e",
       displayLabel: "⌃⇧E"
     )
   case "cmd+shift+y":
     return HotkeySpec(
-      preset: "cmd+shift+y",
+      accelerator: "Shift+Meta+Y",
       keyCode: UInt32(kVK_ANSI_Y),
       carbonModifiers: UInt32(cmdKey | shiftKey),
       eventModifiers: [.command, .shift],
-      lowerChar: "y",
-      displayLabel: "⌘⇧Y"
+      displayLabel: "⇧⌘Y"
     )
   default:
     return nil
   }
+}
+
+func parseShortcutCommand(_ msg: [String: Any]) -> HotkeySpec? {
+  let enabled = (msg["enabled"] as? Bool) ?? true
+  guard enabled,
+        let keyCode = (msg["keyCode"] as? NSNumber)?.uint32Value,
+        let carbonMods = (msg["carbonModifiers"] as? NSNumber)?.uint32Value else {
+    return nil
+  }
+  return HotkeySpec(
+    accelerator: (msg["accelerator"] as? String) ?? "",
+    keyCode: keyCode,
+    carbonModifiers: carbonMods,
+    eventModifiers: carbonModsToNSEventFlags(carbonMods),
+    displayLabel: (msg["displayLabel"] as? String) ?? ""
+  )
 }
 
 private func carbonHotkeyCallback(
@@ -79,14 +100,19 @@ private func carbonHotkeyCallback(
     nil,
     &hotKeyID
   )
-  guard status == noErr,
-        hotKeyID.signature == kHotKeySignature,
-        hotKeyID.id == kHotKeyId else {
+  guard status == noErr, hotKeyID.signature == kHotKeySignature else {
     return OSStatus(eventNotHandledErr)
   }
   let controller = Unmanaged<DrawerWindowController>.fromOpaque(userData).takeUnretainedValue()
-  controller.handleHotKeyTriggered()
-  return noErr
+  if hotKeyID.id == kDrawerHotKeyId {
+    controller.handleDrawerHotKeyTriggered()
+    return noErr
+  }
+  if hotKeyID.id == kAuxHotKeyId {
+    controller.handleAuxHotKeyTriggered()
+    return noErr
+  }
+  return OSStatus(eventNotHandledErr)
 }
 
 final class DrawerBridge: NSObject, WKScriptMessageHandler {
@@ -108,24 +134,44 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
   var isWindowVisible: Bool
   var hotkeyPreset: String
   var hotkeySpec: HotkeySpec?
+  var auxHotkeySpec: HotkeySpec?
+  var shortcutScope: String
+  var isRecordingShortcut: Bool = false
 
   var eventHandlerRef: EventHandlerRef?
   var hotKeyRef: EventHotKeyRef?
+  var auxHotKeyRef: EventHotKeyRef?
   var localKeyMonitor: Any?
   var workspaceObserver: NSObjectProtocol?
   weak var lastAntigravityApp: NSRunningApplication?
+  var hudPanel: NSPanel?
+  var hudLabel: NSTextField?
+  var hudHideWorkItem: DispatchWorkItem?
 
-  init(initialPinned: Bool, initialVisible: Bool, initialPreset: String) {
+  var shouldStayResident: Bool {
+    return hotkeySpec != nil || auxHotkeySpec != nil
+  }
+
+  init(
+    initialPinned: Bool,
+    initialVisible: Bool,
+    initialPreset: String,
+    initialDrawerSpec: HotkeySpec?,
+    initialAuxSpec: HotkeySpec?,
+    initialScope: String
+  ) {
     self.isPinned = initialPinned
     self.isWindowVisible = initialVisible
     self.hotkeyPreset = initialPreset
-    self.hotkeySpec = parseHotkeyPreset(initialPreset)
+    self.hotkeySpec = initialDrawerSpec
+    self.auxHotkeySpec = initialAuxSpec
+    self.shortcutScope = initialScope
     super.init()
     bridge.controller = self
   }
 
   deinit {
-    unregisterHotKey()
+    unregisterHotKeys()
     if let obs = workspaceObserver {
       NSWorkspace.shared.notificationCenter.removeObserver(obs)
     }
@@ -176,10 +222,14 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
     let winMenuItem = NSMenuItem()
     mainMenu.addItem(winMenuItem)
     let winMenu = NSMenu(title: "窗口")
+    let auxItem = NSMenuItem(title: "在 AGY 侧栏切换文件树", action: #selector(triggerAuxPaneFromMenuAction), keyEquivalent: "")
+    auxItem.target = self
+    winMenu.addItem(auxItem)
     let pinItem = NSMenuItem(title: "切换置顶状态", action: #selector(togglePinnedAction), keyEquivalent: "p")
     pinItem.keyEquivalentModifierMask = [.command, .shift]
     pinItem.target = self
     winMenu.addItem(pinItem)
+    winMenu.addItem(NSMenuItem.separator())
     winMenu.addItem(withTitle: "最小化", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
     winMenu.addItem(withTitle: "关闭", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
     winMenuItem.submenu = winMenu
@@ -274,11 +324,17 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
 
   func installLocalKeyMonitor() {
     localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-      guard let self = self, let spec = self.hotkeySpec else { return event }
+      guard let self = self, !self.isRecordingShortcut else { return event }
       let relevantFlags = event.modifierFlags.intersection([.command, .option, .control, .shift])
-      let chars = (event.charactersIgnoringModifiers ?? "").lowercased()
-      if relevantFlags == spec.eventModifiers && chars == spec.lowerChar {
+      let keyCode = UInt32(event.keyCode)
+      if let dSpec = self.hotkeySpec,
+         keyCode == dSpec.keyCode && relevantFlags == dSpec.eventModifiers {
         self.toggleWindowAction()
+        return nil
+      }
+      if let aSpec = self.auxHotkeySpec,
+         keyCode == aSpec.keyCode && relevantFlags == aSpec.eventModifiers {
+        self.handleAuxHotKeyTriggered()
         return nil
       }
       return event
@@ -301,16 +357,22 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
   }
 
   func syncHotKeyForFrontmostApp(_ app: NSRunningApplication?) {
-    if isTargetHostApp(app), hotkeySpec != nil {
-      registerHotKey()
-    } else {
-      unregisterHotKey()
+    let inTarget = isTargetHostApp(app)
+    let active = (shortcutScope == "global") || inTarget
+    unregisterHotKeys()
+    if active {
+      if hotkeySpec != nil {
+        registerDrawerHotKey()
+      }
+      if auxHotkeySpec != nil {
+        registerAuxHotKey()
+      }
     }
   }
 
-  func registerHotKey() {
+  func registerDrawerHotKey() {
     guard hotKeyRef == nil, let spec = hotkeySpec else { return }
-    let hotKeyID = EventHotKeyID(signature: kHotKeySignature, id: kHotKeyId)
+    let hotKeyID = EventHotKeyID(signature: kHotKeySignature, id: kDrawerHotKeyId)
     var ref: EventHotKeyRef?
     let err = RegisterEventHotKey(
       spec.keyCode,
@@ -325,19 +387,40 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
     }
   }
 
-  func unregisterHotKey() {
+  func registerAuxHotKey() {
+    guard auxHotKeyRef == nil, let spec = auxHotkeySpec else { return }
+    let hotKeyID = EventHotKeyID(signature: kHotKeySignature, id: kAuxHotKeyId)
+    var ref: EventHotKeyRef?
+    let err = RegisterEventHotKey(
+      spec.keyCode,
+      spec.carbonModifiers,
+      hotKeyID,
+      GetApplicationEventTarget(),
+      0,
+      &ref
+    )
+    if err == noErr {
+      auxHotKeyRef = ref
+    }
+  }
+
+  func unregisterHotKeys() {
     if let ref = hotKeyRef {
       UnregisterEventHotKey(ref)
       hotKeyRef = nil
+    }
+    if let ref = auxHotKeyRef {
+      UnregisterEventHotKey(ref)
+      auxHotKeyRef = nil
     }
   }
 
   func applyHotkeyPreset(_ rawPreset: String, notifyWeb: Bool) {
     let trimmed = rawPreset.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     let spec = parseHotkeyPreset(trimmed)
-    hotkeyPreset = spec?.preset ?? "off"
+    hotkeyPreset = spec != nil ? trimmed : "off"
     hotkeySpec = spec
-    unregisterHotKey()
+    updateWindowTitle()
     syncHotKeyForFrontmostApp(NSWorkspace.shared.frontmostApplication)
     emitJson(["type": "hotkeyChanged", "hotkeyPreset": hotkeyPreset])
     if notifyWeb {
@@ -346,8 +429,116 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
     }
   }
 
-  func handleHotKeyTriggered() {
+  func applyDrawerShortcut(spec: HotkeySpec?, scope: String?, notifyWeb: Bool) {
+    if let scope = scope, !scope.isEmpty {
+      shortcutScope = scope
+    }
+    hotkeySpec = spec
+    updateWindowTitle()
+    syncHotKeyForFrontmostApp(NSWorkspace.shared.frontmostApplication)
+    if notifyWeb,
+       let data = try? JSONSerialization.data(withJSONObject: [
+         "type": "drawerShortcutChanged",
+         "enabled": spec != nil,
+         "accelerator": spec?.accelerator ?? "",
+         "display": spec?.displayLabel ?? "已关闭",
+         "scope": shortcutScope
+       ], options: []),
+       let jsonStr = String(data: data, encoding: .utf8) {
+      webView?.evaluateJavaScript("window.__afOnHostEvent && window.__afOnHostEvent(\(jsonStr));", completionHandler: nil)
+    }
+  }
+
+  func applyAuxShortcut(spec: HotkeySpec?, scope: String?, notifyWeb: Bool) {
+    if let scope = scope, !scope.isEmpty {
+      shortcutScope = scope
+    }
+    auxHotkeySpec = spec
+    syncHotKeyForFrontmostApp(NSWorkspace.shared.frontmostApplication)
+    if notifyWeb,
+       let data = try? JSONSerialization.data(withJSONObject: [
+         "type": "auxShortcutChanged",
+         "enabled": spec != nil,
+         "accelerator": spec?.accelerator ?? "",
+         "display": spec?.displayLabel ?? "已关闭",
+         "scope": shortcutScope
+       ], options: []),
+       let jsonStr = String(data: data, encoding: .utf8) {
+      webView?.evaluateJavaScript("window.__afOnHostEvent && window.__afOnHostEvent(\(jsonStr));", completionHandler: nil)
+    }
+  }
+
+  func handleDrawerHotKeyTriggered() {
     toggleWindowAction()
+  }
+
+  func handleAuxHotKeyTriggered() {
+    emitJson([
+      "type": "auxHotkeyTriggered",
+      "accelerator": auxHotkeySpec?.accelerator ?? ""
+    ])
+  }
+
+  @objc func triggerAuxPaneFromMenuAction() {
+    handleAuxHotKeyTriggered()
+  }
+
+  func showHudNotice(_ text: String) {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return }
+
+    if hudPanel == nil {
+      let panel = NSPanel(
+        contentRect: NSRect(x: 0, y: 0, width: 380, height: 42),
+        styleMask: [.borderless, .nonactivatingPanel],
+        backing: .buffered,
+        defer: false
+      )
+      panel.level = .statusBar
+      panel.backgroundColor = .clear
+      panel.isOpaque = false
+      panel.hasShadow = true
+      panel.ignoresMouseEvents = true
+      panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+
+      let bg = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 42))
+      bg.wantsLayer = true
+      bg.layer?.cornerRadius = 10
+      bg.layer?.backgroundColor = NSColor(calibratedWhite: 0.10, alpha: 0.90).cgColor
+      bg.layer?.borderWidth = 1
+      bg.layer?.borderColor = NSColor(calibratedWhite: 1.0, alpha: 0.14).cgColor
+
+      let label = NSTextField(labelWithString: "")
+      label.textColor = .white
+      label.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
+      label.alignment = .center
+      label.lineBreakMode = .byTruncatingTail
+      label.frame = NSRect(x: 14, y: 11, width: 352, height: 20)
+      bg.addSubview(label)
+      panel.contentView = bg
+      hudPanel = panel
+      hudLabel = label
+    }
+
+    guard let panel = hudPanel, let label = hudLabel else { return }
+    label.stringValue = trimmed
+    let textWidth = min(max(ceil(label.attributedStringValue.size().width) + 36, 220), 460)
+    let height: CGFloat = 42
+    let screenFrame = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+    let x = screenFrame.midX - textWidth / 2.0
+    let y = screenFrame.minY + 78
+    panel.setFrame(NSRect(x: x, y: y, width: textWidth, height: height), display: true)
+    panel.contentView?.frame = NSRect(x: 0, y: 0, width: textWidth, height: height)
+    label.frame = NSRect(x: 16, y: 11, width: textWidth - 32, height: 20)
+    panel.alphaValue = 1
+    panel.orderFrontRegardless()
+
+    hudHideWorkItem?.cancel()
+    let item = DispatchWorkItem { [weak self] in
+      self?.hudPanel?.orderOut(nil)
+    }
+    hudHideWorkItem = item
+    DispatchQueue.main.asyncAfter(deadline: .now() + 2.4, execute: item)
   }
 
   // MARK: - Window & Pin Controls
@@ -448,7 +639,7 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
   }
 
   func windowShouldClose(_ sender: NSWindow) -> Bool {
-    if hotkeySpec != nil {
+    if shouldStayResident {
       hideWindow(restoreHostFocus: true, notifyParent: true)
       return false
     } else {
@@ -470,6 +661,8 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
       applyPinnedState(next, notifyWeb: true)
     } else if kind == "closeWindow" {
       hideWindow(restoreHostFocus: true, notifyParent: true)
+    } else if kind == "setRecording" {
+      isRecordingShortcut = (obj["recording"] as? Bool) ?? false
     } else if kind == "rpc" {
       emitJson([
         "type": "rpcRequest",
@@ -529,6 +722,16 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
       if let preset = msg["hotkeyPreset"] as? String {
         applyHotkeyPreset(preset, notifyWeb: true)
       }
+    case "setDrawerShortcut":
+      applyDrawerShortcut(spec: parseShortcutCommand(msg), scope: msg["scope"] as? String, notifyWeb: true)
+    case "setAuxShortcut":
+      applyAuxShortcut(spec: parseShortcutCommand(msg), scope: msg["scope"] as? String, notifyWeb: true)
+    case "setShortcutRecording":
+      isRecordingShortcut = (msg["recording"] as? Bool) ?? false
+    case "showHud":
+      if let text = msg["message"] as? String {
+        showHudNotice(text)
+      }
     case "showWindow", "focus":
       showWindow(notifyParent: true, revealPath: msg["revealPath"] as? String)
     case "hideWindow":
@@ -552,12 +755,61 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
   }
 }
 
+func cliArgValue(_ args: [String], _ flag: String) -> String? {
+  guard let idx = args.firstIndex(of: flag), idx + 1 < args.count else { return nil }
+  return args[idx + 1]
+}
+
 let args = CommandLine.arguments
 let initialPinned = !args.contains("--unpinned")
 let initialVisible = !args.contains("--hidden-window")
-var initialPreset = "cmd+shift+e"
-if let idx = args.firstIndex(of: "--preset"), idx + 1 < args.count {
-  initialPreset = args[idx + 1]
+let initialPreset = cliArgValue(args, "--preset") ?? "cmd+shift+e"
+let initialScope = cliArgValue(args, "--scope") ?? "app"
+
+var initialDrawerSpec: HotkeySpec? = nil
+if !args.contains("--no-drawer-shortcut") {
+  if let kcStr = cliArgValue(args, "--drawer-keycode"), let kc = UInt32(kcStr),
+     let modsStr = cliArgValue(args, "--drawer-mods"), let mods = UInt32(modsStr) {
+    initialDrawerSpec = HotkeySpec(
+      accelerator: cliArgValue(args, "--drawer-acc") ?? "",
+      keyCode: kc,
+      carbonModifiers: mods,
+      eventModifiers: carbonModsToNSEventFlags(mods),
+      displayLabel: cliArgValue(args, "--drawer-label") ?? ""
+    )
+  } else {
+    initialDrawerSpec = parseHotkeyPreset(initialPreset)
+  }
+}
+
+var initialAuxSpec: HotkeySpec? = nil
+if !args.contains("--no-aux-shortcut") {
+  if let kcStr = cliArgValue(args, "--aux-keycode"), let kc = UInt32(kcStr),
+     let modsStr = cliArgValue(args, "--aux-mods"), let mods = UInt32(modsStr) {
+    initialAuxSpec = HotkeySpec(
+      accelerator: cliArgValue(args, "--aux-acc") ?? "",
+      keyCode: kc,
+      carbonModifiers: mods,
+      eventModifiers: carbonModsToNSEventFlags(mods),
+      displayLabel: cliArgValue(args, "--aux-label") ?? ""
+    )
+  } else if initialDrawerSpec?.accelerator == "Alt+Meta+E" {
+    initialAuxSpec = HotkeySpec(
+      accelerator: "Ctrl+Alt+E",
+      keyCode: UInt32(kVK_ANSI_E),
+      carbonModifiers: UInt32(controlKey | optionKey),
+      eventModifiers: [.control, .option],
+      displayLabel: "⌃⌥E"
+    )
+  } else {
+    initialAuxSpec = HotkeySpec(
+      accelerator: "Alt+Meta+E",
+      keyCode: UInt32(kVK_ANSI_E),
+      carbonModifiers: UInt32(cmdKey | optionKey),
+      eventModifiers: [.command, .option],
+      displayLabel: "⌥⌘E"
+    )
+  }
 }
 
 let app = NSApplication.shared
@@ -565,7 +817,10 @@ app.setActivationPolicy(.accessory)
 let delegate = DrawerWindowController(
   initialPinned: initialPinned,
   initialVisible: initialVisible,
-  initialPreset: initialPreset
+  initialPreset: initialPreset,
+  initialDrawerSpec: initialDrawerSpec,
+  initialAuxSpec: initialAuxSpec,
+  initialScope: initialScope
 )
 app.delegate = delegate
 app.run()

@@ -29,8 +29,10 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import {
+  ackAuxPaneTrigger,
   collectTokenHistory,
   createLoopbackSessionToken,
+  getAuxShortcutConfig,
   getMenubarMode,
   getMenubarPreference,
   getPluginStateDir,
@@ -41,19 +43,25 @@ import {
   injectCsrfMeta,
   launchCliTerminal,
   LOOPBACK_SECURITY_HEADERS,
+  markAuxPaneSwitched,
   MENUBAR_MODES,
+  readAuxPaneTrigger,
   readLoopbackJsonBody,
+  recordAuxActiveConversation,
   saveSettings,
   scanConversation,
+  setAuxShortcutConfig,
   setMenubarMode,
   setMenubarPreference,
   setShortcutConfig,
   setSidebarEntrypoint,
-  updateActiveSessionHint
+  updateActiveSessionHint,
+  waitForAuxPaneTrigger,
+  writeAuxPaneTrigger
 } from './collector.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-export const DAEMON_VERSION = 6;
+export const DAEMON_VERSION = 7;
 const DAEMON_RUNTIME_FILES = [
   'pricing.mjs',
   'collector.mjs',
@@ -171,6 +179,7 @@ export function getFloatWindowStatus(platform = process.platform) {
   const prefMenubar = menubarSupported ? getMenubarPreference() : false;
   const prefMode = getMenubarMode();
   const shortcut = getShortcutConfig(platform);
+  const auxShortcut = getAuxShortcutConfig(platform);
   if (!st) {
     return {
       ok: true,
@@ -185,6 +194,9 @@ export function getFloatWindowStatus(platform = process.platform) {
       shortcutEnabled: shortcut.enabled,
       shortcutActive: false,
       shortcut,
+      auxShortcutEnabled: auxShortcut.enabled,
+      auxShortcutActive: false,
+      auxShortcut,
       statusTitle: null,
       activeConvId: null,
       activeConvTitle: null,
@@ -193,6 +205,7 @@ export function getFloatWindowStatus(platform = process.platform) {
   }
   const windowVisible = st.windowVisible !== undefined ? Boolean(st.windowVisible) : Boolean(st.running);
   const shortcutEnabled = st.shortcutEnabled !== undefined ? Boolean(st.shortcutEnabled) : shortcut.enabled;
+  const auxShortcutEnabled = st.auxShortcutEnabled !== undefined ? Boolean(st.auxShortcutEnabled) : auxShortcut.enabled;
   return {
     ok: true,
     daemonRunning: true,
@@ -209,6 +222,9 @@ export function getFloatWindowStatus(platform = process.platform) {
     shortcutEnabled,
     shortcutActive: menubarSupported && shortcutEnabled && (st.mode || 'native-macos') === 'native-macos',
     shortcut,
+    auxShortcutEnabled,
+    auxShortcutActive: menubarSupported && auxShortcutEnabled && (st.mode || 'native-macos') === 'native-macos',
+    auxShortcut,
     statusTitle: st.statusTitle || null,
     activeConvId: st.activeConvId || null,
     activeConvTitle: st.activeConvTitle || null,
@@ -277,6 +293,9 @@ function diagnoseMacMenubarFailure() {
 }
 
 async function spawnDaemon({ pinned = true, menubarEnabled = true, hiddenWindow = false, menubarMode = '' } = {}) {
+  if (process.env.AGY_CONTEXT_VIEWER_DISABLE_DAEMON === '1') {
+    return null;
+  }
   const lockPath = getSpawnLockPath();
   if (existsSync(lockPath)) {
     try {
@@ -346,6 +365,26 @@ export async function controlFloatWindow(options = {}, deps = {}) {
     return getFloatWindowStatus(platform);
   }
 
+  if (action === 'toggle-aux' || action === 'open-aux') {
+    const trig = writeAuxPaneTrigger({
+      targetPlugin: 'context-viewer',
+      uri: 'sidecar://context-viewer/dashboard/',
+      action: action === 'open-aux' ? 'open' : 'toggle',
+      convId: typeof options.convId === 'string' ? options.convId : ''
+    });
+    await new Promise((r) => setTimeout(r, 420));
+    const latest = readAuxPaneTrigger();
+    const acked = Number(latest.ackSeq || 0) >= Number(trig.seq || 1);
+    return {
+      ok: true,
+      acked,
+      trigger: latest,
+      message: acked
+        ? '已切换 Antigravity 右侧辅助栏「上下文看板」'
+        : '已发送切换指令（若右侧栏未响应，请确认 Antigravity 桌面端正在运行且至少加载过一次「上下文看板」）'
+    };
+  }
+
   let current = readFloatState();
   const callerLsAddr = process.env.ANTIGRAVITY_LS_ADDRESS || '';
   let upgradedFrom = null;
@@ -361,8 +400,9 @@ export async function controlFloatWindow(options = {}, deps = {}) {
     const prevPinned = current.pinned !== false;
     const prevMenubar = Boolean(current.menubarEnabled);
     const prevShortcut = Boolean(current.shortcutEnabled ?? getShortcutConfig(platform).enabled);
+    const prevAuxShortcut = Boolean(current.auxShortcutEnabled ?? getAuxShortcutConfig(platform).enabled);
     const prevMode = MENUBAR_MODES.includes(current.menubarMode) ? current.menubarMode : getMenubarMode();
-    upgradedFrom = { prevVisible, prevPinned, prevMenubar, prevShortcut, prevMode };
+    upgradedFrom = { prevVisible, prevPinned, prevMenubar, prevShortcut, prevAuxShortcut, prevMode };
     await terminateFn(current.pid);
     current = null;
     if ((action === 'ensure-menubar' || action === 'ensure-daemon') && prevVisible) {
@@ -374,7 +414,7 @@ export async function controlFloatWindow(options = {}, deps = {}) {
       });
       return restarted || getFloatWindowStatus(platform);
     }
-    if (action === 'refresh-session' && (prevVisible || (platform === 'darwin' && (prevMenubar || prevShortcut)))) {
+    if (action === 'refresh-session' && (prevVisible || (platform === 'darwin' && (prevMenubar || prevShortcut || prevAuxShortcut)))) {
       const restarted = await spawnFn({
         pinned: prevPinned,
         menubarEnabled: platform === 'darwin' ? prevMenubar : false,
@@ -409,8 +449,10 @@ export async function controlFloatWindow(options = {}, deps = {}) {
     }
     const wantMenubar = getMenubarPreference();
     const sc = getShortcutConfig(platform);
+    const auxSc = getAuxShortcutConfig(platform);
     const wantShortcut = Boolean(sc.enabled);
-    if (!wantMenubar && !wantShortcut) {
+    const wantAuxShortcut = Boolean(auxSc.enabled);
+    if (!wantMenubar && !wantShortcut && !wantAuxShortcut) {
       return getFloatWindowStatus(platform);
     }
     if (current) {
@@ -425,7 +467,7 @@ export async function controlFloatWindow(options = {}, deps = {}) {
           (wantShortcut && current.shortcutScope && current.shortcutScope !== sc.scope)
         )
       ) {
-        return sendCmdFn(current, {
+        await sendCmdFn(current, {
           cmd: 'setShortcut',
           enabled: wantShortcut,
           accelerator: sc.accelerator,
@@ -433,6 +475,23 @@ export async function controlFloatWindow(options = {}, deps = {}) {
           scope: sc.scope,
           keyCode: sc.macCarbon?.keyCode ?? -1,
           modifiers: sc.macCarbon?.modifiers ?? 0
+        });
+      }
+      if (
+        current.auxShortcutEnabled !== undefined &&
+        (
+          Boolean(current.auxShortcutEnabled) !== wantAuxShortcut ||
+          (wantAuxShortcut && current.auxShortcutAccelerator && current.auxShortcutAccelerator !== auxSc.accelerator)
+        )
+      ) {
+        return sendCmdFn(current, {
+          cmd: 'setAuxShortcut',
+          enabled: wantAuxShortcut,
+          accelerator: auxSc.accelerator,
+          display: auxSc.display,
+          scope: auxSc.scope,
+          keyCode: auxSc.macCarbon?.keyCode ?? -1,
+          modifiers: auxSc.macCarbon?.modifiers ?? 0
         });
       }
       return getFloatWindowStatus(platform);
@@ -457,6 +516,7 @@ export async function controlFloatWindow(options = {}, deps = {}) {
       };
     }
     const sc = saved.shortcut;
+    const auxSc = getAuxShortcutConfig(platform);
     let nextStatus = null;
     if (platform === 'darwin') {
       if (current) {
@@ -469,7 +529,7 @@ export async function controlFloatWindow(options = {}, deps = {}) {
           keyCode: sc.macCarbon?.keyCode ?? -1,
           modifiers: sc.macCarbon?.modifiers ?? 0
         });
-      } else if (sc.enabled) {
+      } else if (sc.enabled || auxSc.enabled) {
         nextStatus = await spawnFn({
           pinned: upgradedFrom ? upgradedFrom.prevPinned : true,
           menubarEnabled: getMenubarPreference(),
@@ -481,14 +541,65 @@ export async function controlFloatWindow(options = {}, deps = {}) {
     const fresh = getFloatWindowStatus(platform);
     const scopeLabel = sc.scope === 'global' ? '全局生效' : '仅宿主前台生效';
     const message = !sc.enabled
-      ? '已关闭侧栏看板快捷键'
+      ? '已关闭独立悬浮窗快捷键'
       : platform === 'darwin'
-        ? `已启用看板快捷键 ${sc.display}（${scopeLabel}），可一键打开或关闭右侧上下文看板`
-        : `已保存看板快捷键 ${sc.display}（焦点位于看板内时可一键关闭或切换）`;
+        ? `已启用独立悬浮窗快捷键 ${sc.display}（${scopeLabel}），可一键打开或关闭右侧置顶小窗`
+        : `已保存独立悬浮窗快捷键 ${sc.display}（焦点位于看板内时可一键关闭或切换）`;
     return {
       ...(nextStatus || fresh),
       ...fresh,
       ok: true,
+      shortcut: sc,
+      auxShortcut: auxSc,
+      message
+    };
+  }
+
+  if (action === 'set-aux-shortcut') {
+    const saved = setAuxShortcutConfig(options, platform);
+    if (!saved.ok) {
+      return {
+        ...getFloatWindowStatus(platform),
+        ok: false,
+        error: saved.error,
+        auxShortcut: saved.auxShortcut
+      };
+    }
+    const auxSc = saved.auxShortcut;
+    const sc = getShortcutConfig(platform);
+    let nextStatus = null;
+    if (platform === 'darwin') {
+      if (current) {
+        nextStatus = await sendCmdFn(current, {
+          cmd: 'setAuxShortcut',
+          enabled: auxSc.enabled,
+          accelerator: auxSc.accelerator,
+          display: auxSc.display,
+          scope: auxSc.scope,
+          keyCode: auxSc.macCarbon?.keyCode ?? -1,
+          modifiers: auxSc.macCarbon?.modifiers ?? 0
+        });
+      } else if (auxSc.enabled || sc.enabled) {
+        nextStatus = await spawnFn({
+          pinned: upgradedFrom ? upgradedFrom.prevPinned : true,
+          menubarEnabled: getMenubarPreference(),
+          hiddenWindow: true,
+          menubarMode: upgradedFrom ? upgradedFrom.prevMode : getMenubarMode()
+        });
+      }
+    }
+    const fresh = getFloatWindowStatus(platform);
+    const scopeLabel = auxSc.scope === 'global' ? '全局生效' : '仅宿主前台生效';
+    const message = !auxSc.enabled
+      ? '已关闭 AGY 右侧辅助栏看板快捷键'
+      : platform === 'darwin'
+        ? `已启用 AGY 侧栏看板快捷键 ${auxSc.display}（${scopeLabel}），可一键打开或切换右侧辅助栏「上下文看板」`
+        : `已保存 AGY 侧栏看板快捷键 ${auxSc.display}（焦点位于看板内时可直接切换）`;
+    return {
+      ...(nextStatus || fresh),
+      ...fresh,
+      ok: true,
+      auxShortcut: auxSc,
       shortcut: sc,
       message
     };
@@ -607,7 +718,12 @@ export async function controlFloatWindow(options = {}, deps = {}) {
       };
     }
     const sc = getShortcutConfig(platform);
-    const keepResident = Boolean(current.menubarEnabled || (current.shortcutEnabled ?? sc.enabled));
+    const auxSc = getAuxShortcutConfig(platform);
+    const keepResident = Boolean(
+      current.menubarEnabled ||
+      (current.shortcutEnabled ?? sc.enabled) ||
+      (current.auxShortcutEnabled ?? auxSc.enabled)
+    );
     if (keepResident && current.mode === 'native-macos') {
       const st = await sendCmdFn(current, { cmd: 'hideWindow' });
       const reopenHint = current.menubarEnabled && sc.enabled
@@ -675,7 +791,7 @@ export async function controlFloatWindow(options = {}, deps = {}) {
 // Daemon Implementation (Native macOS Menu Bar + WKWebView IPC + Fallback)
 // ---------------------------------------------------------------------------
 
-function buildBundledFloatHtml({ initialPinned, initialHidden, initialMenubar, initialMode = 'context', initialShortcut = null }) {
+function buildBundledFloatHtml({ initialPinned, initialHidden, initialMenubar, initialMode = 'context', initialShortcut = null, initialAuxShortcut = null }) {
   let html = readFileSync(join(__dirname, 'index.html'), 'utf-8');
   const css = readFileSync(join(__dirname, 'styles.css'), 'utf-8').replace(/<\/style/gi, '<\\/style');
   const js = readFileSync(join(__dirname, 'app.js'), 'utf-8').replace(/<\/script/gi, '<\\/script');
@@ -696,6 +812,7 @@ function buildBundledFloatHtml({ initialPinned, initialHidden, initialMenubar, i
   window.__CV_MENUBAR_ENABLED__ = ${initialMenubar ? 'true' : 'false'};
   window.__CV_MENUBAR_MODE__ = ${JSON.stringify(initialMode || 'context')};
   window.__CV_SHORTCUT_INIT__ = ${JSON.stringify(initialShortcut || null)};
+  window.__CV_AUX_SHORTCUT_INIT__ = ${JSON.stringify(initialAuxShortcut || null)};
   let seq = 1;
   const pending = new Map();
 
@@ -1085,8 +1202,36 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
   if (u.pathname === '/api/launch-cli' && method === 'POST') {
     return launchCliTerminal(data);
   }
+  if (u.pathname === '/api/aux-pane-trigger' && method === 'GET') {
+    const since = Number(data.since || 0);
+    const waitMs = Number(data.waitMs ?? data.timeoutMs ?? 8000);
+    return waitForAuxPaneTrigger({ since, timeoutMs: waitMs });
+  }
+  if (u.pathname === '/api/aux-pane-trigger' && method === 'POST') {
+    if (data.action === 'ack') {
+      return ackAuxPaneTrigger({
+        seq: Number(data.seq || 0),
+        plugin: String(data.plugin || 'context-viewer')
+      });
+    }
+    if (data.action === 'switched') {
+      return markAuxPaneSwitched({ seq: Number(data.seq || 0) });
+    }
+    if (data.action === 'hello') {
+      return recordAuxActiveConversation({ convId: String(data.convId || '') });
+    }
+    const trigger = writeAuxPaneTrigger({
+      targetPlugin: String(data.targetPlugin || 'context-viewer'),
+      uri: String(data.uri || 'sidecar://context-viewer/dashboard/'),
+      action: String(data.action || 'toggle'),
+      convId: typeof data.convId === 'string' ? data.convId : '',
+      revealPath: typeof data.revealPath === 'string' ? data.revealPath : ''
+    });
+    return { ok: true, trigger };
+  }
   if (u.pathname === '/api/float-window') {
     const shortcut = getShortcutConfig();
+    const auxShortcut = getAuxShortcutConfig();
     return {
       ok: true,
       daemonRunning: true,
@@ -1097,17 +1242,21 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
       menubarMode: currentState.menubarMode || getMenubarMode(),
       shortcutEnabled: Boolean(currentState.shortcutEnabled ?? shortcut.enabled),
       shortcut,
+      auxShortcutEnabled: Boolean(currentState.auxShortcutEnabled ?? auxShortcut.enabled),
+      auxShortcut,
       mode: currentState.mode
     };
   }
   if (u.pathname === '/api/entrypoints' && method === 'GET') {
     const shortcut = getShortcutConfig();
+    const auxShortcut = getAuxShortcutConfig();
     return {
       ...getSidebarEntryStatus(),
       menubarEnabled: Boolean(currentState.menubarEnabled),
       menubarMode: currentState.menubarMode || getMenubarMode(),
       menubarSupported: process.platform === 'darwin',
       shortcut,
+      auxShortcut,
       floatWindow: {
         ok: true,
         daemonRunning: true,
@@ -1118,12 +1267,21 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
         menubarMode: currentState.menubarMode || getMenubarMode(),
         shortcutEnabled: Boolean(currentState.shortcutEnabled ?? shortcut.enabled),
         shortcut,
+        auxShortcutEnabled: Boolean(currentState.auxShortcutEnabled ?? auxShortcut.enabled),
+        auxShortcut,
         mode: currentState.mode
       }
     };
   }
   if (u.pathname === '/api/entrypoints' && method === 'POST') {
-    const isShortcutUpdate = (
+    const isAuxShortcutUpdate = (
+      data.target === 'aux-shortcut' ||
+      data.auxShortcutReset === true ||
+      data.auxAccelerator !== undefined ||
+      data.auxShortcutAccelerator !== undefined ||
+      typeof data.auxShortcutEnabled === 'boolean'
+    );
+    const isShortcutUpdate = !isAuxShortcutUpdate && (
       data.target === 'shortcut' ||
       data.shortcutReset === true ||
       data.reset === true ||
@@ -1146,6 +1304,7 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
       hooks.onRefreshMenubar?.();
       if (
         !isShortcutUpdate &&
+        !isAuxShortcutUpdate &&
         typeof data.menubarEnabled !== 'boolean' &&
         typeof data.menubarMode !== 'string' &&
         typeof data.sidebarEnabled !== 'boolean' &&
@@ -1158,6 +1317,27 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
           menubarSupported: process.platform === 'darwin'
         };
       }
+    }
+    if (isAuxShortcutUpdate) {
+      if (hooks.onSetAuxShortcut) {
+        return hooks.onSetAuxShortcut(data);
+      }
+      const saved = setAuxShortcutConfig(data);
+      if (!saved.ok) {
+        return { ...getSidebarEntryStatus(), ok: false, error: saved.error, auxShortcut: saved.auxShortcut };
+      }
+      const auxSc = saved.auxShortcut;
+      const scopeLabel = auxSc.scope === 'global' ? '全局生效' : '仅宿主前台生效';
+      return {
+        ...getSidebarEntryStatus(),
+        ok: true,
+        auxShortcut: auxSc,
+        message: !auxSc.enabled
+          ? '已关闭 AGY 右侧辅助栏看板快捷键'
+          : process.platform === 'darwin'
+            ? `已启用 AGY 侧栏看板快捷键 ${auxSc.display}（${scopeLabel}），可一键打开或切换右侧辅助栏「上下文看板」`
+            : `已保存 AGY 侧栏看板快捷键 ${auxSc.display}（焦点位于看板内时可直接切换）`
+      };
     }
     if (isShortcutUpdate) {
       if (hooks.onSetShortcut) {
@@ -1174,10 +1354,10 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
         ok: true,
         shortcut: sc,
         message: !sc.enabled
-          ? '已关闭侧栏看板快捷键'
+          ? '已关闭独立悬浮窗快捷键'
           : process.platform === 'darwin'
-            ? `已启用看板快捷键 ${sc.display}（${scopeLabel}），可一键打开或关闭右侧上下文看板`
-            : `已保存看板快捷键 ${sc.display}（焦点位于看板内时可一键关闭或切换）`
+            ? `已启用独立悬浮窗快捷键 ${sc.display}（${scopeLabel}），可一键打开或关闭右侧置顶小窗`
+            : `已保存独立悬浮窗快捷键 ${sc.display}（焦点位于看板内时可一键关闭或切换）`
       };
     }
     if (typeof data.menubarMode === 'string' && hooks.onSetMenubarMode) {
@@ -1245,6 +1425,7 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
 
   const resolvedMode = MENUBAR_MODES.includes(initialMode) ? initialMode : getMenubarMode();
   const initialSc = getShortcutConfig('darwin');
+  const initialAuxSc = getAuxShortcutConfig('darwin');
   const state = {
     daemonVersion: DAEMON_VERSION,
     daemonBuildId: DAEMON_BUILD_ID,
@@ -1259,6 +1440,9 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
     shortcutAccelerator: initialSc.accelerator,
     shortcutDisplay: initialSc.display,
     shortcutScope: initialSc.scope,
+    auxShortcutEnabled: Boolean(initialAuxSc.enabled),
+    auxShortcutAccelerator: initialAuxSc.accelerator,
+    auxShortcutDisplay: initialAuxSc.display,
     statusTitle: resolvedMode === 'speed' ? '⚡ --t/s' : resolvedMode === 'quota' ? '⏳ 额度 --%' : '◈ --%',
     activeConvId: null,
     activeConvTitle: null,
@@ -1269,7 +1453,7 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
     startedAt: new Date().toISOString()
   };
 
-  const shouldKeepResident = () => Boolean(state.menubarEnabled || state.shortcutEnabled);
+  const shouldKeepResident = () => Boolean(state.menubarEnabled || state.shortcutEnabled || state.auxShortcutEnabled);
 
   const args = ['--mode', resolvedMode];
   if (!initialPinned) args.push('--unpinned');
@@ -1282,6 +1466,14 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
   }
   if (initialSc.display) {
     args.push('--shortcut-label', initialSc.display);
+  }
+  if (!initialAuxSc.enabled) args.push('--no-aux-shortcut');
+  if (typeof initialAuxSc.macCarbon?.keyCode === 'number') {
+    args.push('--aux-keycode', String(initialAuxSc.macCarbon.keyCode));
+    args.push('--aux-mods', String(initialAuxSc.macCarbon.modifiers || 0));
+  }
+  if (initialAuxSc.display) {
+    args.push('--aux-label', initialAuxSc.display);
   }
   args.push('--shortcut-scope', initialSc.scope || 'app');
 
@@ -1401,6 +1593,7 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
       };
     }
     const sc = saved.shortcut;
+    const auxSc = getAuxShortcutConfig('darwin');
     state.shortcutEnabled = Boolean(sc.enabled);
     state.shortcutAccelerator = sc.accelerator;
     state.shortcutDisplay = sc.display;
@@ -1423,6 +1616,7 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
       ...getSidebarEntryStatus(),
       ok: true,
       shortcut: sc,
+      auxShortcut: auxSc,
       floatWindow: {
         ok: true,
         daemonRunning: true,
@@ -1433,12 +1627,70 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
         menubarMode: state.menubarMode,
         shortcutEnabled: Boolean(sc.enabled),
         shortcut: sc,
+        auxShortcutEnabled: Boolean(auxSc.enabled),
+        auxShortcut: auxSc,
         statusTitle: state.statusTitle,
         mode: state.mode
       },
       message: sc.enabled
-        ? `已启用看板快捷键 ${sc.display}（${scopeLabel}），可一键打开或关闭右侧上下文看板`
-        : '已关闭侧栏看板快捷键'
+        ? `已启用独立悬浮窗快捷键 ${sc.display}（${scopeLabel}），可一键打开或关闭右侧置顶小窗`
+        : '已关闭独立悬浮窗快捷键'
+    };
+  };
+
+  const handleSetAuxShortcutInDaemon = async (payload) => {
+    const saved = setAuxShortcutConfig(payload, 'darwin');
+    if (!saved.ok) {
+      return {
+        ...getSidebarEntryStatus(),
+        ok: false,
+        error: saved.error,
+        auxShortcut: saved.auxShortcut
+      };
+    }
+    const auxSc = saved.auxShortcut;
+    const sc = getShortcutConfig('darwin');
+    state.auxShortcutEnabled = Boolean(auxSc.enabled);
+    state.auxShortcutAccelerator = auxSc.accelerator;
+    state.auxShortcutDisplay = auxSc.display;
+    state.shortcutScope = auxSc.scope;
+    sendToChild({
+      type: 'setAuxShortcut',
+      enabled: auxSc.enabled,
+      accelerator: auxSc.accelerator,
+      keyCode: auxSc.macCarbon?.keyCode ?? -1,
+      modifiers: auxSc.macCarbon?.modifiers ?? 0,
+      label: auxSc.display,
+      scope: auxSc.scope
+    });
+    writeFloatState(state);
+    if (!shouldKeepResident() && !state.windowVisible) {
+      setTimeout(shutdown, 80);
+    }
+    const scopeLabel = auxSc.scope === 'global' ? '全局生效' : '仅宿主前台生效';
+    return {
+      ...getSidebarEntryStatus(),
+      ok: true,
+      auxShortcut: auxSc,
+      shortcut: sc,
+      floatWindow: {
+        ok: true,
+        daemonRunning: true,
+        running: Boolean(state.windowVisible),
+        windowVisible: Boolean(state.windowVisible),
+        pinned: Boolean(state.pinned),
+        menubarEnabled: Boolean(state.menubarEnabled),
+        menubarMode: state.menubarMode,
+        shortcutEnabled: Boolean(sc.enabled),
+        shortcut: sc,
+        auxShortcutEnabled: Boolean(auxSc.enabled),
+        auxShortcut: auxSc,
+        statusTitle: state.statusTitle,
+        mode: state.mode
+      },
+      message: auxSc.enabled
+        ? `已启用 AGY 侧栏看板快捷键 ${auxSc.display}（${scopeLabel}），可一键打开或切换右侧辅助栏「上下文看板」`
+        : '已关闭 AGY 右侧辅助栏看板快捷键'
     };
   };
 
@@ -1570,6 +1822,25 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
           label: state.shortcutDisplay,
           scope: state.shortcutScope
         });
+      } else if (action === 'setAuxShortcut') {
+        const auxSc = getAuxShortcutConfig('darwin');
+        state.auxShortcutEnabled = typeof cmd.enabled === 'boolean' ? cmd.enabled : Boolean(auxSc.enabled);
+        state.auxShortcutAccelerator = cmd.accelerator || auxSc.accelerator;
+        state.auxShortcutDisplay = cmd.display || auxSc.display;
+        if (cmd.scope) state.shortcutScope = cmd.scope;
+        if (!shouldKeepResident() && !state.windowVisible) {
+          shutdown();
+          return;
+        }
+        sendToChild({
+          type: 'setAuxShortcut',
+          enabled: state.auxShortcutEnabled,
+          accelerator: state.auxShortcutAccelerator,
+          keyCode: typeof cmd.keyCode === 'number' ? cmd.keyCode : (auxSc.macCarbon?.keyCode ?? -1),
+          modifiers: typeof cmd.modifiers === 'number' ? cmd.modifiers : (auxSc.macCarbon?.modifiers ?? 0),
+          label: state.auxShortcutDisplay,
+          scope: state.shortcutScope
+        });
       } else if (action === 'setMenubarMode') {
         const validMode = setMenubarMode(cmd.mode);
         state.menubarMode = validMode;
@@ -1616,6 +1887,9 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
       if (typeof msg.shortcutEnabled === 'boolean') {
         state.shortcutEnabled = msg.shortcutEnabled;
       }
+      if (typeof msg.auxShortcutEnabled === 'boolean') {
+        state.auxShortcutEnabled = msg.auxShortcutEnabled;
+      }
       state.windowVisible = Boolean(msg.windowVisible);
       state.running = state.windowVisible;
       writeFloatState(state);
@@ -1626,12 +1900,25 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
           initialHidden: !state.windowVisible,
           initialMenubar: state.menubarEnabled,
           initialMode: state.menubarMode,
-          initialShortcut: getShortcutConfig('darwin')
+          initialShortcut: getShortcutConfig('darwin'),
+          initialAuxShortcut: getAuxShortcutConfig('darwin')
         })
       });
       if (state.menubarEnabled) {
         refreshMenubarStatusItem(true).catch(() => {});
       }
+    } else if (msg.type === 'auxHotkeyTriggered') {
+      const trig = writeAuxPaneTrigger({
+        targetPlugin: 'context-viewer',
+        uri: 'sidecar://context-viewer/dashboard/',
+        action: 'toggle'
+      });
+      setTimeout(() => {
+        const latest = readAuxPaneTrigger();
+        if (Number(latest.ackSeq || 0) < Number(trig.seq || 1)) {
+          sendToChild({ type: 'showHud', text: '请先在 Antigravity 打开过一次「上下文看板」再使用侧栏快捷键' });
+        }
+      }, 420).unref?.();
     } else if (msg.type === 'menubarModeChanged') {
       const nextMode = setMenubarMode(msg.mode);
       state.menubarMode = nextMode;
@@ -1669,7 +1956,8 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
             initialHidden: !state.windowVisible,
             initialMenubar: state.menubarEnabled,
             initialMode: state.menubarMode,
-            initialShortcut: getShortcutConfig('darwin')
+            initialShortcut: getShortcutConfig('darwin'),
+            initialAuxShortcut: getAuxShortcutConfig('darwin')
           })
         });
         sendToChild({ type: 'rpcReply', id: msg.id, ok: true, status: 200, payload: { ok: true } });
@@ -1681,6 +1969,7 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
           onSetMenubar: handleSetMenubarInDaemon,
           onSetMenubarMode: handleSetMenubarModeInDaemon,
           onSetShortcut: handleSetShortcutInDaemon,
+          onSetAuxShortcut: handleSetAuxShortcutInDaemon,
           onRefreshMenubar: () => { refreshMenubarStatusItem(true).catch(() => {}); }
         });
         sendToChild({ type: 'rpcReply', id: msg.id, ok: true, status: 200, payload });

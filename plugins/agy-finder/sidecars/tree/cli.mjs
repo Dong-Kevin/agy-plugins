@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
- * Cross-platform CLI for toggling or configuring the AGY Finder File Tree drawer.
+ * Cross-platform CLI for toggling or configuring the AGY Finder File Tree drawer
+ * and Antigravity Right-Hand Auxiliary Side Pane.
  * Usage:
- *   agy-finder [toggle|open [path]|close|status [--json]|hotkey <preset>|quit]
+ *   agy-finder [toggle|open [path]|close|aux [path]|status [--json]|hotkey <preset>|shortcut [arg]|aux-shortcut [arg]|quit]
  */
 
 import { controlDrawer, getDrawerStatus, HOTKEY_PRESETS } from './drawer.mjs';
@@ -11,19 +12,39 @@ function printHelp() {
   console.log(`AGY Finder CLI
 
 用法:
-  agy-finder toggle              打开或关闭右侧独立目录树抽屉（默认）
-  agy-finder open [path]         打开抽屉并可选定位到指定路径
-  agy-finder close               关闭/隐藏抽屉
-  agy-finder status [--json]     查看抽屉、快捷键与宿主快捷键状态
-  agy-finder hotkey <preset>     设置全局应用内快捷键预设:
-                                 ${HOTKEY_PRESETS.map((p) => p.id).join(' | ')}
-  agy-finder quit                退出后台抽屉守护进程`);
+  agy-finder toggle                       打开或关闭右侧独立目录树抽屉（默认）
+  agy-finder open [path]                  打开独立抽屉并可选定位到指定路径
+  agy-finder close                        关闭/隐藏独立抽屉
+  agy-finder aux [path]                   在 AGY 右侧辅助栏打开/切换目录树（可选定位路径）
+  agy-finder status [--json]              查看独立抽屉、右侧辅助栏与快捷键状态
+  agy-finder shortcut [arg]               设置独立抽屉自定义快捷键（off/on/reset/app/global/Ctrl+Shift+E）
+  agy-finder aux-shortcut [arg]           设置 AGY 侧栏目录树快捷键（off/on/reset/app/global/Alt+Meta+E）
+  agy-finder hotkey <preset>              兼容切换预设快捷键:
+                                          ${HOTKEY_PRESETS.map((p) => p.id).join(' | ')}
+  agy-finder quit                         退出后台抽屉守护进程`);
+}
+
+function buildShortcutPatch(rawArg) {
+  const token = String(rawArg || '').trim();
+  const low = token.toLowerCase();
+  if (!token || low === 'status') return null;
+  if (low === 'reset' || low === 'default') return { reset: true };
+  if (low === 'on' || low === 'enable') return { enabled: true };
+  if (low === 'off' || low === 'disable' || low === 'disabled') return { enabled: false };
+  if (low === 'app' || low === 'global') return { scope: low };
+  return { accelerator: token, enabled: true };
 }
 
 async function main() {
   const args = process.argv.slice(2);
   if (args.includes('-h') || args.includes('--help')) {
     printHelp();
+    return;
+  }
+
+  if (args.includes('--ensure-hotkey') || args.includes('--ensure-daemon')) {
+    const st = await controlDrawer({ action: 'ensure-hotkey' });
+    if (args.includes('--json')) console.log(JSON.stringify(st, null, 2));
     return;
   }
 
@@ -38,10 +59,10 @@ async function main() {
       return;
     }
     const hostKey = process.platform === 'darwin' ? '⌘⇧B' : 'Ctrl+Shift+B';
-    const presetObj = HOTKEY_PRESETS.find((p) => p.id === st.hotkeyPreset);
-    const label = process.platform === 'darwin' ? presetObj?.macLabel : presetObj?.winLabel;
+    const drawerLabel = st.drawerShortcut?.enabled ? st.drawerShortcut.display : '已关闭';
+    const auxLabel = st.auxShortcut?.enabled ? st.auxShortcut.display : '已关闭';
     console.log(
-      `[agy-finder] 抽屉状态：${st.windowVisible ? '已打开' : '已隐藏'} | 快捷键：${label || st.hotkeyPreset} | 宿主 Aux Pane：${hostKey}`
+      `[agy-finder] 抽屉状态：${st.windowVisible ? '已打开' : '已隐藏'} | 独立抽屉快捷键：${drawerLabel} | AGY 侧栏快捷键：${auxLabel} | 宿主显隐：${hostKey}`
     );
     return;
   }
@@ -58,6 +79,44 @@ async function main() {
     } else {
       console.log(`[agy-finder] ${res.message || res.error || '已完成'}`);
     }
+    if (res.ok === false) process.exit(1);
+    return;
+  }
+
+  if (cmd === 'shortcut' || cmd === 'aux-shortcut' || cmd === 'aux-hotkey') {
+    const isAux = cmd !== 'shortcut';
+    const arg = positional.slice(1).join(' ');
+    const patch = buildShortcutPatch(arg);
+    if (!patch) {
+      const st = getDrawerStatus();
+      const target = isAux ? st.auxShortcut : st.drawerShortcut;
+      if (wantsJson) {
+        console.log(JSON.stringify({ ok: true, shortcut: target }, null, 2));
+      } else {
+        console.log(
+          `[agy-finder] ${isAux ? 'AGY 侧栏目录树快捷键' : '独立抽屉快捷键'}：${target?.enabled ? target.display : '已关闭'} (${target?.accelerator || '-'}) · 范围 ${target?.scope || 'app'}`
+        );
+      }
+      return;
+    }
+    const res = await controlDrawer({
+      action: isAux ? 'set-aux-shortcut' : 'set-drawer-shortcut',
+      ...patch
+    });
+    if (wantsJson) {
+      console.log(JSON.stringify(res, null, 2));
+    } else {
+      console.log(`[agy-finder] ${res.message || res.error || '已完成'}`);
+    }
+    if (res.ok === false) process.exit(1);
+    return;
+  }
+
+  if (cmd === 'aux' || cmd === 'open-aux' || cmd === 'toggle-aux') {
+    const revealPath = positional.slice(1).join(' ');
+    const res = await controlDrawer({ action: 'aux', revealPath });
+    if (wantsJson) console.log(JSON.stringify(res, null, 2));
+    else console.log(`[agy-finder] ${res.message || res.error || '已触发侧栏目录树'}`);
     if (res.ok === false) process.exit(1);
     return;
   }

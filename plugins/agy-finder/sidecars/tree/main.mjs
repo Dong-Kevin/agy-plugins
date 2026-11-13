@@ -13,11 +13,16 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  ackAuxPaneTrigger,
   controlDrawer,
   getDrawerStatus,
   getShortcutSettings,
   HOTKEY_PRESETS,
-  recordActiveContextHint
+  markAuxPaneSwitched,
+  recordActiveContextHint,
+  recordAuxActiveConversation,
+  waitForAuxPaneTrigger,
+  writeAuxPaneTrigger
 } from './drawer.mjs';
 import { CONV_ID_RE, getConversationMentions } from './mentions.mjs';
 import {
@@ -189,23 +194,64 @@ function createHandlers(getDefaultConvId, makeResponse, transformHtml = (html) =
       return revealInOsFileManager(String(data.path || ''), roots);
     },
 
-    apiShortcutGet: async () => ({
-      ok: true,
-      platform: process.platform,
-      settings: getShortcutSettings(),
-      presets: HOTKEY_PRESETS,
-      drawer: getDrawerStatus(),
-      hostShortcuts: getHostShortcuts()
-    }),
+    apiShortcutGet: async () => {
+      const settings = getShortcutSettings();
+      return {
+        ok: true,
+        platform: process.platform,
+        settings,
+        presets: HOTKEY_PRESETS,
+        shortcut: settings.drawerShortcut,
+        drawerShortcut: settings.drawerShortcut,
+        auxShortcut: settings.auxShortcut,
+        drawer: getDrawerStatus(),
+        hostShortcuts: getHostShortcuts()
+      };
+    },
 
     apiShortcutPost: async (data = {}) => {
       const action = String(data.action || 'toggle').toLowerCase();
       return controlDrawer({
         action,
         hotkeyPreset: data.hotkeyPreset,
+        accelerator: data.accelerator,
+        enabled: data.enabled,
+        scope: data.scope,
+        reset: Boolean(data.reset),
         pinned: data.pinned,
-        revealPath: data.revealPath
+        revealPath: data.revealPath,
+        convId: data.convId
       });
+    },
+
+    apiAuxTriggerGet: async (data = {}) => {
+      const since = Number(data.since || 0);
+      const timeoutMs = Number(data.waitMs ?? data.timeoutMs ?? 8000);
+      return waitForAuxPaneTrigger({ since, timeoutMs });
+    },
+
+    apiAuxTriggerPost: async (data = {}) => {
+      const act = String(data.action || 'trigger').toLowerCase();
+      if (act === 'ack') {
+        return ackAuxPaneTrigger({
+          seq: Number(data.seq || 0),
+          plugin: String(data.plugin || 'agy-finder')
+        });
+      }
+      if (act === 'switched') {
+        return markAuxPaneSwitched({ seq: Number(data.seq || 0) });
+      }
+      if (act === 'hello') {
+        return recordAuxActiveConversation({ convId: String(data.convId || '') });
+      }
+      const trigger = writeAuxPaneTrigger({
+        targetPlugin: String(data.targetPlugin || 'agy-finder'),
+        uri: String(data.uri || 'sidecar://agy-finder/tree/'),
+        action: String(data.auxAction || act || 'toggle'),
+        convId: String(data.convId || ''),
+        revealPath: String(data.revealPath || '')
+      });
+      return { ok: true, trigger };
     }
   };
 }
@@ -243,6 +289,8 @@ async function startOfficialSidecar() {
   app.api('/api/reveal-os', h.apiRevealOs, 'POST');
   app.api('/api/shortcut', h.apiShortcutGet, 'GET');
   app.api('/api/shortcut', h.apiShortcutPost, 'POST');
+  app.api('/api/aux-pane-trigger', h.apiAuxTriggerGet, 'GET');
+  app.api('/api/aux-pane-trigger', h.apiAuxTriggerPost, 'POST');
 
   recordActiveContextHint({
     conversationId: app.config.conversationId || '',
@@ -338,7 +386,9 @@ async function startStandaloneServer() {
     ['GET:/api/preview', h.apiPreview],
     ['POST:/api/reveal-os', h.apiRevealOs],
     ['GET:/api/shortcut', h.apiShortcutGet],
-    ['POST:/api/shortcut', h.apiShortcutPost]
+    ['POST:/api/shortcut', h.apiShortcutPost],
+    ['GET:/api/aux-pane-trigger', h.apiAuxTriggerGet],
+    ['POST:/api/aux-pane-trigger', h.apiAuxTriggerPost]
   ]);
 
   const server = createServer(async (req, res) => {

@@ -18,8 +18,8 @@
 
 | 插件目录 | 插件标识 (`name`) | 版本 | 默认快捷键与快捷命令 | 核心定位 | 详细文档 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| [`plugins/agy-finder`](./plugins/agy-finder) | `agy-finder` | `v0.1.0` | `⌘⇧E`（抽屉） · `/agy-finder` · `[📂]` · `agy-finder toggle` | 右侧项目目录树与对话路径直达定位 | [查看 README](./plugins/agy-finder/README.md) |
-| [`plugins/agy-context-viewer`](./plugins/agy-context-viewer) | `context-viewer` | `v1.6.3` | `⌥⌘K`（小窗） · 菜单栏左键 · `/context-viewer` · `agy-context` | 上下文窗口、速度、`5h + Week` 配额与 Token 看板 | [查看 README](./plugins/agy-context-viewer/README.md) |
+| [`plugins/agy-finder`](./plugins/agy-finder) | `agy-finder` | `v0.2.0` | `⌘⇧E`（抽屉） · `⌥⌘E`（AGY 侧栏） · `/agy-finder` · `[📂]` · `agy-finder aux` | 右侧项目目录树与对话路径直达定位 | [查看 README](./plugins/agy-finder/README.md) |
+| [`plugins/agy-context-viewer`](./plugins/agy-context-viewer) | `context-viewer` | `v1.7.0` | `⌥⌘K`（小窗） · `⌃⌥K`（AGY 侧栏） · `/context-viewer` · `agy-context aux` | 上下文窗口、速度、`5h + Week` 配额与 Token 看板 | [查看 README](./plugins/agy-context-viewer/README.md) |
 
 ---
 
@@ -27,11 +27,11 @@
 
 | 触发方式 | `AGY Finder` (`agy-finder`) | `Context & Token Viewer` (`context-viewer`) |
 | :--- | :--- | :--- |
-| **macOS 面板快捷键** | **`⌘⇧E`** 开关右侧独立目录树抽屉（仅 `Antigravity` 前台生效，零冲突、免辅助功能权限；面板 `⌨` 可切 `⌘⌥E` / `⌃⇧E` / `⌘⇧Y` / `关闭`） | **`⌥⌘K`** 开关右侧独立置顶看板（默认仅宿主前台，支持面板点击录制改键或全局生效）；**`⌘⇧P`** 切换置顶、**`⌘W`** 收回 |
-| **宿主 / 菜单栏入口** | **`⌘⇧B`**（macOS）/ **`Ctrl+Shift+B`**（Win / Linux）开关宿主右侧辅助栏 | 顶部系统菜单栏徽章 **左键 `<5ms` 显隐小窗**、**右键切换 3 档指标 / 置顶**；辅助栏同样支持 **`⌘⇧B`** / **`Ctrl+Shift+B`**；看板内 Win / Linux 为 **`Ctrl+Alt+K`** |
+| **独立悬浮 / 抽屉** | **`⌘⇧E`** 开关右侧独立目录树抽屉（默认仅 `Antigravity` 前台生效，支持面板点击录制任意组合键、`⌘⌥E` / `⌃⇧E` / `⌘⇧Y` 预设或全球域，零冲突免辅助功能权限） | **`⌥⌘K`** 开关右侧独立置顶看板（默认仅宿主前台，支持调色盘点击录制任意组合键或全局生效）；**`⌘⇧P`** 切换置顶、**`⌘W`** 收回 |
+| **AGY 右侧辅助栏** | **`⌥⌘E`**（Win / Linux：`Ctrl+Alt+E`）一键打开 / 切到 AGY 右侧辅助栏并直接显示 **目录树**（可自定义）；**`⌘⇧B`** / **`Ctrl+Shift+B`** 显隐辅助栏 | **`⌃⌥K`**（Win / Linux：`Ctrl+Alt+Shift+K`）一键打开 / 切到 AGY 右侧辅助栏并直接显示 **上下文看板**（可自定义）；顶部菜单栏支持 **左键 `<5ms` 显隐 / 右键切 3 档指标** |
 | **对话斜杠 & 深链接** | 输入 **`/agy-finder`**；点击回复路径旁的 **`[📂]`** 或 [`sidecar://agy-finder/tree/`](sidecar://agy-finder/tree/) 直达目录树 | 输入 **`/context-viewer`**；或打开 [`sidecar://context-viewer/dashboard/`](sidecar://context-viewer/dashboard/) |
-| **终端 CLI 快捷命令** | `agy-finder`（等同 `agy-finder toggle`，Win / Linux 可绑 `Ctrl+Shift+E`）<br/>`agy-finder open [path]` · `close` · `hotkey <preset>` · `status [--json]` · `quit` | `agy-context`（终端彩色进度条汇总）<br/>`agy-context float [close\|quit]` · `menubar [context\|speed\|quota\|on\|off]` · `shortcut [status\|<combo>\|reset\|off\|--global]` · `turns` · `json [--full]` · `web` |
-| **面板内高频键位** | `↑` / `↓` 移动 · `←` / `→` 折展 · `Enter` 预览或展开 · `/` 或 `⌘/Ctrl+F` 搜索 · `⌘/Ctrl+.` 隐藏项 · `?` 快捷键 · `Esc` 关闭 | 右上角调色盘录制快捷键与 5 套热力图配色 · 窗口上限 `自动 / 200K / 256K / 1M` 快切 · 顶部胶囊直跳核心视图 |
+| **终端 CLI 快捷命令** | `agy-finder`（等同 `agy-finder toggle` 开关抽屉） · `agy-finder aux [path]`（切换 AGY 侧栏目录树）<br/>`agy-finder open [path]` · `close` · `shortcut [<combo>\|off\|reset]` · `aux-shortcut [<combo>\|off\|reset]` · `hotkey <preset>` · `status [--json]` · `quit` | `agy-context`（终端彩色进度条汇总） · `agy-context aux`（切换 AGY 侧栏看板）<br/>`agy-context float [close\|quit]` · `menubar [context\|speed\|quota\|on\|off]` · `shortcut [status\|<combo>\|reset\|off\|--global]` · `aux-shortcut [status\|<combo>\|reset\|off]` · `turns` · `json [--full]` · `web` |
+| **面板内高频键位** | `↑` / `↓` 移动 · `←` / `→` 折展 · `Enter` 预览或展开 · `/` 或 `⌘/Ctrl+F` 搜索 · `⌘/Ctrl+.` 隐藏项 · `?` 快捷键 · `Esc` 关闭 | 右上角调色盘录制双快捷键与 5 套热力图配色 · 窗口上限 `自动 / 200K / 256K / 1M` 快切 · 顶部胶囊直跳核心视图 |
 
 ---
 
@@ -40,7 +40,7 @@
 ### 1. `AGY Finder` -- 右侧项目目录树与对话路径直达
 
 - **双保险路径定位**：内置 `rules/AGENTS.md` 让回答中的文件附带 `[📂](sidecar://agy-finder/tree/?path=...)` 快捷入口；同时仅在面板可见时按字节偏移增量读取 `transcript_full.jsonl`，提取对话提及路径芯片，对历史对话同样有效（面板收起时 `0%` CPU）。
-- **零冲突快捷键与轻交互**：macOS 下默认 **`⌘⇧E`** 呼出独立右侧抽屉（仅 `Antigravity` 前台生效、无需辅助功能权限），Windows / Linux 可将 `agy-finder toggle` 绑定至系统快捷键；支持模糊检索、剪贴板路径直跳、行内预览弹窗与系统文件管理器定位。
+- **双模式零冲突快捷键与轻交互**：macOS 下默认 **`⌘⇧E`** 呼出独立右侧抽屉、**`⌥⌘E`** 直达 AGY 右侧辅助栏「目录树」，均支持点击录制自定义与宿主内/全局切换（零辅助功能权限），Windows / Linux 可将 `agy-finder toggle` / `agy-finder aux` 绑定至系统快捷键；支持模糊检索、剪贴板路径直跳、行内预览弹窗与系统文件管理器定位。
 
 <table>
   <tr>
@@ -51,10 +51,10 @@
       <sub>顶部自动聚合对话提及文件，点击即可展开目录树并高亮目标文件（支持预览 / 复制路径 / 系统定位）</sub>
     </td>
     <td width="50%" align="center" valign="top">
-      <img src="plugins/agy-finder/docs/images/finder-shortcuts.png" width="320" alt="AGY Finder 零冲突快捷键设置与键盘导航" />
+      <img src="plugins/agy-finder/docs/images/finder-shortcuts.png" width="320" alt="AGY Finder 双快捷键自定义与键盘导航" />
       <br/>
-      <b>零冲突快捷键预设（<code>⌘⇧E</code>）与键盘导航</b><br/>
-      <sub>支持切换 <code>⌘⇧E</code> / <code>⌘⌥E</code> / <code>⌃⇧E</code> / <code>⌘⇧Y</code>，与宿主 <code>⌘⇧B</code> 辅助栏及全键盘树导航协同工作</sub>
+      <b>双快捷键自定义（<code>⌘⇧E</code> 抽屉 / <code>⌥⌘E</code> AGY 侧栏）与键盘导航</b><br/>
+      <sub>独立抽屉与 AGY 右侧辅助栏均支持点击录制改键、<code>仅 AGY 内 / 全局</code> 切换与全键盘树导航</sub>
     </td>
   </tr>
 </table>
@@ -70,10 +70,10 @@
       <sub>与代码、Artifacts、终端同屏常驻；支持 macOS 菜单栏 3 档徽章与切换会话自动跟随</sub>
     </td>
     <td width="50%" align="center" valign="top">
-      <img src="plugins/agy-context-viewer/docs/images/customizer-drawer.png" width="320" alt="快捷入口模式、⌥⌘K 快捷键录制与外观定制" />
+      <img src="plugins/agy-context-viewer/docs/images/customizer-drawer.png" width="320" alt="双快捷键录制、快捷入口与外观定制" />
       <br/>
-      <b>快捷入口、<code>⌥⌘K</code> 快捷键录制与外观定制</b><br/>
-      <sub>开关菜单栏常驻、点击录制看板快捷键、切换仅宿主前台 / 全局生效与 5 套热力图配色</sub>
+      <b>双快捷键录制（<code>⌥⌘K</code> 小窗 / <code>⌃⌥K</code> AGY 侧栏）与外观定制</b><br/>
+      <sub>同时自定义独立悬浮窗与 AGY 右侧辅助栏快捷键、切换仅宿主前台 / 全局生效与 5 套热力图配色</sub>
     </td>
   </tr>
   <tr>
@@ -188,8 +188,8 @@ agy-plugins/
 ├── install.sh                         # 统一安装 / 列表 / 卸载脚本（macOS / Linux）
 ├── install.ps1                        # 统一安装 / 列表 / 卸载脚本（Windows PowerShell）
 ├── plugins/
-│   ├── agy-finder/                    # 项目目录树插件（v0.1.0）
-│   └── agy-context-viewer/            # 上下文与 Token 看板插件（context-viewer v1.6.3）
+│   ├── agy-finder/                    # 项目目录树插件（v0.2.0）
+│   └── agy-context-viewer/            # 上下文与 Token 看板插件（context-viewer v1.7.0）
 └── scripts/
     ├── verify.mjs                     # 全仓规范、隐私、PNG 元数据、子插件与安装器门禁
     ├── package-all.mjs                # 零依赖构建各插件独立 Release ZIP 与 SHA-256

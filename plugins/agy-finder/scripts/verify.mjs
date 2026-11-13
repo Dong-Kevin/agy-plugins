@@ -19,7 +19,14 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { getShortcutSettings, saveShortcutSettings } from '../sidecars/tree/drawer.mjs';
+import {
+  getAuxShortcutConfig,
+  getDrawerShortcutConfig,
+  getShortcutSettings,
+  saveShortcutSettings,
+  setAuxShortcutConfig,
+  setDrawerShortcutConfig
+} from '../sidecars/tree/drawer.mjs';
 import { getConversationMentions } from '../sidecars/tree/mentions.mjs';
 import {
   listDirectoryEntries,
@@ -107,7 +114,17 @@ function verifyCssAndHtml() {
   const html = readFileSync(join(ROOT, 'sidecars/tree/index.html'), 'utf8');
   assert.ok(html.includes('<script src="/preload.js"></script>'), 'index.html must load /preload.js');
   assert.ok(html.includes('[hidden], .hidden'), 'index.html must guard [hidden], .hidden');
-  for (const id of ['btn-drawer', 'btn-shortcuts', 'shortcut-panel', 'hotkey-preset-select', 'preview-modal']) {
+  for (const id of [
+    'btn-drawer',
+    'btn-shortcuts',
+    'shortcut-panel',
+    'hotkey-preset-select',
+    'btn-record-drawer-shortcut',
+    'btn-record-aux-shortcut',
+    'btn-toggle-aux-shortcut',
+    'btn-aux-open',
+    'preview-modal'
+  ]) {
     assert.ok(html.includes(`id="${id}"`), `index.html must include #${id}`);
   }
   pass('CSS --af-* namespace isolation and index.html preload/hidden/shortcut UI checks');
@@ -304,7 +321,41 @@ function verifyShortcutAndCli() {
     });
     assert.equal(getShortcutSettings().hotkeyPreset, 'cmd+shift+y');
 
-    pass('Shortcut settings persistence, preset validation & cli.mjs commands');
+    // Dual custom shortcut configs, automatic default shift on Alt+Meta+E, collision rejection & CLI aux/aux-shortcut
+    saveShortcutSettings({ hotkeyPreset: 'cmd+alt+e' }, 'darwin');
+    assert.equal(
+      getAuxShortcutConfig('darwin').accelerator,
+      'Ctrl+Alt+E',
+      'Drawer preset cmd+alt+e must shift default auxShortcut to Ctrl+Alt+E to avoid collision'
+    );
+    setDrawerShortcutConfig({ reset: true }, 'darwin');
+    assert.equal(getDrawerShortcutConfig('darwin').accelerator, 'Shift+Meta+E');
+    assert.equal(getAuxShortcutConfig('darwin').accelerator, 'Alt+Meta+E');
+
+    const auxCollision = setAuxShortcutConfig({ accelerator: 'Shift+Meta+E' }, 'darwin');
+    assert.equal(auxCollision.ok, false, 'Aux shortcut colliding with drawer shortcut must be rejected');
+
+    const auxSaved = setAuxShortcutConfig({ accelerator: 'Ctrl+Alt+F', scope: 'global' }, 'darwin');
+    assert.equal(auxSaved.ok, true);
+    assert.equal(auxSaved.auxShortcut.accelerator, 'Ctrl+Alt+F');
+    assert.equal(auxSaved.auxShortcut.scope, 'global');
+
+    const auxCliSet = execFileSync(process.execPath, [join(ROOT, 'sidecars/tree/cli.mjs'), 'aux-shortcut', 'Ctrl+Shift+O', '--json'], {
+      env: cliEnv,
+      encoding: 'utf8'
+    });
+    assert.equal(JSON.parse(auxCliSet).auxShortcut.accelerator, 'Ctrl+Shift+O');
+
+    const auxTrigOut = execFileSync(process.execPath, [join(ROOT, 'sidecars/tree/cli.mjs'), 'aux', 'plugin.json', '--json'], {
+      env: cliEnv,
+      encoding: 'utf8'
+    });
+    const auxTrigJson = JSON.parse(auxTrigOut);
+    assert.equal(auxTrigJson.trigger.targetPlugin, 'agy-finder');
+    assert.equal(auxTrigJson.trigger.uri, 'sidecar://agy-finder/tree/');
+    assert.equal(auxTrigJson.trigger.revealPath, 'plugin.json');
+
+    pass('Shortcut settings persistence, dual custom chords, collision guard & cli.mjs aux commands');
   } finally {
     if (prevDataDir === undefined) delete process.env.AGY_FINDER_DATA_DIR;
     else process.env.AGY_FINDER_DATA_DIR = prevDataDir;
@@ -398,6 +449,37 @@ async function verifyStandaloneHttp() {
     assert.equal(scPost.status, 200);
     const scPostJson = await scPost.json();
     assert.equal(scPostJson.hotkeyPreset, 'ctrl+shift+e');
+
+    // Dual custom shortcut & /api/aux-pane-trigger endpoints
+    const scAuxPost = await fetch(`${baseUrl}/api/shortcut`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-AF-Token': csrfToken
+      },
+      body: JSON.stringify({ action: 'set-aux-shortcut', accelerator: 'Ctrl+Shift+F' })
+    });
+    assert.equal(scAuxPost.status, 200);
+    const scAuxPostJson = await scAuxPost.json();
+    assert.equal(scAuxPostJson.ok, true);
+    assert.equal(scAuxPostJson.auxShortcut.accelerator, 'Ctrl+Shift+F');
+
+    const auxTrigPost = await fetch(`${baseUrl}/api/aux-pane-trigger`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-AF-Token': csrfToken
+      },
+      body: JSON.stringify({ targetPlugin: 'agy-finder', uri: 'sidecar://agy-finder/tree/', action: 'toggle', revealPath: 'README.md' })
+    });
+    assert.equal(auxTrigPost.status, 200);
+    const auxTrigResJson = await auxTrigPost.json();
+    assert.ok(auxTrigResJson.ok && auxTrigResJson.trigger?.seq > 0);
+
+    const auxPoll = await fetch(`${baseUrl}/api/aux-pane-trigger?since=0&waitMs=0`);
+    const auxPollJson = await auxPoll.json();
+    assert.equal(auxPollJson.changed, true);
+    assert.equal(auxPollJson.trigger.revealPath, 'README.md');
 
     // Host header guard
     const evilHostRes = await httpGetRaw(`${baseUrl}/api/workspace`, { Host: 'evil.example:1234' });

@@ -12,10 +12,25 @@ private func carbonHotKeyHandler(
   _ event: EventRef?,
   _ userData: UnsafeMutableRawPointer?
 ) -> OSStatus {
-  guard let ptr = userData else { return OSStatus(eventNotHandledErr) }
+  guard let ptr = userData, let ev = event else { return OSStatus(eventNotHandledErr) }
+  var hkID = EventHotKeyID()
+  let status = GetEventParameter(
+    ev,
+    EventParamName(kEventParamDirectObject),
+    EventParamType(typeEventHotKeyID),
+    nil,
+    MemoryLayout<EventHotKeyID>.size,
+    nil,
+    &hkID
+  )
+  let keyId = (status == noErr) ? hkID.id : 1
   let controller = Unmanaged<FloatWindowController>.fromOpaque(ptr).takeUnretainedValue()
   DispatchQueue.main.async {
-    controller.toggleWindowFromHotkey()
+    if keyId == 2 {
+      controller.triggerAuxPaneFromHotkey()
+    } else {
+      controller.toggleWindowFromHotkey()
+    }
   }
   return noErr
 }
@@ -47,18 +62,28 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
   var shortcutKeyCode: Int
   var shortcutModifiers: Int
   var shortcutLabel: String
+  var isAuxShortcutEnabled: Bool
+  var auxShortcutKeyCode: Int
+  var auxShortcutModifiers: Int
+  var auxShortcutLabel: String
   var shortcutScope: String
   var isRecordingShortcut: Bool = false
   var hotKeyRef: EventHotKeyRef?
   var registeredKeyCode: Int = -1
   var registeredModifiers: Int = -1
+  var auxHotKeyRef: EventHotKeyRef?
+  var registeredAuxKeyCode: Int = -1
+  var registeredAuxModifiers: Int = -1
   var eventHandlerRef: EventHandlerRef?
   var workspaceObserver: NSObjectProtocol?
   var lastExternalApp: NSRunningApplication?
   var lastHotkeyAt: TimeInterval = 0
+  var lastAuxHotkeyAt: TimeInterval = 0
+  var hudWindow: NSWindow?
+  var hudHideWorkItem: DispatchWorkItem?
 
   var shouldStayResident: Bool {
-    return isMenubarEnabled || isShortcutEnabled
+    return isMenubarEnabled || isShortcutEnabled || isAuxShortcutEnabled
   }
 
   init(
@@ -70,6 +95,10 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
     initialShortcutKeyCode: Int,
     initialShortcutModifiers: Int,
     initialShortcutLabel: String,
+    initialAuxShortcutEnabled: Bool,
+    initialAuxShortcutKeyCode: Int,
+    initialAuxShortcutModifiers: Int,
+    initialAuxShortcutLabel: String,
     initialShortcutScope: String
   ) {
     self.isPinned = initialPinned
@@ -80,6 +109,10 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
     self.shortcutKeyCode = initialShortcutKeyCode
     self.shortcutModifiers = initialShortcutModifiers
     self.shortcutLabel = initialShortcutLabel
+    self.isAuxShortcutEnabled = initialAuxShortcutEnabled
+    self.auxShortcutKeyCode = initialAuxShortcutKeyCode
+    self.auxShortcutModifiers = initialAuxShortcutModifiers
+    self.auxShortcutLabel = initialAuxShortcutLabel
     self.shortcutScope = (initialShortcutScope == "global") ? "global" : "app"
     switch initialMode {
     case "speed":
@@ -198,6 +231,7 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
       "menubarEnabled": isMenubarEnabled,
       "menubarMode": menubarMode,
       "shortcutEnabled": isShortcutEnabled,
+      "auxShortcutEnabled": isAuxShortcutEnabled,
       "shortcutScope": shortcutScope,
       "windowVisible": isWindowVisible
     ])
@@ -254,7 +288,21 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
     return name.contains("antigravity") || bundle.contains("antigravity") || execPath.contains("antigravity")
   }
 
-  func unregisterHotKeyIfNeeded() {
+  func findAntigravityApp() -> NSRunningApplication? {
+    let myPid = ProcessInfo.processInfo.processIdentifier
+    if let front = NSWorkspace.shared.frontmostApplication,
+       front.processIdentifier != myPid,
+       isAllowedFrontApp(front) {
+      return front
+    }
+    for app in NSWorkspace.shared.runningApplications {
+      if app.processIdentifier == myPid || app.isTerminated { continue }
+      if isAllowedFrontApp(app) { return app }
+    }
+    return nil
+  }
+
+  func unregisterFloatHotKeyIfNeeded() {
     if let ref = hotKeyRef {
       UnregisterEventHotKey(ref)
       hotKeyRef = nil
@@ -263,32 +311,144 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
     registeredModifiers = -1
   }
 
+  func unregisterAuxHotKeyIfNeeded() {
+    if let ref = auxHotKeyRef {
+      UnregisterEventHotKey(ref)
+      auxHotKeyRef = nil
+    }
+    registeredAuxKeyCode = -1
+    registeredAuxModifiers = -1
+  }
+
+  func unregisterHotKeyIfNeeded() {
+    unregisterFloatHotKeyIfNeeded()
+    unregisterAuxHotKeyIfNeeded()
+  }
+
   func syncHotKeyRegistration(frontApp: NSRunningApplication? = NSWorkspace.shared.frontmostApplication) {
     let allowedByScope = (shortcutScope == "global") || isAllowedFrontApp(frontApp)
-    let wantRegistered = isShortcutEnabled && !isRecordingShortcut && shortcutKeyCode >= 0 && allowedByScope
-    if !wantRegistered {
-      unregisterHotKeyIfNeeded()
+
+    let wantFloat = isShortcutEnabled && !isRecordingShortcut && shortcutKeyCode >= 0 && allowedByScope
+    if !wantFloat {
+      unregisterFloatHotKeyIfNeeded()
+    } else if hotKeyRef == nil || registeredKeyCode != shortcutKeyCode || registeredModifiers != shortcutModifiers {
+      unregisterFloatHotKeyIfNeeded()
+      let hotKeyID = EventHotKeyID(signature: OSType(0x4356484B), id: 1)
+      var newRef: EventHotKeyRef? = nil
+      let status = RegisterEventHotKey(
+        UInt32(shortcutKeyCode),
+        UInt32(shortcutModifiers),
+        hotKeyID,
+        GetApplicationEventTarget(),
+        0,
+        &newRef
+      )
+      if status == noErr, let validRef = newRef {
+        hotKeyRef = validRef
+        registeredKeyCode = shortcutKeyCode
+        registeredModifiers = shortcutModifiers
+      }
+    }
+
+    let conflictsWithFloat = wantFloat && shortcutKeyCode == auxShortcutKeyCode && shortcutModifiers == auxShortcutModifiers
+    let wantAux = isAuxShortcutEnabled && !isRecordingShortcut && auxShortcutKeyCode >= 0 && allowedByScope && !conflictsWithFloat
+    if !wantAux {
+      unregisterAuxHotKeyIfNeeded()
+    } else if auxHotKeyRef == nil || registeredAuxKeyCode != auxShortcutKeyCode || registeredAuxModifiers != auxShortcutModifiers {
+      unregisterAuxHotKeyIfNeeded()
+      let auxKeyID = EventHotKeyID(signature: OSType(0x4356484B), id: 2)
+      var newAuxRef: EventHotKeyRef? = nil
+      let auxStatus = RegisterEventHotKey(
+        UInt32(auxShortcutKeyCode),
+        UInt32(auxShortcutModifiers),
+        auxKeyID,
+        GetApplicationEventTarget(),
+        0,
+        &newAuxRef
+      )
+      if auxStatus == noErr, let validAuxRef = newAuxRef {
+        auxHotKeyRef = validAuxRef
+        registeredAuxKeyCode = auxShortcutKeyCode
+        registeredAuxModifiers = auxShortcutModifiers
+      }
+    }
+  }
+
+  func triggerAuxPaneFromHotkey() {
+    let now = ProcessInfo.processInfo.systemUptime
+    if now - lastAuxHotkeyAt < 0.14 { return }
+    lastAuxHotkeyAt = now
+
+    guard let targetApp = findAntigravityApp() else {
+      showHudNotice("未检测到运行中的 Antigravity")
       return
     }
-    if hotKeyRef != nil && registeredKeyCode == shortcutKeyCode && registeredModifiers == shortcutModifiers {
-      return
+    if NSWorkspace.shared.frontmostApplication?.processIdentifier != targetApp.processIdentifier {
+      targetApp.activate(options: [])
     }
-    unregisterHotKeyIfNeeded()
-    let hotKeyID = EventHotKeyID(signature: OSType(0x4356484B), id: 1)
-    var newRef: EventHotKeyRef? = nil
-    let status = RegisterEventHotKey(
-      UInt32(shortcutKeyCode),
-      UInt32(shortcutModifiers),
-      hotKeyID,
-      GetApplicationEventTarget(),
-      0,
-      &newRef
+    emitJson(["type": "auxHotkeyTriggered"])
+  }
+
+  @objc func toggleAuxPaneFromMenuAction() {
+    triggerAuxPaneFromHotkey()
+  }
+
+  func showHudNotice(_ text: String) {
+    hudHideWorkItem?.cancel()
+    let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+    let panelWidth: CGFloat = 340
+    let panelHeight: CGFloat = 48
+    let rect = NSRect(
+      x: screenFrame.midX - panelWidth / 2.0,
+      y: screenFrame.maxY - panelHeight - 64,
+      width: panelWidth,
+      height: panelHeight
     )
-    if status == noErr, let validRef = newRef {
-      hotKeyRef = validRef
-      registeredKeyCode = shortcutKeyCode
-      registeredModifiers = shortcutModifiers
+
+    let panel: NSWindow
+    if let existing = hudWindow {
+      panel = existing
+      panel.setFrame(rect, display: true)
+    } else {
+      panel = NSPanel(
+        contentRect: rect,
+        styleMask: [.borderless, .nonactivatingPanel],
+        backing: .buffered,
+        defer: false
+      )
+      panel.level = .floating
+      panel.isOpaque = false
+      panel.backgroundColor = .clear
+      panel.hasShadow = true
+      panel.ignoresMouseEvents = true
+      panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+      hudWindow = panel
     }
+
+    let container = NSView(frame: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight))
+    container.wantsLayer = true
+    container.layer?.backgroundColor = NSColor(white: 0.1, alpha: 0.9).cgColor
+    container.layer?.cornerRadius = 10
+    container.layer?.borderWidth = 1
+    container.layer?.borderColor = NSColor(white: 1.0, alpha: 0.14).cgColor
+
+    let label = NSTextField(labelWithString: text)
+    label.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
+    label.textColor = .white
+    label.alignment = .center
+    label.lineBreakMode = .byTruncatingTail
+    label.frame = NSRect(x: 14, y: 14, width: panelWidth - 28, height: 20)
+    container.addSubview(label)
+
+    panel.contentView = container
+    panel.alphaValue = 1.0
+    panel.orderFrontRegardless()
+
+    let work = DispatchWorkItem { [weak self] in
+      self?.hudWindow?.orderOut(nil)
+    }
+    hudHideWorkItem = work
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: work)
   }
 
   func toggleWindowFromHotkey() {
@@ -355,6 +515,15 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
       )
       toggleItem.target = self
       menu.addItem(toggleItem)
+
+      let auxSuffix = (isAuxShortcutEnabled && !auxShortcutLabel.isEmpty) ? " (\(auxShortcutLabel))" : ""
+      let auxItem = NSMenuItem(
+        title: "切换 AGY 侧栏看板" + auxSuffix,
+        action: #selector(toggleAuxPaneFromMenuAction),
+        keyEquivalent: ""
+      )
+      auxItem.target = self
+      menu.addItem(auxItem)
 
       let pinItem = NSMenuItem(
         title: "窗口置顶在屏幕最前",
@@ -654,6 +823,42 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
         emitJson(["type": "closed"])
         NSApp.terminate(nil)
       }
+    case "setAuxShortcut":
+      if let en = msg["enabled"] as? Bool {
+        isAuxShortcutEnabled = en
+      }
+      if let kc = msg["keyCode"] as? Int {
+        auxShortcutKeyCode = kc
+      }
+      if let mods = msg["modifiers"] as? Int {
+        auxShortcutModifiers = mods
+      }
+      if let lbl = msg["label"] as? String {
+        auxShortcutLabel = lbl
+      }
+      if let sc = msg["scope"] as? String {
+        shortcutScope = (sc == "global") ? "global" : "app"
+      }
+      isRecordingShortcut = false
+      syncHotKeyRegistration()
+      if let scJsonData = try? JSONSerialization.data(withJSONObject: [
+        "enabled": isAuxShortcutEnabled,
+        "accelerator": (msg["accelerator"] as? String) ?? "",
+        "display": auxShortcutLabel,
+        "scope": shortcutScope
+      ], options: []), let scJson = String(data: scJsonData, encoding: .utf8) {
+        let js = "window.__cvOnHostAuxShortcutChange && window.__cvOnHostAuxShortcutChange(\(scJson));"
+        webView?.evaluateJavaScript(js, completionHandler: nil)
+      }
+      if !shouldStayResident && !window.isVisible {
+        unregisterHotKeyIfNeeded()
+        emitJson(["type": "closed"])
+        NSApp.terminate(nil)
+      }
+    case "showHud":
+      if let text = msg["text"] as? String, !text.isEmpty {
+        showHudNotice(text)
+      }
     case "setMenubarMode":
       if let m = msg["mode"] as? String, !m.isEmpty {
         menubarMode = m
@@ -720,6 +925,19 @@ var initialShortcutLabel = "⌥⌘K"
 if let idx = args.firstIndex(of: "--shortcut-label"), idx + 1 < args.count {
   initialShortcutLabel = args[idx + 1]
 }
+let initialAuxShortcutEnabled = !args.contains("--no-aux-shortcut")
+var initialAuxShortcutKeyCode = Int(kVK_ANSI_K)
+if let idx = args.firstIndex(of: "--aux-keycode"), idx + 1 < args.count, let v = Int(args[idx + 1]) {
+  initialAuxShortcutKeyCode = v
+}
+var initialAuxShortcutModifiers = Int(controlKey | optionKey)
+if let idx = args.firstIndex(of: "--aux-mods"), idx + 1 < args.count, let v = Int(args[idx + 1]) {
+  initialAuxShortcutModifiers = v
+}
+var initialAuxShortcutLabel = "⌃⌥K"
+if let idx = args.firstIndex(of: "--aux-label"), idx + 1 < args.count {
+  initialAuxShortcutLabel = args[idx + 1]
+}
 var initialShortcutScope = "app"
 if let idx = args.firstIndex(of: "--shortcut-scope"), idx + 1 < args.count {
   let sc = args[idx + 1]
@@ -740,6 +958,10 @@ let delegate = FloatWindowController(
   initialShortcutKeyCode: initialShortcutKeyCode,
   initialShortcutModifiers: initialShortcutModifiers,
   initialShortcutLabel: initialShortcutLabel,
+  initialAuxShortcutEnabled: initialAuxShortcutEnabled,
+  initialAuxShortcutKeyCode: initialAuxShortcutKeyCode,
+  initialAuxShortcutModifiers: initialAuxShortcutModifiers,
+  initialAuxShortcutLabel: initialAuxShortcutLabel,
   initialShortcutScope: initialShortcutScope
 )
 app.delegate = delegate

@@ -182,6 +182,7 @@ function packageContextViewer() {
 }
 
 function main() {
+  rmSync(DIST_DIR, { recursive: true, force: true });
   mkdirSync(DIST_DIR, { recursive: true });
   packageAgyFinder();
   packageContextViewer();

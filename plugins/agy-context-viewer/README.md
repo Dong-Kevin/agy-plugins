@@ -2,7 +2,7 @@
 
 # Antigravity Context & Token Viewer (`agy-context-viewer`)
 
-[![Version](https://img.shields.io/badge/version-v1.6.3-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
+[![Version](https://img.shields.io/badge/version-v1.7.0-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-818cf8)](#一键安装)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D%2018-22c55e)](#一键安装)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-a855f7)](#隐私与安全机制)
@@ -32,10 +32,10 @@
       <sub>支持「上下文占比 / 速度与耗时 / 5h·Week 额度」三档快切，切换对话自动跟随；左键 <code>&lt;5ms</code> 秒开小窗</sub>
     </td>
     <td width="52%" align="center" valign="middle">
-      <img src="docs/images/customizer-drawer.png" width="290" alt="快捷入口模式、⌥⌘K 快捷键录制与外观定制抽屉" />
+      <img src="docs/images/customizer-drawer.png" width="290" alt="双快捷键录制、快捷入口与外观定制抽屉" />
       <br/>
-      <b>快捷入口、<code>⌥⌘K</code> 快捷键录制与外观定制</b><br/>
-      <sub>一键开关菜单栏常驻、点击录制看板快捷键、切换生效范围，并内置亮暗主题与 5 套热力图配色</sub>
+      <b>双快捷键录制（<code>⌥⌘K</code> / <code>⌃⌥K</code>）与外观定制</b><br/>
+      <sub>分别点击录制独立悬浮窗与 AGY 侧栏看板快捷键、切换仅宿主/全局范围，并内置 5 套热力图配色</sub>
     </td>
   </tr>
 </table>
@@ -95,8 +95,8 @@
     3. **5 小时 / Week 配额余量**：`⏳ 5h 99%·周93%`
   - **切换对话自动跟随**：在左侧会话列表点击切换任意对话（包括未发新消息的历史静止对话）时，顶部菜单栏与右侧小窗在约 `1.5s` 内自动同步到当前浏览会话；也可在下拉框手动锁定指定会话。
   - **四段式精简悬停卡片 & `<5ms` 秒开交互**：鼠标悬停展示「会话与模型 / 水位与速度 / 分池 `5h + 周` 配额 / 快捷操作」四段概览；**左键单击** `<5ms` 秒开或收回右侧小窗，**右键单击** 弹出原生菜单切换模式与置顶。
-- **屏幕右侧独立置顶小窗（`📌` + 自定义快捷键 `⌥⌘K`，告别繁琐侧边栏切换）**
-  - 一键将看板独立钉在屏幕右侧最前，即使宿主右侧辅助栏正在查看 Artifacts、Diff 或终端也互不抢占；macOS 默认支持 **`⌥⌘K`** 一键弹出或关闭右侧看板（基于 `Carbon` 热键注册，**零辅助功能权限弹窗**，默认仅在 Antigravity 或看板处于前台时响应，可选全局生效，并支持在看板设置抽屉中点击录制任意组合键或执行 `agy-context shortcut` 自定义）。
+- **屏幕右侧独立置顶小窗（`📌`）& AGY 侧栏直达双快捷键（`⌥⌘K` / `⌃⌥K`，零权限自定义）**
+  - 一键将看板独立钉在屏幕右侧最前，即使宿主右侧辅助栏正在查看 Artifacts、Diff 或终端也互不抢占；macOS 默认支持 **`⌥⌘K`** 一键弹出/收回独立悬浮窗，**`⌃⌥K`** 直接唤醒并切换 Antigravity 原生右侧辅助栏到上下文看板（基于 `Carbon` 热键注册，**零辅助功能权限弹窗**，默认仅在宿主或看板前台生效，可选全局生效；可在调色盘设置抽屉点击录制任意组合键，或通过 `agy-context shortcut` / `aux-shortcut` 自定义）。
   - 支持标题栏按钮、面板内 `📌` 图标或快捷键 `Cmd+Shift+P` 实时切换置顶，按 `⌥⌘K` 或 `Cmd+W` 快速收回。
 - **真实双窗口配额池（`5h + Week`）与灵活订阅价值对标**
   - 同时读取宿主 `GetUserStatus` 与 `RetrieveUserQuotaSummary` 只读本地接口，同屏呈现 Gemini 系列与 Claude / GPT 系列的 **5 小时滚动突发限额** 与 **Week 周度档位共享池余量** 及精确重置时间。
@@ -153,7 +153,7 @@ cd agy-plugins
 ./install.sh agy-context-viewer   # Windows PowerShell 执行：.\install.ps1 -Plugin agy-context-viewer
 ```
 
-也可在 [Releases](https://github.com/Dong-Kevin/agy-plugins/releases) 页面下载 `context-viewer-v1.6.3.zip` 与对应的 `.sha256` 校验文件，通过 `shasum -a 256 -c context-viewer-v1.6.3.zip.sha256` 核验完整性后解压执行 `./context-viewer/install.sh`（或 `agy plugin install ./context-viewer`）。
+也可在 [Releases](https://github.com/Dong-Kevin/agy-plugins/releases) 页面下载 `context-viewer-v1.7.0.zip` 与对应的 `.sha256` 校验文件，通过 `shasum -a 256 -c context-viewer-v1.7.0.zip.sha256` 核验完整性后解压执行 `./context-viewer/install.sh`（或 `agy plugin install ./context-viewer`）。
 
 ---
 
@@ -164,10 +164,11 @@ cd agy-plugins
 | 触发场景 | 默认快捷键 / 命令 | 说明 |
 | :--- | :--- | :--- |
 | **独立置顶看板开关（macOS）** | **`⌥⌘K`** | 一键弹出 / 收回右侧置顶小窗（默认仅宿主或看板前台生效；面板点击录制改键或切全局生效；看板内 Win / Linux 为 **`Ctrl+Alt+K`**） |
+| **AGY 右侧辅助栏看板直达** | **`⌃⌥K`**（Win / Linux **`Ctrl+Alt+Shift+K`**） | 一键唤醒并切换 Antigravity 原生右侧辅助栏到上下文看板（面板点击录制自定义，或运行 `agy-context aux` / `aux-shortcut`） |
 | **置顶切换 / 快速收回** | **`⌘⇧P`** · **`⌘W`** | 独立小窗内切换常驻置顶状态 / 快速收回隐藏 |
 | **macOS 顶部系统菜单栏** | **左键单击** / **右键单击** | 左键 `<5ms` 显隐看板小窗；右键快速切换 3 档显示指标或置顶状态 |
 | **宿主右侧辅助栏与对话触发** | **`⌘⇧B`**（Win / Linux **`Ctrl+Shift+B`**）<br/>**`/context-viewer`** · [`sidecar://context-viewer/dashboard/`](sidecar://context-viewer/dashboard/) | 开关宿主 Aux Pane；聊天中输入斜杠命令或点击深链接直达看板 |
-| **终端 CLI 快捷命令** | **`agy-context`** · `float` · `menubar` · `shortcut` · `turns` · `json` · `web` | 终端进度条总览、小窗 / 菜单栏 / 快捷键控制、逐轮审计与本地 Web 看板 |
+| **终端 CLI 快捷命令** | **`agy-context`** · `aux` · `float` · `menubar` · `shortcut` · `aux-shortcut` · `turns` · `json` · `web` | 终端进度条总览、AGY 侧栏直达、小窗 / 菜单栏 / 双快捷键控制、逐轮审计与本地 Web 看板 |
 
 ### 1. 在 Antigravity 桌面端 / IDE 中使用
 
@@ -175,12 +176,13 @@ cd agy-plugins
    - **左键单击** 屏幕右上角图标：`<5ms` 弹出或收回右侧看板小窗；
    - **右键单击** 菜单栏图标：直接勾选切换 **当前上下文使用占比 / 最新生成速度与耗时 / 5 小时与 Week 额度**，或切换小窗置顶、隐藏菜单栏图标；
    - 也可点击看板右上角调色盘按钮在「快捷入口模式与外观定制」抽屉中一键切换。
-2. **屏幕右侧独立置顶小窗（`📌`）与自定义开关快捷键（默认 `⌥⌘K`）**
-   - 在 Antigravity 前台直接按下 **`⌥⌘K`**（Windows / Linux 看板内为 `Ctrl+Alt+K`）、点击看板顶栏 **`📌` 按钮** 或在终端执行 `agy-context float`，即可一键打开或关闭屏幕右侧看板；
-   - 点击看板右上角调色盘按钮打开「快捷入口模式与外观定制」，可在 **侧栏看板快捷键** 行直接点击按键录制自定义组合键、切换「仅宿主前台 / 全局生效」或停用 / 恢复默认；
+2. **屏幕右侧独立置顶小窗（`📌` `⌥⌘K`）与 AGY 侧栏直达（`⌃⌥K`）**
+   - 在 Antigravity 前台直接按下 **`⌥⌘K`**（Windows / Linux 看板内为 `Ctrl+Alt+K`）、点击看板顶栏 **`📌` 按钮** 或在终端执行 `agy-context float`，即可一键打开或关闭屏幕右侧独立小窗；
+   - 按 **`⌃⌥K`**（或运行 `agy-context aux`）可直接唤醒并将 Antigravity 原生右侧辅助栏切到上下文看板；
+   - 点击看板右上角调色盘按钮打开「快捷入口模式与外观定制」，可在 **独立悬浮窗快捷键** 与 **AGY 侧栏看板键** 行直接点击按键录制自定义组合键、切换「仅宿主前台 / 全局生效」或停用 / 恢复默认；
    - 点击窗口标题栏右侧 `📌 已置顶`（或按 `Cmd+Shift+P`）可切换置顶 / 普通窗口层级；再次按 `⌥⌘K`、按 `Cmd+W`、左键点击菜单栏图标或运行 `agy-context float close` 即可收回。
 3. **宿主右侧辅助栏内嵌模式**
-   - 在左侧 **Customizations → Plugins** 中确认已启用「上下文与 Token 看板」，点击右上角辅助栏图标（或点击对话中的 `sidecar://context-viewer/dashboard/` 链接）即可内嵌分屏查看。
+   - 在左侧 **Customizations → Plugins** 中确认已启用「上下文与 Token 看板」，点击右上角辅助栏图标（或按 `⌃⌥K` / 点击 `sidecar://context-viewer/dashboard/` 链接）即可内嵌分屏查看。
 
 ### 2. 在终端与 `agy` CLI 中使用
 
@@ -189,12 +191,14 @@ cd agy-plugins
 
 ```bash
 agy-context                  # 终端彩色进度条汇总（当前窗口水位、速度、近 5 轮涨跌、双维度配额池余量）
+agy-context aux              # 唤醒并将 Antigravity 右侧辅助栏切到上下文看板
 agy-context menubar context  # 菜单栏显示：当前上下文使用占比（◈ 86%）
 agy-context menubar speed    # 菜单栏显示：最新生成速度与耗时（⚡ 46t/s·33s (均 39/峰 132)）
 agy-context menubar quota    # 菜单栏显示：5 小时 / Week 额度余量（⏳ 5h 99%·周93%）
 agy-context menubar off      # 关闭顶部菜单栏常驻图标（传 on 重新开启，传 status 查看当前状态）
 agy-context float            # 弹出 / 切换屏幕右侧独立置顶小窗（传 close 收回，传 quit 退出守护进程）
-agy-context shortcut         # 查看或自定义右侧看板开关快捷键（如 agy-context shortcut opt+cmd+l / reset / off / --global）
+agy-context shortcut         # 查看或自定义独立悬浮窗快捷键（如 opt+cmd+l / reset / off / --global）
+agy-context aux-shortcut     # 查看或自定义 AGY 侧栏看板快捷键（如 ctrl+opt+l / reset / off / --global）
 agy-context turns            # 查看最近 20 轮上下文涨跌（±Delta）、缓存率与工具调用时间线
 agy-context json             # 输出结构化 JSON 摘要（追加 --full 输出完整原始载荷，便于脚本集成）
 agy-context web              # 在 127.0.0.1:18970 启动本地只读 Web 服务并在浏览器打开完整看板
@@ -270,7 +274,7 @@ agy-context-viewer/
 
 ```bash
 node scripts/verify.mjs           # 运行清单规范、JS 语法、常见敏感模式与 PNG 元数据块检查、CSS 隔离及行为回归测试
-node scripts/package-release.mjs  # 生成轻量发布包 dist/context-viewer-v1.6.3.zip 与 .sha256
+node scripts/package-release.mjs  # 生成轻量发布包 dist/context-viewer-v1.7.0.zip 与 .sha256
 ```
 
 ---
