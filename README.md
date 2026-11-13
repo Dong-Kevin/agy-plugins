@@ -1,4 +1,4 @@
-# AGY Plugins (`Dong-Kevin/agy-plugins`)
+# AGY Plugins
 
 [![Plugins](https://img.shields.io/badge/plugins-2-38bdf8)](#插件矩阵)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-818cf8)](#快速安装)
@@ -6,7 +6,7 @@
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-a855f7)](#隐私与安全原则)
 [![License: MIT](https://img.shields.io/badge/License-MIT-f59e0b.svg)](./LICENSE)
 
-**简体中文** | **[English](./README_EN.md)** · [插件矩阵](#插件矩阵) · [亮点与预览](#亮点与预览) · [快速安装](#快速安装) · [目录结构与新增插件](#目录结构与新增插件) · [校验与打包](#本地校验与打包) · [致谢](#致谢)
+**简体中文** | **[English](./README_EN.md)** · [插件矩阵](#插件矩阵) · [快捷命令速查](#快捷键与快捷命令速查) · [亮点与预览](#亮点与预览) · [快速安装](#快速安装) · [目录结构与新增插件](#目录结构与新增插件) · [校验与打包](#本地校验与打包) · [致谢](#致谢)
 
 面向 **Google Antigravity 桌面端（`agy` App / IDE）** 与 **终端 `agy` CLI** 的开源插件合集仓库。
 
@@ -16,10 +16,22 @@
 
 ## 插件矩阵
 
-| 插件目录 | 插件标识 (`name`) | 版本 | 功能定位 | 核心亮点 | 详细文档 |
+| 插件目录 | 插件标识 (`name`) | 版本 | 默认快捷键与快捷命令 | 核心定位 | 详细文档 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| [`plugins/agy-finder`](./plugins/agy-finder) | `agy-finder` | `v0.1.0` | 右侧项目目录树与路径直达定位 | 对话 `[📂]` 深链接 + `transcript_full.jsonl` 增量兜底，macOS `⌘⇧E` 前台零冲突抽屉与预览 | [查看 README](./plugins/agy-finder/README.md) |
-| [`plugins/agy-context-viewer`](./plugins/agy-context-viewer) | `context-viewer` | `v1.6.3` | 上下文窗口、速度、双配额池与 Token 看板 | macOS 顶部菜单栏 3 档徽章（切换对话自动跟随）、`⌥⌘K` 右侧独立置顶小窗、`5h + Week` 配额池与 53 周热力图 | [查看 README](./plugins/agy-context-viewer/README.md) |
+| [`plugins/agy-finder`](./plugins/agy-finder) | `agy-finder` | `v0.1.0` | `⌘⇧E`（抽屉） · `/agy-finder` · `[📂]` · `agy-finder toggle` | 右侧项目目录树与对话路径直达定位 | [查看 README](./plugins/agy-finder/README.md) |
+| [`plugins/agy-context-viewer`](./plugins/agy-context-viewer) | `context-viewer` | `v1.6.3` | `⌥⌘K`（小窗） · 菜单栏左键 · `/context-viewer` · `agy-context` | 上下文窗口、速度、`5h + Week` 配额与 Token 看板 | [查看 README](./plugins/agy-context-viewer/README.md) |
+
+---
+
+## 快捷键与快捷命令速查
+
+| 触发方式 | `AGY Finder` (`agy-finder`) | `Context & Token Viewer` (`context-viewer`) |
+| :--- | :--- | :--- |
+| **macOS 面板快捷键** | **`⌘⇧E`** 开关右侧独立目录树抽屉（仅 `Antigravity` 前台生效，零冲突、免辅助功能权限；面板 `⌨` 可切 `⌘⌥E` / `⌃⇧E` / `⌘⇧Y` / `关闭`） | **`⌥⌘K`** 开关右侧独立置顶看板（默认仅宿主前台，支持面板点击录制改键或全局生效）；**`⌘⇧P`** 切换置顶、**`⌘W`** 收回 |
+| **宿主 / 菜单栏入口** | **`⌘⇧B`**（macOS）/ **`Ctrl+Shift+B`**（Win / Linux）开关宿主右侧辅助栏 | 顶部系统菜单栏徽章 **左键 `<5ms` 显隐小窗**、**右键切换 3 档指标 / 置顶**；辅助栏同样支持 **`⌘⇧B`** / **`Ctrl+Shift+B`**；看板内 Win / Linux 为 **`Ctrl+Alt+K`** |
+| **对话斜杠 & 深链接** | 输入 **`/agy-finder`**；点击回复路径旁的 **`[📂]`** 或 [`sidecar://agy-finder/tree/`](sidecar://agy-finder/tree/) 直达目录树 | 输入 **`/context-viewer`**；或打开 [`sidecar://context-viewer/dashboard/`](sidecar://context-viewer/dashboard/) |
+| **终端 CLI 快捷命令** | `agy-finder`（等同 `agy-finder toggle`，Win / Linux 可绑 `Ctrl+Shift+E`）<br/>`agy-finder open [path]` · `close` · `hotkey <preset>` · `status [--json]` · `quit` | `agy-context`（终端彩色进度条汇总）<br/>`agy-context float [close\|quit]` · `menubar [context\|speed\|quota\|on\|off]` · `shortcut [status\|<combo>\|reset\|off\|--global]` · `turns` · `json [--full]` · `web` |
+| **面板内高频键位** | `↑` / `↓` 移动 · `←` / `→` 折展 · `Enter` 预览或展开 · `/` 或 `⌘/Ctrl+F` 搜索 · `⌘/Ctrl+.` 隐藏项 · `?` 快捷键 · `Esc` 关闭 | 右上角调色盘录制快捷键与 5 套热力图配色 · 窗口上限 `自动 / 200K / 256K / 1M` 快切 · 顶部胶囊直跳核心视图 |
 
 ---
 
@@ -27,8 +39,25 @@
 
 ### 1. `AGY Finder` -- 右侧项目目录树与对话路径直达
 
-- **双保险路径定位**：内置 `rules/AGENTS.md` 让回答中的文件附带 `[📂](sidecar://agy-finder/tree/?path=...)` 快捷入口；同时仅在面板可见时按字节偏移增量读取 `transcript_full.jsonl`，提取对话提及路径芯片，对历史对话同样有效。
-- **零冲突快捷键与轻交互**：macOS 下默认 `⌘⇧E`（基于 Carbon `RegisterEventHotKey`，仅在 `Antigravity` 前台生效、无需辅助功能权限），Windows / Linux 可通过 `agy-finder toggle` 绑定全局热键；支持模糊检索、剪贴板路径直跳、原生文件预览与系统文件管理器定位。
+- **双保险路径定位**：内置 `rules/AGENTS.md` 让回答中的文件附带 `[📂](sidecar://agy-finder/tree/?path=...)` 快捷入口；同时仅在面板可见时按字节偏移增量读取 `transcript_full.jsonl`，提取对话提及路径芯片，对历史对话同样有效（面板收起时 `0%` CPU）。
+- **零冲突快捷键与轻交互**：macOS 下默认 **`⌘⇧E`** 呼出独立右侧抽屉（仅 `Antigravity` 前台生效、无需辅助功能权限），Windows / Linux 可将 `agy-finder toggle` 绑定至系统快捷键；支持模糊检索、剪贴板路径直跳、行内预览弹窗与系统文件管理器定位。
+
+<table>
+  <tr>
+    <td width="50%" align="center" valign="top">
+      <img src="plugins/agy-finder/docs/images/finder-tree-reveal.png" width="320" alt="AGY Finder 对话提及与目录树脉冲高亮定位" />
+      <br/>
+      <b>对话提及芯片 + 路径栏与目录树展开高亮</b><br/>
+      <sub>顶部自动聚合对话提及文件，点击即可展开目录树并高亮目标文件（支持预览 / 复制路径 / 系统定位）</sub>
+    </td>
+    <td width="50%" align="center" valign="top">
+      <img src="plugins/agy-finder/docs/images/finder-shortcuts.png" width="320" alt="AGY Finder 零冲突快捷键设置与键盘导航" />
+      <br/>
+      <b>零冲突快捷键预设（<code>⌘⇧E</code>）与键盘导航</b><br/>
+      <sub>支持切换 <code>⌘⇧E</code> / <code>⌘⌥E</code> / <code>⌃⇧E</code> / <code>⌘⇧Y</code>，与宿主 <code>⌘⇧B</code> 辅助栏及全键盘树导航协同工作</sub>
+    </td>
+  </tr>
+</table>
 
 ### 2. `Context & Token Viewer` -- 上下文、速度、配额与费用看板
 
@@ -41,10 +70,10 @@
       <sub>与代码、Artifacts、终端同屏常驻；支持 macOS 菜单栏 3 档徽章与切换会话自动跟随</sub>
     </td>
     <td width="50%" align="center" valign="top">
-      <img src="plugins/agy-context-viewer/docs/images/context-overview.png" width="320" alt="当前会话上下文与缓存率" />
+      <img src="plugins/agy-context-viewer/docs/images/customizer-drawer.png" width="320" alt="快捷入口模式、⌥⌘K 快捷键录制与外观定制" />
       <br/>
-      <b>当前会话 · 上下文构成与缓存命中率</b><br/>
-      <sub>预算水位圆环、待发送估算、三段上下文拆解与四维累计吞吐</sub>
+      <b>快捷入口、<code>⌥⌘K</code> 快捷键录制与外观定制</b><br/>
+      <sub>开关菜单栏常驻、点击录制看板快捷键、切换仅宿主前台 / 全局生效与 5 套热力图配色</sub>
     </td>
   </tr>
   <tr>
@@ -69,7 +98,23 @@
 
 > **环境要求**：本机需安装 `Node.js >= 18`。macOS 原生菜单栏、置顶小窗与独立抽屉首次编译需具备 Swift 工具链（未安装时运行 `xcode-select --install`）；Windows / Linux 下宿主内嵌 Aux Pane 与终端 CLI 完整可用。
 
-### 方式 1：macOS / Linux 一键安装（支持全部或单插件）
+### 方式 1：让 Antigravity Agent 协助安装（推荐首选）
+
+直接复制下面任意一条指令发送给你的 **Antigravity Agent**，即可自动完成对应平台的安装、命令注册与状态检查：
+
+- **安装全部插件（`agy-finder` + `agy-context-viewer`）**：
+
+```text
+请帮我安装 https://github.com/Dong-Kevin/agy-plugins 中的全部插件（macOS / Linux 运行 `bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh)"`，Windows PowerShell 运行 `irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.ps1 | iex`），安装完成后验证插件状态，并列出两个插件的快捷键与快捷命令。
+```
+
+- **仅安装单个插件（按需替换 `agy-finder` 或 `agy-context-viewer`）**：
+
+```text
+请帮我从 https://github.com/Dong-Kevin/agy-plugins 仅安装 agy-finder 插件（macOS / Linux 运行 `curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh | bash -s -- agy-finder`，Windows PowerShell 运行 `$env:AGY_PLUGIN="agy-finder"; irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.ps1 | iex`），完成后检查可用状态并说明快捷键。
+```
+
+### 方式 2：macOS / Linux 一键安装（支持全部或单插件）
 
 ```bash
 # 安装仓库内全部插件
@@ -83,7 +128,7 @@ curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install
 curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh | bash -s -- --uninstall
 ```
 
-### 方式 2：Windows PowerShell 一键安装
+### 方式 3：Windows PowerShell 一键安装
 
 ```powershell
 # 安装全部插件
@@ -93,7 +138,7 @@ irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.ps1 | 
 $env:AGY_PLUGIN="agy-finder"; irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.ps1 | iex
 ```
 
-### 方式 3：克隆仓库后本地安装或通过 `agy` CLI 安装
+### 方式 4：克隆仓库后本地安装或通过 `agy` CLI 安装
 
 ```bash
 git clone https://github.com/Dong-Kevin/agy-plugins.git
@@ -115,7 +160,7 @@ agy plugin install ./plugins/agy-finder
 agy plugin install ./plugins/agy-context-viewer
 ```
 
-### 方式 4：通过 `plugins.json` 直接挂载（开发 / 团队共享）
+### 方式 5：通过 `plugins.json` 挂载或下载离线包
 
 可将本仓库 `plugins/` 目录直接注册到全局 `~/.gemini/config/plugins.json` 或工作区 `.agents/plugins.json`（参考 [官方 JSON 配置文档](https://antigravity.google/docs/plugins)）：
 

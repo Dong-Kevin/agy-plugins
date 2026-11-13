@@ -32,10 +32,10 @@
       <sub>支持「上下文占比 / 速度与耗时 / 5h·Week 额度」三档快切，切换对话自动跟随；左键 <code>&lt;5ms</code> 秒开小窗</sub>
     </td>
     <td width="52%" align="center" valign="middle">
-      <img src="docs/images/customizer-drawer.png" width="290" alt="快捷入口模式与热力图色阶定制抽屉" />
+      <img src="docs/images/customizer-drawer.png" width="290" alt="快捷入口模式、⌥⌘K 快捷键录制与外观定制抽屉" />
       <br/>
-      <b>快捷入口模式与外观色阶定制</b><br/>
-      <sub>一键开关菜单栏常驻、切换显示内容、弹出独立置顶小窗，内置亮暗主题与 5 套热力图预设色阶</sub>
+      <b>快捷入口、<code>⌥⌘K</code> 快捷键录制与外观定制</b><br/>
+      <sub>一键开关菜单栏常驻、点击录制看板快捷键、切换生效范围，并内置亮暗主题与 5 套热力图配色</sub>
     </td>
   </tr>
 </table>
@@ -113,7 +113,15 @@
 > - **macOS 原生菜单栏与置顶小窗**：首次编译需本机具备 Swift 编译工具链（Xcode Command Line Tools，未安装时运行 `xcode-select --install`）；**Windows / Linux** 下宿主内嵌辅助栏、`agy-context` 终端看板与 `web` 模式完整可用，`float` 命令则回退为独立浏览器小窗（无系统菜单栏常驻图标与原生置顶层级）。
 > - **脱离宿主独立运行**：在未由 Antigravity 宿主注入本地语言服务地址与凭据的纯外部终端中，实时订阅档位与 `5h / Week` 配额查询会自动降级，本地会话归档与历史统计不受影响。
 
-### 方式 1：macOS / Linux 一键脚本安装（推荐）
+### 方式 1：让 Antigravity Agent 协助安装（推荐首选）
+
+直接复制下面这段指令发给 **Antigravity Agent**，即可自动完成安装、启用与快捷键检查：
+
+```text
+请帮我安装 Antigravity Context & Token Viewer 插件（来自 https://github.com/Dong-Kevin/agy-plugins ：macOS / Linux 运行 `bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.sh)"`，Windows PowerShell 运行 `irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.ps1 | iex`），安装后测试 `agy-context menubar status` 并列出快捷键说明。
+```
+
+### 方式 2：macOS / Linux 一键脚本安装
 
 自动安装插件、编译并启动 macOS 顶部菜单栏常驻守护进程，同时注册终端 `agy-context` 命令（如需锁定特定发布版本，可在命令前加 `REF=<tag>`）：
 
@@ -123,13 +131,13 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/m
 # curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh | bash -s -- agy-context-viewer
 ```
 
-### 方式 2：Windows PowerShell 一键安装
+### 方式 3：Windows PowerShell 一键安装
 
 ```powershell
 irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.ps1 | iex
 ```
 
-### 方式 3：通过官方 `agy` CLI 安装本地目录
+### 方式 4：通过官方 `agy` CLI 安装本地目录
 
 ```bash
 git clone https://github.com/Dong-Kevin/agy-plugins.git
@@ -137,7 +145,7 @@ cd agy-plugins
 agy plugin install ./plugins/agy-context-viewer
 ```
 
-### 方式 4：克隆仓库或下载 Release 离线包安装
+### 方式 5：克隆仓库或下载 Release 离线包安装
 
 ```bash
 git clone https://github.com/Dong-Kevin/agy-plugins.git
@@ -150,6 +158,16 @@ cd agy-plugins
 ---
 
 ## 快速上手
+
+### 快捷键与快捷命令速查
+
+| 触发场景 | 默认快捷键 / 命令 | 说明 |
+| :--- | :--- | :--- |
+| **独立置顶看板开关（macOS）** | **`⌥⌘K`** | 一键弹出 / 收回右侧置顶小窗（默认仅宿主或看板前台生效；面板点击录制改键或切全局生效；看板内 Win / Linux 为 **`Ctrl+Alt+K`**） |
+| **置顶切换 / 快速收回** | **`⌘⇧P`** · **`⌘W`** | 独立小窗内切换常驻置顶状态 / 快速收回隐藏 |
+| **macOS 顶部系统菜单栏** | **左键单击** / **右键单击** | 左键 `<5ms` 显隐看板小窗；右键快速切换 3 档显示指标或置顶状态 |
+| **宿主右侧辅助栏与对话触发** | **`⌘⇧B`**（Win / Linux **`Ctrl+Shift+B`**）<br/>**`/context-viewer`** · [`sidecar://context-viewer/dashboard/`](sidecar://context-viewer/dashboard/) | 开关宿主 Aux Pane；聊天中输入斜杠命令或点击深链接直达看板 |
+| **终端 CLI 快捷命令** | **`agy-context`** · `float` · `menubar` · `shortcut` · `turns` · `json` · `web` | 终端进度条总览、小窗 / 菜单栏 / 快捷键控制、逐轮审计与本地 Web 看板 |
 
 ### 1. 在 Antigravity 桌面端 / IDE 中使用
 

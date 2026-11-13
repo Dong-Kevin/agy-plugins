@@ -8,11 +8,59 @@
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-a855f7)](#核心特性)
 [![License: MIT](https://img.shields.io/badge/License-MIT-f59e0b.svg)](./LICENSE)
 
-**简体中文** | **[English](./README_EN.md)** · [核心特性](#核心特性) · [安装与启用](#安装与启用) · [快捷键与 CLI](#快捷键与-cli) · [本地开发与校验](#本地开发与校验)
+**简体中文** | **[English](./README_EN.md)** · [界面预览](#界面预览) · [快捷键与 CLI](#快捷键与-cli) · [核心特性](#核心特性) · [安装与启用](#安装与启用) · [本地开发与校验](#本地开发与校验)
 
 轻量、零外部依赖、跨平台（macOS / Windows / Linux）的 **Google Antigravity** 右侧辅助栏（Aux Pane）与独立抽屉项目目录树插件，现统一维护于 **[Dong-Kevin/agy-plugins](https://github.com/Dong-Kevin/agy-plugins)**。
 
 针对 Antigravity 桌面端右侧缺乏完整项目目录树、点击对话路径无法展开定位目录位置的问题，提供 **「对话内直点深链接 + 日志增量提取双保险」** 方案。
+
+---
+
+## 界面预览
+
+<table>
+  <tr>
+    <td width="33%" align="center" valign="top">
+      <img src="docs/images/finder-tree-reveal.png" width="268" alt="AGY Finder 对话提及与目录树脉冲高亮定位" />
+      <br/>
+      <b>对话提及 + 展开高亮定位</b><br/>
+      <sub>顶部聚合对话提及文件芯片，点击即展开对应目录并脉冲高亮目标文件，支持复制路径 / 原生预览</sub>
+    </td>
+    <td width="33%" align="center" valign="top">
+      <img src="docs/images/finder-shortcuts.png" width="268" alt="AGY Finder 零冲突快捷键与键盘导航" />
+      <br/>
+      <b>零冲突快捷键（<code>⌘⇧E</code>）与键位速查</b><br/>
+      <sub>仅在 Antigravity 前台激活，内置 <code>⌘⇧E</code> / <code>⌘⌥E</code> / <code>⌃⇧E</code> / <code>⌘⇧Y</code> 预设与完整键盘导航</sub>
+    </td>
+    <td width="33%" align="center" valign="top">
+      <img src="docs/images/finder-quick-preview.png" width="268" alt="AGY Finder 独立抽屉行内快速预览" />
+      <br/>
+      <b>轻量代码预览弹窗</b><br/>
+      <sub>独立抽屉模式下双击或点 <code>↗</code> 秒开代码文本预览，支持 <code>🖥 定位</code> 在系统文件管理器显示</sub>
+    </td>
+  </tr>
+</table>
+
+---
+
+## 快捷键与 CLI
+
+| 触发场景 | 默认快捷键 / 命令 | 说明 |
+| :--- | :--- | :--- |
+| **独立右侧目录树抽屉（macOS）** | **`⌘⇧E`** | 基于 Carbon `RegisterEventHotKey` 仅在 `Antigravity` 前台生效，**零冲突、无需辅助功能权限**；面板右上角 `⌨` 可切换 `⌘⌥E` / `⌃⇧E` / `⌘⇧Y` / `关闭` |
+| **宿主右侧辅助栏原生开关** | **`⌘⇧B`**（macOS）<br/>**`Ctrl+Shift+B`**（Win / Linux） | 开关 Antigravity 原生右侧辅助栏；右键插件标签可 `Pin Tab` 常驻固定 |
+| **对话斜杠与深链接直达** | **`/agy-finder`**<br/>点击回复旁 **`[📂]`** · [`sidecar://agy-finder/tree/`](sidecar://agy-finder/tree/) | 聊天中一键打开目录树面板，或直接展开并脉冲高亮指定文件 |
+| **终端 CLI 快捷命令** | **`agy-finder`**（等同 `agy-finder toggle`） | 跨平台开关右侧目录树抽屉；Windows / Linux 可将 `agy-finder toggle` 绑定为 `Ctrl+Shift+E` 全局热键 |
+| **面板内全键盘导航** | `↑` / `↓` · `←` / `→` · `Enter` · `/` · `⌘/Ctrl+.` · `?` · `Esc` | 移动选中、折展目录、预览或展开、搜索过滤、显隐 dotfiles、打开快捷键面板、逐层关闭 |
+
+```bash
+agy-finder                     # 等同 agy-finder toggle：打开或关闭右侧独立目录树抽屉
+agy-finder open [path]         # 打开抽屉并可选定位到指定路径
+agy-finder close               # 关闭抽屉
+agy-finder status [--json]     # 查看抽屉与快捷键状态
+agy-finder hotkey <preset>     # 设置快捷键预设：cmd+shift+e | cmd+alt+e | ctrl+shift+e | cmd+shift+y | off
+agy-finder quit                # 退出后台抽屉守护进程
+```
 
 ---
 
@@ -31,7 +79,15 @@
 
 ## 安装与启用
 
-### 方式 1：macOS / Linux 一键安装
+### 方式 1：让 Antigravity Agent 协助安装（推荐首选）
+
+直接复制下面这段指令发给 **Antigravity Agent**，即可自动完成安装与状态校验：
+
+```text
+请帮我安装 AGY Finder 插件（来自 https://github.com/Dong-Kevin/agy-plugins ：macOS / Linux 运行 `bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-finder/install.sh)"`，Windows PowerShell 运行 `irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-finder/install.ps1 | iex`），安装后验证 `agy-finder status` 并列出快捷键说明。
+```
+
+### 方式 2：macOS / Linux 一键安装
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-finder/install.sh)"
@@ -43,7 +99,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/m
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-finder/install.sh)" -- --uninstall
 ```
 
-### 方式 2：Windows PowerShell 一键安装
+### 方式 3：Windows PowerShell 一键安装
 
 ```powershell
 irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-finder/install.ps1 | iex
@@ -55,7 +111,7 @@ irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-fi
 .\plugins\agy-finder\install.ps1 -Uninstall
 ```
 
-### 方式 3：通过总仓克隆安装
+### 方式 4：通过总仓克隆安装
 
 ```bash
 git clone https://github.com/Dong-Kevin/agy-plugins.git
@@ -63,32 +119,13 @@ cd agy-plugins
 ./install.sh agy-finder        # Windows PowerShell 执行：.\install.ps1 -Plugin agy-finder
 ```
 
-### 方式 4：通过官方 `agy` CLI 安装本地目录
+### 方式 5：通过官方 `agy` CLI 安装本地目录
 
 ```bash
 agy plugin install ./plugins/agy-finder
 ```
 
-安装完成后，Antigravity 会自动加载并启用 **AGY Finder 项目目录树**（可在左侧 **Customizations → Installed** 中随时开关管理），点击对话中的 `[AGY Finder 目录树](sidecar://agy-finder/tree/)` 或右侧辅助栏入口即可打开。
-
----
-
-## 快捷键与 CLI
-
-- **独立右侧抽屉快捷键（macOS 原生，默认 `⌘⇧E`）**：通过 Carbon `RegisterEventHotKey` 仅当 `Antigravity` 为前台应用时激活，切换到其他应用自动注销、**零冲突且无需辅助功能权限**；可在面板右上角 `⌨` 中切换预设（`⌘⇧E`、`⌘⌥E`、`⌃⇧E`、`⌘⇧Y` 或 `关闭`）。
-- **宿主右侧辅助栏原生开关**：Antigravity 原生支持 `⌘⇧B`（macOS）/ `Ctrl+Shift+B`（Windows / Linux）显隐右侧栏，右键插件标签可 `Pin Tab` 固定。
-- **跨平台 CLI 快捷触发（Windows / Linux / macOS）**：
-
-```bash
-agy-finder toggle              # 打开或关闭右侧独立目录树抽屉（可在系统快捷键工具中绑定 Ctrl+Shift+E）
-agy-finder open [path]         # 打开抽屉并可选定位到指定路径
-agy-finder close               # 关闭抽屉
-agy-finder status [--json]     # 查看抽屉与快捷键状态
-agy-finder hotkey <preset>     # 设置快捷键预设：cmd+shift+e | cmd+alt+e | ctrl+shift+e | cmd+shift+y | off
-agy-finder quit                # 退出后台抽屉守护进程
-```
-
-- **面板内完整键盘导航**：`↑` / `↓` 移动、`←` / `→` 折叠 / 展开、`Enter` 预览 / 展开、`/` 或 `⌘/Ctrl+F` 搜索、`⌘/Ctrl+.` 显隐 dotfiles、`?` 开关快捷键面板、`Esc` 逐层关闭弹窗 / 收起抽屉。
+安装完成后，Antigravity 会自动加载并启用 **AGY Finder 项目目录树**（可在左侧 **Customizations → Installed** 中随时开关管理），按 `⌘⇧E`、点击对话中的 `[AGY Finder 目录树](sidecar://agy-finder/tree/)` 或右侧辅助栏入口即可打开。
 
 ---
 

@@ -32,10 +32,10 @@ Zero client binary patching, zero external runtime dependencies, and 100% local 
       <sub>Switch between Context %, Speed & Duration, and 5h/Weekly Quota; auto-follows active conversations; left-click toggles window in <code>&lt;5ms</code></sub>
     </td>
     <td width="52%" align="center" valign="middle">
-      <img src="docs/images/customizer-drawer.png" width="290" alt="Quick Entry Mode & Heatmap Palette Customizer" />
+      <img src="docs/images/customizer-drawer.png" width="290" alt="Quick Entry Modes, ⌥⌘K Shortcut Recorder & Appearance Customizer" />
       <br/>
-      <b>Quick Entry Modes & Appearance Customizer</b><br/>
-      <sub>Toggle Menu Bar badge, switch live metric mode, launch the pinned window, and pick from light/dark themes + 5 heatmap palettes</sub>
+      <b>Quick Entry, <code>⌥⌘K</code> Shortcut Recorder & Themes</b><br/>
+      <sub>Toggle Menu Bar badge, record custom toggle chords, pick host-only/global scope, and pick from light/dark themes + 5 heatmap palettes</sub>
     </td>
   </tr>
 </table>
@@ -113,7 +113,15 @@ Zero client binary patching, zero external runtime dependencies, and 100% local 
 > - **macOS Native Menu Bar & Pinned Window**: Initial compilation requires the local Swift toolchain (Xcode Command Line Tools: `xcode-select --install`). On **Windows / Linux**, the embedded Aux Pane Sidecar, `agy-context` CLI, and `web` dashboard work identically, while `float` falls back to a standalone browser `--app` window (without a native OS menu bar icon or always-on-top window level).
 > - **Standalone Terminal Mode**: Outside an Antigravity host session (where local language-server address & credentials are not injected), live plan/quota RPCs degrade gracefully while local session & multi-source token analytics remain fully available.
 
-### Option 1: macOS / Linux One-Liner (Recommended)
+### Option 1: Ask Your Antigravity Agent to Install (Recommended)
+
+Paste this prompt directly into **Antigravity**:
+
+```text
+Please install Antigravity Context & Token Viewer from https://github.com/Dong-Kevin/agy-plugins (on macOS/Linux run `bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.sh)"`, on Windows PowerShell run `irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.ps1 | iex`), verify with `agy-context menubar status`, and summarize its shortcuts.
+```
+
+### Option 2: macOS / Linux One-Liner
 
 Installs the plugin, compiles & launches the native macOS Menu Bar helper, and registers the `agy-context` CLI command (set `REF=<tag>` to pin a specific ref):
 
@@ -123,13 +131,13 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/m
 # curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh | bash -s -- agy-context-viewer
 ```
 
-### Option 2: Windows PowerShell One-Liner
+### Option 3: Windows PowerShell One-Liner
 
 ```powershell
 irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.ps1 | iex
 ```
 
-### Option 3: Install Local Folder via Official `agy` CLI
+### Option 4: Install Local Folder via Official `agy` CLI
 
 ```bash
 git clone https://github.com/Dong-Kevin/agy-plugins.git
@@ -137,7 +145,7 @@ cd agy-plugins
 agy plugin install ./plugins/agy-context-viewer
 ```
 
-### Option 4: Git Clone or Offline Release ZIP
+### Option 5: Git Clone or Offline Release ZIP
 
 ```bash
 git clone https://github.com/Dong-Kevin/agy-plugins.git
@@ -150,6 +158,16 @@ Or download `context-viewer-v1.6.3.zip` and `context-viewer-v1.6.3.zip.sha256` f
 ---
 
 ## Usage Guide
+
+### Shortcuts & Quick Commands
+
+| Trigger | Default Hotkey / Command | Behavior |
+| :--- | :--- | :--- |
+| **Pinned Floating Window (macOS)** | **`⌥⌘K`** | Toggle the right-side pinned floating window (Host-frontmost by default; click-to-record custom chord or switch to global scope; `Ctrl+Alt+K` inside dashboard on Win / Linux) |
+| **Pin Toggle / Dismiss** | **`⌘⇧P`** · **`⌘W`** | Toggle always-on-top level / dismiss the floating dashboard |
+| **macOS Menu Bar Badge** | **Left-click** / **Right-click** | Left-click toggles the dashboard in `<5ms`; right-click switches 3 live metrics or pin state |
+| **Host Aux Pane & In-Chat** | **`⌘⇧B`** (`Ctrl+Shift+B` on Win / Linux)<br/>**`/context-viewer`** · [`sidecar://context-viewer/dashboard/`](sidecar://context-viewer/dashboard/) | Toggle Aux Pane or open the dashboard directly from chat |
+| **Terminal CLI Commands** | **`agy-context`** · `float` · `menubar` · `shortcut` · `turns` · `json` · `web` | Terminal ANSI dashboard, float/menubar/hotkey control, per-turn audit & standalone web UI |
 
 ### 1. In Antigravity Desktop / IDE
 
