@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+echo "[pre-push] 运行全仓校验与 Git 隐私身份门禁 (verify.mjs --strict-git-identity)..."
+node scripts/verify.mjs --strict-git-identity

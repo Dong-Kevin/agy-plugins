@@ -1,0 +1,19 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "agy-finder",
+  "displayName": "AGY Finder 项目目录树",
+  "version": "0.1.0",
+  "description": "轻量跨平台的右侧项目目录树（Aux Pane）插件：支持点击聊天回复中的文档或代码路径（绝对路径与相对路径）直接在右侧展开目录树并高亮定位，内置会话日志增量路径提取兜底。",
+  "author": {
+    "name": "Dong-Kevin",
+    "url": "https://github.com/Dong-Kevin"
+  },
+  "homepage": "https://github.com/Dong-Kevin/agy-plugins/tree/main/plugins/agy-finder",
+  "repository": "https://github.com/Dong-Kevin/agy-plugins",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "打开右侧项目目录树面板",
+    "在项目目录树中定位当前仓库的入口文件",
+    "列出最近修改的文档并附上目录树定位入口"
+  ]
+}

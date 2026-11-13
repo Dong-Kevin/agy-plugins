@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-src 'none'; child-src 'none';" />
+  <title>AGY Finder 目录树</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/logo.svg" />
+  <script src="/preload.js"></script>
+  <style>
+    [hidden], .hidden { display: none !important; }
+  </style>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="af-shell">
+    <header class="af-header">
+      <div class="af-root-row">
+        <img class="af-logo" src="/assets/logo.svg" alt="" width="18" height="18" />
+        <select id="root-select" class="af-root-select" aria-label="切换项目根目录"></select>
+        <div class="af-toolbar">
+          <button id="btn-paste-reveal" class="af-icon-btn" type="button" title="读取剪贴板路径并定位 (或粘贴到下方搜索框回车)">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><circle cx="8" cy="8" r="1.6" class="af-fill"/><path d="M8 1v2.2M8 12.8V15M1 8h2.2M12.8 8H15"/></svg>
+          </button>
+          <button id="btn-toggle-hidden" class="af-icon-btn" type="button" title="显示 / 隐藏 dotfiles 与忽略目录 (⌘/Ctrl+.)" aria-pressed="false">
+            <span class="af-mono-badge">.*</span>
+          </button>
+          <button id="btn-collapse-all" class="af-icon-btn" type="button" title="全部折叠">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 5.5 8 10l5-4.5M3 11.5h10"/></svg>
+          </button>
+          <button id="btn-drawer" class="af-icon-btn" type="button" title="弹出 / 收回右侧独立目录树抽屉 (⌘⇧E)">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="1.6"/><path d="M10 2.5v11"/><path d="m6.2 6-1.8 2 1.8 2"/></svg>
+          </button>
+          <button id="btn-shortcuts" class="af-icon-btn" type="button" title="快捷键设置与键盘导航 (?)" aria-expanded="false">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.8" y="3.5" width="12.4" height="9" rx="1.5"/><path d="M4.3 6.5h1M7 6.5h1M9.7 6.5h2M4.3 9.5h7.4"/></svg>
+          </button>
+          <button id="btn-theme" class="af-icon-btn" type="button" title="切换主题（跟随宿主 / 浅色 / 深色）">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.2a5.8 5.8 0 1 0 5.8 5.8A4.6 4.6 0 0 1 8 2.2Z"/></svg>
+          </button>
+          <button id="btn-refresh" class="af-icon-btn" type="button" title="刷新目录树">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.6v3h-3"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="af-search-row">
+        <svg class="af-search-ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.2 3.2"/></svg>
+        <input id="search-input" class="af-search-input" type="text" placeholder="筛选文件名，或粘贴相对/绝对路径按 Enter 定位… (/)" autocomplete="off" spellcheck="false" />
+        <button id="btn-clear-search" class="af-clear-btn hidden" type="button" title="清空" aria-label="清空搜索">×</button>
+      </div>
+    </header>
+
+    <section id="shortcut-panel" class="af-shortcut-panel hidden" aria-label="快捷键与侧边栏开关">
+      <div class="af-shortcut-row">
+        <span class="af-shortcut-label">独立抽屉开关</span>
+        <select id="hotkey-preset-select" class="af-shortcut-select" aria-label="独立抽屉快捷键"></select>
+        <button id="btn-drawer-action" class="af-mini-btn" type="button">打开抽屉</button>
+      </div>
+      <div id="shortcut-hint" class="af-shortcut-sub"></div>
+      <div id="shortcut-cli-row" class="af-shortcut-row hidden">
+        <code class="af-kbd">agy-finder toggle</code>
+        <button id="btn-copy-cli" class="af-mini-btn" type="button">复制系统快捷键命令</button>
+      </div>
+      <div class="af-shortcut-row af-shortcut-host">
+        <span class="af-shortcut-label">宿主右侧辅助栏</span>
+        <span id="host-shortcut-summary" class="af-shortcut-host-keys"></span>
+      </div>
+      <div class="af-shortcut-cheats">
+        <span><kbd class="af-kbd">↑</kbd><kbd class="af-kbd">↓</kbd> 移动</span>
+        <span><kbd class="af-kbd">←</kbd><kbd class="af-kbd">→</kbd> 折展</span>
+        <span><kbd class="af-kbd">Enter</kbd> 预览/展开</span>
+        <span><kbd class="af-kbd">/</kbd> 搜索</span>
+        <span><kbd class="af-kbd">⌘.</kbd> 隐藏项</span>
+        <span><kbd class="af-kbd">Esc</kbd> 收起</span>
+      </div>
+    </section>
+
+    <section id="mentions-bar" class="af-mentions hidden" aria-label="对话提及文件">
+      <button id="btn-toggle-mentions" class="af-mentions-head" type="button" aria-expanded="true">
+        <span class="af-mentions-title">对话提及 (<span id="mentions-count">0</span>)</span>
+        <span id="mentions-chevron" class="af-mentions-chev">▾</span>
+      </button>
+      <div id="mentions-list" class="af-mentions-list"></div>
+    </section>
+
+    <div id="active-path-bar" class="af-path-bar hidden">
+      <span id="active-path-text" class="af-path-text"></span>
+      <button id="btn-copy-active" class="af-mini-btn" type="button" title="复制相对路径（Shift+点击复制绝对路径）">复制</button>
+      <button id="btn-preview-active" class="af-mini-btn" type="button" title="在原生预览中打开">预览</button>
+    </div>
+
+    <main id="tree-viewport" class="af-tree-viewport" role="tree" tabindex="0">
+      <div id="tree-content" class="af-tree-content"></div>
+    </main>
+
+    <div id="preview-modal" class="af-preview-modal hidden" role="dialog" aria-label="文件快速预览">
+      <div class="af-preview-head">
+        <span id="preview-title" class="af-preview-title"></span>
+        <button id="btn-preview-os" class="af-mini-btn" type="button" title="在系统文件管理器中显示">🖥 定位</button>
+        <button id="btn-preview-close" class="af-mini-btn" type="button" title="关闭预览 (Esc)">关闭</button>
+      </div>
+      <pre id="preview-body" class="af-preview-body"></pre>
+    </div>
+
+    <div id="toast" class="af-toast hidden" role="status" aria-live="polite"></div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

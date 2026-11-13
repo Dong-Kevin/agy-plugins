@@ -1,0 +1,21 @@
+{
+  "command": "node",
+  "args": ["main.mjs"],
+  "restart_policy": "always",
+  "display_name": "AGY Finder 目录树",
+  "description": "轻量跨平台的右侧项目目录树：支持点击聊天路径直达展开定位，及会话日志提及文件自动提取。",
+  "has_web_ui": true,
+  "agent_permissions": {
+    "allows_user_interactions": false
+  },
+  "ui_config": {
+    "display_name": "AGY Finder 目录树",
+    "views": [
+      {
+        "path": "/",
+        "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE",
+        "title": "目录树"
+      }
+    ]
+  }
+}
