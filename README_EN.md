@@ -18,8 +18,8 @@ Every plugin is built strictly on Antigravity's official `plugin.json` and `side
 
 | Directory | Plugin `name` | Version | Default Shortcuts & Quick Commands | Purpose | Docs |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| [`plugins/agy-finder`](./plugins/agy-finder) | `agy-finder` | `v0.2.0` | `⌘⇧E` (drawer) · `⌥⌘E` (Aux Pane) · `/agy-finder` · `[📂]` · `agy-finder aux` | Right-side Project File Tree & Instant Path Reveal | [README](./plugins/agy-finder/README_EN.md) |
-| [`plugins/agy-context-viewer`](./plugins/agy-context-viewer) | `context-viewer` | `v1.7.0` | `⌥⌘K` (window) · `⌃⌥K` (Aux Pane) · `/context-viewer` · `agy-context aux` | Context Window, Speed, `5h + Weekly` Quotas & Token Analytics | [README](./plugins/agy-context-viewer/README_EN.md) |
+| [`plugins/agy-finder`](./plugins/agy-finder) | `agy-finder` | `v0.2.1` | `⌘⇧E` (drawer) · `⌥⌘E` (Aux Pane) · `/agy-finder` · `[📂]` · `agy-finder aux` | Right-side Project File Tree & Instant Path Reveal | [README](./plugins/agy-finder/README_EN.md) |
+| [`plugins/agy-context-viewer`](./plugins/agy-context-viewer) | `context-viewer` | `v1.7.1` | `⌥⌘K` (window) · `⌃⌥K` (Aux Pane) · `/context-viewer` · `agy-context aux` | Context Window, Speed, `5h + Weekly` Quotas & Token Analytics | [README](./plugins/agy-context-viewer/README_EN.md) |
 
 ---
 
@@ -28,7 +28,7 @@ Every plugin is built strictly on Antigravity's official `plugin.json` and `side
 | Trigger | `AGY Finder` (`agy-finder`) | `Context & Token Viewer` (`context-viewer`) |
 | :--- | :--- | :--- |
 | **Floating Window / Drawer** | **`⌘⇧E`** toggles the right-side file tree drawer (Host-frontmost by default, supports click-to-record custom chords, `⌘⌥E` / `⌃⇧E` / `⌘⇧Y` presets, or global scope; zero Accessibility prompt) | **`⌥⌘K`** toggles the right-side pinned floating window (Host-frontmost by default, supports click-to-record custom chords or global scope); **`⌘⇧P`** toggles pin, **`⌘W`** closes |
-| **AGY Right Aux Pane & Menu Bar** | **`⌥⌘E`** (Win / Linux: `Ctrl+Alt+E`) opens or switches Antigravity's Right Aux Pane straight to **File Tree** (customizable); **`⌘⇧B`** / **`Ctrl+Shift+B`** toggles the host Aux Pane | **`⌃⌥K`** (Win / Linux: `Ctrl+Alt+Shift+K`) opens or switches Antigravity's Right Aux Pane straight to **Context Dashboard** (customizable); macOS Menu Bar **left-click (`<5ms`) toggles window, right-click cycles 3 metrics** |
+| **AGY Right Aux Pane & Menu Bar** | **`⌥⌘E`** (Win / Linux: `Ctrl+Alt+E`) opens or switches Antigravity's Right Aux Pane straight to **File Tree** (wakes from `Overview` or cross-plugin states; right-click tab → `Pin Tab` to stay pinned across threads; customizable); **`⌘⇧B`** / **`Ctrl+Shift+B`** toggles the host Aux Pane | **`⌃⌥K`** (Win / Linux: `Ctrl+Alt+Shift+K`) opens or switches Antigravity's Right Aux Pane straight to **Context Dashboard** (wakes from `Overview` or cross-plugin states; right-click tab → `Pin Tab` to stay pinned across threads; customizable); macOS Menu Bar **left-click (`<5ms`) toggles window, right-click cycles 3 metrics** |
 | **In-Chat Slash & Deep Links** | Type **`/agy-finder`**; click `[📂]` next to any file reference or [`sidecar://agy-finder/tree/`](sidecar://agy-finder/tree/) | Type **`/context-viewer`**; or open [`sidecar://context-viewer/dashboard/`](sidecar://context-viewer/dashboard/) |
 | **Terminal CLI Commands** | `agy-finder` (toggles drawer) · `agy-finder aux [path]` (toggles AGY Aux Pane File Tree)<br/>`agy-finder open [path]` · `close` · `shortcut [<combo>\|off\|reset]` · `aux-shortcut [<combo>\|off\|reset]` · `hotkey <preset>` · `status [--json]` · `quit` | `agy-context` (rich ANSI terminal summary) · `agy-context aux` (toggles AGY Aux Pane Dashboard)<br/>`agy-context float [close\|quit]` · `menubar [context\|speed\|quota\|on\|off]` · `shortcut [status\|<combo>\|reset\|off\|--global]` · `aux-shortcut [status\|<combo>\|reset\|off]` · `turns` · `json [--full]` · `web` |
 | **In-Panel Actions** | `↑` / `↓` move · `←` / `→` collapse/expand · `Enter` preview/toggle · `/` or `⌘/Ctrl+F` search · `⌘/Ctrl+.` dotfiles · `?` shortcuts · `Esc` dismiss | Palette drawer records dual custom shortcuts & 5 heatmap themes · Ceiling switcher (`Auto / 200K / 256K / 1M`) · Top capsules jump to views |
@@ -184,8 +184,8 @@ agy-plugins/
 ├── install.sh                         # Unified installer / lister / uninstaller (macOS / Linux)
 ├── install.ps1                        # Unified installer / lister / uninstaller (Windows PowerShell)
 ├── plugins/
-│   ├── agy-finder/                    # Project file tree plugin (v0.2.0)
-│   └── agy-context-viewer/            # Context & token analytics plugin (context-viewer v1.7.0)
+│   ├── agy-finder/                    # Project file tree plugin (v0.2.1)
+│   └── agy-context-viewer/            # Context & token analytics plugin (context-viewer v1.7.1)
 └── scripts/
     ├── verify.mjs                     # Repo-wide schema, privacy, PNG metadata, plugin & installer suite
     ├── package-all.mjs                # Zero-dependency Release ZIP + SHA-256 packager

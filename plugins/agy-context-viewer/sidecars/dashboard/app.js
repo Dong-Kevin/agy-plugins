@@ -2804,31 +2804,108 @@
     );
   }
 
+  function isHostAuxPaneContext() {
+    return Boolean(
+      window.sidecar &&
+      !window.sidecar.isFloatWindow &&
+      !window.__CV_FLOAT_MODE__ &&
+      typeof window.sidecar.ui?.toggleAuxPane === 'function' &&
+      !String(location.pathname || '').endsWith('/sidebar')
+    );
+  }
+
+  let auxViewportVisible = false;
+  let auxEverBeenVisible = false;
+  try {
+    auxEverBeenVisible = sessionStorage.getItem('agy_aux_ever_visible') === '1';
+  } catch {}
+  let auxObserverInitialized = false;
+  let auxInitialObservationAt = 0;
+  const auxVisibilityCallbacks = new Set();
+
+  function ensureAuxViewportObserver() {
+    if (auxObserverInitialized || !isHostAuxPaneContext()) return;
+    auxObserverInitialized = true;
+    if (typeof IntersectionObserver === 'function') {
+      const io = new IntersectionObserver(
+        (entries) => {
+          const entry = entries && entries[entries.length - 1];
+          const rect = entry?.intersectionRect;
+          const nextVisible = Boolean(
+            entry &&
+            entry.isIntersecting &&
+            rect &&
+            rect.width > 40 &&
+            rect.height > 40
+          );
+          if (!auxInitialObservationAt) {
+            auxInitialObservationAt = Date.now();
+          }
+          if (nextVisible && !auxEverBeenVisible) {
+            auxEverBeenVisible = true;
+            try {
+              sessionStorage.setItem('agy_aux_ever_visible', '1');
+            } catch {}
+          }
+          if (auxViewportVisible !== nextVisible) {
+            auxViewportVisible = nextVisible;
+            for (const fn of auxVisibilityCallbacks) {
+              try {
+                fn();
+              } catch {}
+            }
+          }
+        },
+        { root: null, threshold: [0, 0.01] }
+      );
+      io.observe(document.documentElement);
+    } else {
+      auxViewportVisible = window.innerWidth > 40 && window.innerHeight > 40 && !document.hidden;
+    }
+  }
+
+  function isAuxIframeVisible() {
+    if (!isHostAuxPaneContext()) return true;
+    ensureAuxViewportObserver();
+    return auxViewportVisible && !document.hidden;
+  }
+
+  function syncRecordingPauseToDaemon(recording) {
+    if (typeof window.sidecar?.setShortcutRecording === 'function') {
+      window.sidecar.setShortcutRecording(Boolean(recording));
+    } else {
+      apiFetch('/api/entrypoints', {
+        method: 'POST',
+        body: { target: 'shortcut-recording', recording: Boolean(recording) }
+      }).catch(() => {});
+    }
+  }
+
   function startShortcutRecording() {
     state.recordingAuxShortcut = false;
     state.recordingShortcut = true;
-    window.sidecar?.setShortcutRecording?.(true);
+    syncRecordingPauseToDaemon(true);
     syncFloatButtonUi();
   }
 
   function stopShortcutRecording() {
     if (!state.recordingShortcut) return;
     state.recordingShortcut = false;
-    window.sidecar?.setShortcutRecording?.(false);
+    syncRecordingPauseToDaemon(false);
     syncFloatButtonUi();
   }
 
   function startAuxShortcutRecording() {
     state.recordingShortcut = false;
     state.recordingAuxShortcut = true;
-    window.sidecar?.setShortcutRecording?.(true);
+    syncRecordingPauseToDaemon(true);
     syncFloatButtonUi();
   }
 
   function stopAuxShortcutRecording() {
     if (!state.recordingAuxShortcut) return;
     state.recordingAuxShortcut = false;
-    window.sidecar?.setShortcutRecording?.(false);
+    syncRecordingPauseToDaemon(false);
     syncFloatButtonUi();
   }
 
@@ -2836,7 +2913,7 @@
     if (!state.recordingShortcut && !state.recordingAuxShortcut) return;
     state.recordingShortcut = false;
     state.recordingAuxShortcut = false;
-    window.sidecar?.setShortcutRecording?.(false);
+    syncRecordingPauseToDaemon(false);
     syncFloatButtonUi();
   }
 
@@ -3078,21 +3155,21 @@
   }
 
   function startAuxPaneBridgeCoordinator() {
-    if (
-      !window.sidecar ||
-      window.sidecar.isFloatWindow ||
-      window.__CV_FLOAT_MODE__ ||
-      typeof window.sidecar.ui?.toggleAuxPane !== 'function' ||
-      String(location.pathname || '').endsWith('/sidebar')
-    ) {
+    if (!isHostAuxPaneContext()) {
       return;
     }
 
-    let visibleSince = (window.innerWidth > 40 && window.innerHeight > 40) ? Date.now() : 0;
+    ensureAuxViewportObserver();
+    const coordinatorBootAt = Date.now();
+    let visibleSince = isAuxIframeVisible() ? (Date.now() - 1000) : 0;
     let lastSeenSeq = 0;
+    let pendingOpenTrigger = null;
+
+    const getMyConvId = () => window.sidecar.conversationId || state.hostConvId || '';
 
     const reportHello = () => {
-      const convId = window.sidecar.conversationId || state.hostConvId || '';
+      if (!isAuxIframeVisible()) return;
+      const convId = getMyConvId();
       if (convId) {
         apiFetch('/api/aux-pane-trigger', {
           method: 'POST',
@@ -3101,18 +3178,46 @@
       }
     };
 
+    const claimPendingOpenAckIfVisible = async () => {
+      if (!pendingOpenTrigger || !isAuxIframeVisible()) return false;
+      const pending = pendingOpenTrigger;
+      if ((Date.now() - pending.at) > 2500 || !pending.isSelfTarget) {
+        pendingOpenTrigger = null;
+        return false;
+      }
+      pendingOpenTrigger = null;
+      const ackRes = await apiFetch('/api/aux-pane-trigger', {
+        method: 'POST',
+        body: { action: 'ack', seq: pending.seq, plugin: 'context-viewer' }
+      }).catch(() => null);
+      if (ackRes?.claimed) {
+        sessionStorage.setItem('agy_aux_last_ack_seq', String(pending.seq));
+        return true;
+      }
+      return false;
+    };
+
     const handleVisibilityChange = () => {
-      const nowVisible = window.innerWidth > 40 && window.innerHeight > 40;
+      const nowVisible = isAuxIframeVisible();
       if (nowVisible) {
         const becameVisible = !visibleSince;
         if (becameVisible) {
-          visibleSince = Date.now();
+          visibleSince = (Date.now() - coordinatorBootAt < 250) ? (Date.now() - 1000) : Date.now();
           reportHello();
+          loadContext(false).catch(() => {});
+          refreshFloatStatus().catch(() => {});
+          claimPendingOpenAckIfVisible().catch(() => {});
           apiFetch('/api/aux-pane-trigger?waitMs=0').then(async (res) => {
             const trig = res?.trigger;
             if (
-              trig?.seq &&
-              (Date.now() - Number(trig.at || 0)) < 2500 &&
+              !trig?.seq ||
+              (Date.now() - Number(trig.at || 0)) >= 2500 ||
+              Number(trig.ackSeq || 0) >= trig.seq
+            ) {
+              return;
+            }
+            visibleSince = Date.now();
+            if (
               trig.targetPlugin &&
               trig.targetPlugin !== 'context-viewer' &&
               Number(trig.switchedSeq || 0) < trig.seq &&
@@ -3123,17 +3228,52 @@
                 body: { action: 'switched', seq: trig.seq }
               }).catch(() => null);
               if (sw?.claimed !== false) {
+                const ackRes = await apiFetch('/api/aux-pane-trigger', {
+                  method: 'POST',
+                  body: { action: 'ack', seq: trig.seq, plugin: 'context-viewer' }
+                }).catch(() => null);
+                if (ackRes?.claimed !== false) {
+                  sessionStorage.setItem('agy_aux_last_ack_seq', String(trig.seq));
+                }
+                if (pendingOpenTrigger?.seq === trig.seq) {
+                  pendingOpenTrigger = null;
+                }
                 window.sidecar.ui.toggleAuxPane({ tabType: 'sidecarView', uri: trig.uri });
+              }
+            } else if (trig.targetPlugin === 'context-viewer') {
+              const ackRes = await apiFetch('/api/aux-pane-trigger', {
+                method: 'POST',
+                body: { action: 'ack', seq: trig.seq, plugin: 'context-viewer' }
+              }).catch(() => null);
+              if (ackRes?.claimed) {
+                sessionStorage.setItem('agy_aux_last_ack_seq', String(trig.seq));
+                if (pendingOpenTrigger?.seq === trig.seq) {
+                  pendingOpenTrigger = null;
+                }
               }
             }
           }).catch(() => {});
+        } else if (pendingOpenTrigger) {
+          claimPendingOpenAckIfVisible().catch(() => {});
         }
       } else {
         visibleSince = 0;
       }
     };
 
-    reportHello();
+    if (visibleSince) {
+      reportHello();
+    }
+
+    document.addEventListener('pointerdown', reportHello, { passive: true });
+    document.addEventListener('keydown', reportHello, { passive: true });
+    auxVisibilityCallbacks.add(handleVisibilityChange);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('message', (ev) => {
+      if (ev.data?.type === 'theme-change' || ev.data?.type === 'workspace-change') {
+        handleVisibilityChange();
+      }
+    });
 
     if (typeof ResizeObserver === 'function') {
       const ro = new ResizeObserver(handleVisibilityChange);
@@ -3151,59 +3291,97 @@
       lastSeenSeq = seq;
       if ((Date.now() - Number(trigger.at || 0)) > 5000) return;
 
-      const isVisibleNow = window.innerWidth > 40 && window.innerHeight > 40;
+      const myConvId = getMyConvId();
+      const isVisibleNow = isAuxIframeVisible();
       const wasAlreadyVisible = visibleSince > 0 && visibleSince <= Number(trigger.at || 0) - 40;
+      const isSelfTarget = trigger.targetPlugin === 'context-viewer';
+      const exactConvMatch = !trigger.convId || !myConvId || myConvId === trigger.convId;
 
-      if (trigger.targetPlugin !== 'context-viewer') {
-        if (isVisibleNow && trigger.uri) {
+      if (isVisibleNow) {
+        if (!exactConvMatch) {
+          const settle = await apiFetch('/api/aux-pane-trigger?waitMs=0&holdMs=25').catch(() => null);
+          if (Number(settle?.trigger?.ackSeq || 0) >= seq || !isAuxIframeVisible()) return;
+        }
+        if (!isSelfTarget) {
+          if (trigger.uri) {
+            const ackRes = await apiFetch('/api/aux-pane-trigger', {
+              method: 'POST',
+              body: { action: 'ack', seq, plugin: 'context-viewer' }
+            }).catch(() => null);
+            if (ackRes?.claimed === false) return;
+            await apiFetch('/api/aux-pane-trigger', {
+              method: 'POST',
+              body: { action: 'switched', seq }
+            }).catch(() => null);
+            sessionStorage.setItem('agy_aux_last_ack_seq', String(seq));
+            window.sidecar.ui.toggleAuxPane({ tabType: 'sidecarView', uri: trigger.uri });
+          }
+          return;
+        }
+
+        if (wasAlreadyVisible) {
           const ackRes = await apiFetch('/api/aux-pane-trigger', {
             method: 'POST',
             body: { action: 'ack', seq, plugin: 'context-viewer' }
           }).catch(() => null);
           if (ackRes?.claimed === false) return;
-          await apiFetch('/api/aux-pane-trigger', {
-            method: 'POST',
-            body: { action: 'switched', seq }
-          }).catch(() => null);
           sessionStorage.setItem('agy_aux_last_ack_seq', String(seq));
-          window.sidecar.ui.toggleAuxPane({ tabType: 'sidecarView', uri: trigger.uri });
+          if (trigger.action !== 'open') {
+            postSidecarCloseKeyEvent();
+          }
+          return;
+        }
+
+        const ackRes = await apiFetch('/api/aux-pane-trigger', {
+          method: 'POST',
+          body: { action: 'ack', seq, plugin: 'context-viewer' }
+        }).catch(() => null);
+        if (ackRes?.claimed !== false) {
+          sessionStorage.setItem('agy_aux_last_ack_seq', String(seq));
         }
         return;
       }
 
-      if (trigger.action !== 'open' && isVisibleNow && wasAlreadyVisible) {
-        const ackRes = await apiFetch('/api/aux-pane-trigger', {
-          method: 'POST',
-          body: { action: 'ack', seq, plugin: 'context-viewer' }
-        }).catch(() => null);
-        if (ackRes?.claimed === false) return;
-        sessionStorage.setItem('agy_aux_last_ack_seq', String(seq));
-        postSidecarCloseKeyEvent();
+      if (typeof window.sidecar.ui?.toggleConversation !== 'function') return;
+      if (document.hidden) return;
+
+      let waitBeforeClaim;
+      if (auxEverBeenVisible) {
+        waitBeforeClaim = isSelfTarget
+          ? (exactConvMatch ? 30 : 125)
+          : (exactConvMatch ? 75 : 175);
+      } else {
+        waitBeforeClaim = isSelfTarget
+          ? (exactConvMatch ? 235 : 320)
+          : (exactConvMatch ? 280 : 365);
+      }
+      const recheck = await apiFetch(`/api/aux-pane-trigger?waitMs=0&holdMs=${waitBeforeClaim}`).catch(() => null);
+      const latestTrig = recheck?.trigger;
+      if (latestTrig && (Number(latestTrig.ackSeq || 0) >= seq || Number(latestTrig.openingSeq || 0) >= seq)) {
+        return;
+      }
+      if (isAuxIframeVisible()) {
+        handleVisibilityChange();
         return;
       }
 
-      if (!isVisibleNow) {
-        const myConvId = window.sidecar.conversationId || state.hostConvId || '';
-        const targetConvId = trigger.convId || myConvId;
-        const waitBeforeClaim = (!trigger.convId || !myConvId || myConvId === trigger.convId) ? 110 : 200;
-        await new Promise((r) => setTimeout(r, waitBeforeClaim));
+      const targetConvId = trigger.convId || myConvId;
+      if (!targetConvId) return;
 
-        const recheck = await apiFetch('/api/aux-pane-trigger?waitMs=0').catch(() => null);
-        const latestTrig = recheck?.trigger;
-        if (latestTrig && Number(latestTrig.ackSeq || 0) >= seq) return;
-        if (window.innerWidth > 40 && window.innerHeight > 40) return;
+      const openRes = await apiFetch('/api/aux-pane-trigger', {
+        method: 'POST',
+        body: { action: 'opening', seq }
+      }).catch(() => null);
+      if (!openRes?.claimed) return;
 
-        if (!targetConvId || typeof window.sidecar.ui?.toggleConversation !== 'function') return;
-
-        const ackRes = await apiFetch('/api/aux-pane-trigger', {
-          method: 'POST',
-          body: { action: 'ack', seq, plugin: 'context-viewer' }
-        }).catch(() => null);
-        if (!ackRes?.claimed) return;
-
-        sessionStorage.setItem('agy_aux_last_ack_seq', String(seq));
-        window.sidecar.ui.toggleConversation(targetConvId);
-      }
+      pendingOpenTrigger = { seq, convId: targetConvId, at: Date.now(), isSelfTarget };
+      window.sidecar.ui.toggleConversation(targetConvId);
+      apiFetch('/api/aux-pane-trigger?waitMs=0&holdMs=110').then(() => {
+        if (isSelfTarget) {
+          claimPendingOpenAckIfVisible().catch(() => {});
+        }
+        handleVisibilityChange();
+      }).catch(() => {});
     };
 
     (async () => {
@@ -3277,12 +3455,12 @@
 
     // Snappy ETag-backed background polling while panel is visible
     setInterval(() => {
-      if (document.hidden || state.hostHidden) return;
+      if (document.hidden || state.hostHidden || !isAuxIframeVisible()) return;
       loadContext(false).catch(() => {});
     }, 1500);
 
     setInterval(() => {
-      if (document.hidden || state.hostHidden) return;
+      if (document.hidden || state.hostHidden || !isAuxIframeVisible()) return;
       loadHistory(false).catch(() => {});
       refreshFloatStatus().catch(() => {});
     }, 10000);

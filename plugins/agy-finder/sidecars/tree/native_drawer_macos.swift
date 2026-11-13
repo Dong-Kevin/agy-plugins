@@ -137,6 +137,7 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
   var auxHotkeySpec: HotkeySpec?
   var shortcutScope: String
   var isRecordingShortcut: Bool = false
+  var lastAuxHotkeyAt: TimeInterval = 0
 
   var eventHandlerRef: EventHandlerRef?
   var hotKeyRef: EventHotKeyRef?
@@ -356,9 +357,26 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
     return false
   }
 
+  func findAntigravityApp() -> NSRunningApplication? {
+    let myPid = ProcessInfo.processInfo.processIdentifier
+    if let front = NSWorkspace.shared.frontmostApplication,
+       front.processIdentifier != myPid,
+       isTargetHostApp(front) {
+      return front
+    }
+    if let remembered = lastAntigravityApp, !remembered.isTerminated, isTargetHostApp(remembered) {
+      return remembered
+    }
+    for app in NSWorkspace.shared.runningApplications {
+      if app.processIdentifier == myPid || app.isTerminated { continue }
+      if isTargetHostApp(app) { return app }
+    }
+    return nil
+  }
+
   func syncHotKeyForFrontmostApp(_ app: NSRunningApplication?) {
     let inTarget = isTargetHostApp(app)
-    let active = (shortcutScope == "global") || inTarget
+    let active = !isRecordingShortcut && ((shortcutScope == "global") || inTarget)
     unregisterHotKeys()
     if active {
       if hotkeySpec != nil {
@@ -434,6 +452,7 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
       shortcutScope = scope
     }
     hotkeySpec = spec
+    isRecordingShortcut = false
     updateWindowTitle()
     syncHotKeyForFrontmostApp(NSWorkspace.shared.frontmostApplication)
     if notifyWeb,
@@ -454,6 +473,7 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
       shortcutScope = scope
     }
     auxHotkeySpec = spec
+    isRecordingShortcut = false
     syncHotKeyForFrontmostApp(NSWorkspace.shared.frontmostApplication)
     if notifyWeb,
        let data = try? JSONSerialization.data(withJSONObject: [
@@ -473,6 +493,17 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
   }
 
   func handleAuxHotKeyTriggered() {
+    let now = ProcessInfo.processInfo.systemUptime
+    if now - lastAuxHotkeyAt < 0.14 { return }
+    lastAuxHotkeyAt = now
+
+    guard let targetApp = findAntigravityApp() else {
+      showHudNotice("未检测到运行中的 Antigravity")
+      return
+    }
+    if NSWorkspace.shared.frontmostApplication?.processIdentifier != targetApp.processIdentifier {
+      targetApp.activate(options: [])
+    }
     emitJson([
       "type": "auxHotkeyTriggered",
       "accelerator": auxHotkeySpec?.accelerator ?? ""
@@ -522,7 +553,7 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
 
     guard let panel = hudPanel, let label = hudLabel else { return }
     label.stringValue = trimmed
-    let textWidth = min(max(ceil(label.attributedStringValue.size().width) + 36, 220), 460)
+    let textWidth = min(max(ceil(label.attributedStringValue.size().width) + 36, 220), 660)
     let height: CGFloat = 42
     let screenFrame = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
     let x = screenFrame.midX - textWidth / 2.0
@@ -538,7 +569,7 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
       self?.hudPanel?.orderOut(nil)
     }
     hudHideWorkItem = item
-    DispatchQueue.main.asyncAfter(deadline: .now() + 2.4, execute: item)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 3.4, execute: item)
   }
 
   // MARK: - Window & Pin Controls
@@ -663,6 +694,7 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
       hideWindow(restoreHostFocus: true, notifyParent: true)
     } else if kind == "setRecording" {
       isRecordingShortcut = (obj["recording"] as? Bool) ?? false
+      syncHotKeyForFrontmostApp(NSWorkspace.shared.frontmostApplication)
     } else if kind == "rpc" {
       emitJson([
         "type": "rpcRequest",
@@ -728,6 +760,12 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
       applyAuxShortcut(spec: parseShortcutCommand(msg), scope: msg["scope"] as? String, notifyWeb: true)
     case "setShortcutRecording":
       isRecordingShortcut = (msg["recording"] as? Bool) ?? false
+      syncHotKeyForFrontmostApp(NSWorkspace.shared.frontmostApplication)
+    case "activateHost":
+      if let targetApp = findAntigravityApp(),
+         NSWorkspace.shared.frontmostApplication?.processIdentifier != targetApp.processIdentifier {
+        targetApp.activate(options: [])
+      }
     case "showHud":
       if let text = msg["message"] as? String {
         showHudNotice(text)

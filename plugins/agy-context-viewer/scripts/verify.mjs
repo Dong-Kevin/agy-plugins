@@ -15,6 +15,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync
 } from 'node:fs';
 import http from 'node:http';
@@ -933,6 +934,7 @@ async function main() {
     delete process.env.ANTIGRAVITY_CSRF_TOKEN;
 
     const {
+      ackAuxPaneTrigger,
       collectTokenHistory,
       DEFAULT_SHORTCUT_MAC,
       DEFAULT_SHORTCUT_OTHER,
@@ -941,14 +943,18 @@ async function main() {
       getDefaultShortcut,
       getShortcutConfig,
       listRecentConversations,
+      markAuxPaneOpening,
       normalizeShortcutSpec,
       parseModelSettingFromText,
       readAuxPaneTrigger,
+      recordAuxActiveConversation,
+      resolveDesktopForegroundConversationId,
       scanConversation,
       setAuxShortcutConfig,
       setMenubarPreference,
       setShortcutConfig,
-      shortcutToMacCarbon
+      shortcutToMacCarbon,
+      writeAuxPaneTrigger
     } = await import(join(ROOT, 'sidecars', 'dashboard', 'collector.mjs'));
 
     // R6: Model version decimals, parentheses & multi-switch sequences
@@ -2608,6 +2614,129 @@ async function main() {
         cliAuxJson.trigger?.targetPlugin === 'context-viewer' &&
         busTrig.seq === cliAuxJson.trigger.seq,
       `cli.mjs aux --json 触发写入异常：${cliAuxRaw}`
+    );
+
+    // Aux Pane freshness resolution vs stale activeConvId + opening/deferred ack state machine
+    const staleConvId = 'b2000000-0000-4000-8000-000000000002';
+    const freshConvId = 'c3000000-0000-4000-8000-000000000003';
+    for (const [id, title] of [[staleConvId, '旧会话'], [freshConvId, '新会话']]) {
+      const ldir = join(isolatedAgDir, 'brain', id, '.system_generated', 'logs');
+      mkdirSync(ldir, { recursive: true });
+      writeFileSync(
+        join(ldir, 'transcript.jsonl'),
+        `${JSON.stringify({ type: 'USER_INPUT', content: title })}\n`,
+        'utf-8'
+      );
+    }
+    mkdirSync(join(isolatedAgDir, 'annotations'), { recursive: true });
+    const futureSec = Math.floor((Date.now() + 20000) / 1000);
+    writeFileSync(
+      join(isolatedAgDir, 'annotations', `${freshConvId}.pbtxt`),
+      `title: "新会话"\nlast_user_view_time: {\n  seconds: ${futureSec}\n  nanos: 0\n}\n`,
+      'utf-8'
+    );
+    recordAuxActiveConversation({ convId: staleConvId });
+    assert(
+      resolveDesktopForegroundConversationId() === freshConvId,
+      `resolveDesktopForegroundConversationId 应优先更新的 Desktop 会话而非陈旧 activeConvId：${resolveDesktopForegroundConversationId()}`
+    );
+    const auxOpenTrig = writeAuxPaneTrigger({
+      targetPlugin: 'context-viewer',
+      uri: 'sidecar://context-viewer/dashboard/',
+      action: 'toggle'
+    });
+    assert(
+      auxOpenTrig.convId === freshConvId && auxOpenTrig.openingSeq === 0,
+      `writeAuxPaneTrigger 应解析到最新 Desktop 会话并重置 openingSeq：${JSON.stringify(auxOpenTrig)}`
+    );
+    assert(
+      markAuxPaneOpening({ seq: auxOpenTrig.seq }).claimed === true &&
+        markAuxPaneOpening({ seq: auxOpenTrig.seq }).claimed === false &&
+        readAuxPaneTrigger().ackSeq < auxOpenTrig.seq,
+      'markAuxPaneOpening 应互斥抢占 openingSeq 且不提前推进 ackSeq'
+    );
+    assert(
+      ackAuxPaneTrigger({ seq: auxOpenTrig.seq, plugin: 'context-viewer' }).claimed === true &&
+        readAuxPaneTrigger().ackSeq === auxOpenTrig.seq,
+      'ackAuxPaneTrigger 应在确认可见后正式推进 ackSeq'
+    );
+
+    // Background conversation with newer mtimeMs & older viewTimeMs must NOT hijack foreground convId;
+    // cur.at must NOT artificially refresh stale activeConvId; BatchRecordUserLastUpdateTimes tie must stay stable.
+    const bgConvId = '00000000-0000-4000-8000-000000000004';
+    const fgTiedConvId = '00000000-0000-4000-8000-000000000005';
+    for (const [id, title] of [[bgConvId, '后台任务会话'], [fgTiedConvId, '前台切换目标']]) {
+      const ldir = join(isolatedAgDir, 'brain', id, '.system_generated', 'logs');
+      mkdirSync(ldir, { recursive: true });
+      writeFileSync(
+        join(ldir, 'transcript.jsonl'),
+        `${JSON.stringify({ type: 'USER_INPUT', content: title })}\n`,
+        'utf-8'
+      );
+    }
+    const bgViewSec = Math.floor((Date.now() + 10000) / 1000);
+    const fgTiedViewSec = Math.floor((Date.now() + 30000) / 1000);
+    writeFileSync(
+      join(isolatedAgDir, 'annotations', `${bgConvId}.pbtxt`),
+      `title: "后台任务会话"\nlast_user_view_time: {\n  seconds: ${bgViewSec}\n  nanos: 0\n}\n`,
+      'utf-8'
+    );
+    writeFileSync(
+      join(isolatedAgDir, 'annotations', `${freshConvId}.pbtxt`),
+      `title: "新会话"\nlast_user_view_time: {\n  seconds: ${fgTiedViewSec}\n  nanos: 0\n}\n`,
+      'utf-8'
+    );
+    writeFileSync(
+      join(isolatedAgDir, 'annotations', `${fgTiedConvId}.pbtxt`),
+      `title: "前台切换目标"\nlast_user_view_time: {\n  seconds: ${fgTiedViewSec}\n  nanos: 0\n}\n`,
+      'utf-8'
+    );
+    const futureTurnSec = fgTiedViewSec + 60;
+    utimesSync(
+      join(isolatedAgDir, 'brain', bgConvId, '.system_generated', 'logs', 'transcript.jsonl'),
+      futureTurnSec,
+      futureTurnSec
+    );
+    // Simulate stale activeConvId (no recent activeConvUpdatedAt) and tie-break from freshConvId -> fgTiedConvId
+    const staleTrigger = {
+      seq: readAuxPaneTrigger().seq + 1,
+      targetPlugin: 'context-viewer',
+      at: (fgTiedViewSec + 120) * 1000,
+      activeConvId: bgConvId,
+      activeConvUpdatedAt: bgViewSec * 1000,
+      viewBatchMs: bgViewSec * 1000,
+      viewWinnerId: freshConvId
+    };
+    assert(
+      resolveDesktopForegroundConversationId({ curTrigger: staleTrigger }) === fgTiedConvId,
+      `后台会话 newer mtime 或陈旧 cur.at 不得劫持前台对话，应切到 fgTiedConvId，实际：${resolveDesktopForegroundConversationId({ curTrigger: staleTrigger })}`
+    );
+    // Once viewBatchMs is caught up, repeat resolution must remain stable on viewWinnerId
+    const secondPressTrig = writeAuxPaneTrigger({
+      targetPlugin: 'context-viewer',
+      uri: 'sidecar://context-viewer/dashboard/',
+      action: 'toggle'
+    });
+    const thirdPressTrig = writeAuxPaneTrigger({
+      targetPlugin: 'context-viewer',
+      uri: 'sidecar://context-viewer/dashboard/',
+      action: 'toggle'
+    });
+    assert(
+      secondPressTrig.convId === thirdPressTrig.convId && thirdPressTrig.convId !== bgConvId,
+      `同一前台标签连续按键应稳定命中同一非后台对话：${secondPressTrig.convId} vs ${thirdPressTrig.convId}`
+    );
+
+    // Regression check for IntersectionObserver visibility detection, holdMs unthrottled wakeup & Pinned Tab bridge in dashboard/app.js
+    const cvAppSource = readFileSync(join(ROOT, 'sidecars', 'dashboard', 'app.js'), 'utf-8');
+    assert(
+      cvAppSource.includes('IntersectionObserver') &&
+        cvAppSource.includes('intersectionRect') &&
+        cvAppSource.includes('agy_aux_ever_visible') &&
+        cvAppSource.includes('holdMs=') &&
+        cvAppSource.includes('toggleConversation(targetConvId)') &&
+        !cvAppSource.includes('return window.innerWidth > 40 && window.innerHeight > 40;'),
+      'dashboard/app.js 缺少 IntersectionObserver 真可见性检测、holdMs 无节流唤醒或防假阳性保护'
     );
 
     // macOS Swift native host typecheck

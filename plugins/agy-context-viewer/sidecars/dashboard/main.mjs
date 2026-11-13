@@ -22,6 +22,7 @@ import {
   injectCsrfMeta,
   launchCliTerminal,
   LOOPBACK_SECURITY_HEADERS,
+  markAuxPaneOpening,
   markAuxPaneSwitched,
   readLoopbackJsonBody,
   recordAuxActiveConversation,
@@ -86,11 +87,18 @@ function createHandlers(getDefaultConvId, makeResponse) {
     apiFloatStatus: async () => getFloatWindowStatus(),
     apiFloatControl: async (data = {}) => controlFloatWindow(data),
     apiAuxTriggerGet: async (data = {}) => {
+      const holdMs = Math.max(0, Math.min(1500, Number(data.holdMs || 0)));
+      if (holdMs > 0) {
+        await new Promise((r) => setTimeout(r, holdMs));
+      }
       const since = Number(data.since || 0);
       const waitMs = Number(data.waitMs ?? data.timeoutMs ?? 8000);
       return waitForAuxPaneTrigger({ since, timeoutMs: waitMs });
     },
     apiAuxTriggerPost: async (data = {}) => {
+      if (data.action === 'opening') {
+        return markAuxPaneOpening({ seq: Number(data.seq || 0) });
+      }
       if (data.action === 'ack') {
         return ackAuxPaneTrigger({
           seq: Number(data.seq || 0),
@@ -128,6 +136,17 @@ function createHandlers(getDefaultConvId, makeResponse) {
       };
     },
     apiEntrypointsControl: async (data = {}) => {
+      if (data.target === 'shortcut-recording' || typeof data.recording === 'boolean') {
+        const res = await controlFloatWindow({
+          action: 'set-recording',
+          recording: Boolean(data.recording)
+        }).catch(() => ({ ok: false }));
+        return {
+          ...getSidebarEntryStatus(),
+          ...res,
+          floatWindow: getFloatWindowStatus()
+        };
+      }
       const isAuxShortcutUpdate = (
         data.target === 'aux-shortcut' ||
         data.auxShortcutReset === true ||
@@ -253,7 +272,7 @@ function createHandlers(getDefaultConvId, makeResponse) {
 async function startOfficialSidecar() {
   if (process.env.ANTIGRAVITY_SIDECAR_HOT_RELOAD !== '0') {
     let reloadTimer = null;
-    for (const f of ['main.mjs', 'collector.mjs', 'pricing.mjs', 'float_window.mjs']) {
+    for (const f of ['main.mjs', 'collector.mjs', 'pricing.mjs', 'float_window.mjs', 'app.js', 'styles.css', 'index.html']) {
       watchFile(join(__dirname, f), { interval: 2500 }, (curr, prev) => {
         if (curr.mtimeMs > 0 && curr.mtimeMs !== prev.mtimeMs && !reloadTimer) {
           reloadTimer = setTimeout(() => process.exit(0), 350);

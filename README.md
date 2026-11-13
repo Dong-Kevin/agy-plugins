@@ -18,8 +18,8 @@
 
 | 插件目录 | 插件标识 (`name`) | 版本 | 默认快捷键与快捷命令 | 核心定位 | 详细文档 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| [`plugins/agy-finder`](./plugins/agy-finder) | `agy-finder` | `v0.2.0` | `⌘⇧E`（抽屉） · `⌥⌘E`（AGY 侧栏） · `/agy-finder` · `[📂]` · `agy-finder aux` | 右侧项目目录树与对话路径直达定位 | [查看 README](./plugins/agy-finder/README.md) |
-| [`plugins/agy-context-viewer`](./plugins/agy-context-viewer) | `context-viewer` | `v1.7.0` | `⌥⌘K`（小窗） · `⌃⌥K`（AGY 侧栏） · `/context-viewer` · `agy-context aux` | 上下文窗口、速度、`5h + Week` 配额与 Token 看板 | [查看 README](./plugins/agy-context-viewer/README.md) |
+| [`plugins/agy-finder`](./plugins/agy-finder) | `agy-finder` | `v0.2.1` | `⌘⇧E`（抽屉） · `⌥⌘E`（AGY 侧栏） · `/agy-finder` · `[📂]` · `agy-finder aux` | 右侧项目目录树与对话路径直达定位 | [查看 README](./plugins/agy-finder/README.md) |
+| [`plugins/agy-context-viewer`](./plugins/agy-context-viewer) | `context-viewer` | `v1.7.1` | `⌥⌘K`（小窗） · `⌃⌥K`（AGY 侧栏） · `/context-viewer` · `agy-context aux` | 上下文窗口、速度、`5h + Week` 配额与 Token 看板 | [查看 README](./plugins/agy-context-viewer/README.md) |
 
 ---
 
@@ -28,7 +28,7 @@
 | 触发方式 | `AGY Finder` (`agy-finder`) | `Context & Token Viewer` (`context-viewer`) |
 | :--- | :--- | :--- |
 | **独立悬浮 / 抽屉** | **`⌘⇧E`** 开关右侧独立目录树抽屉（默认仅 `Antigravity` 前台生效，支持面板点击录制任意组合键、`⌘⌥E` / `⌃⇧E` / `⌘⇧Y` 预设或全球域，零冲突免辅助功能权限） | **`⌥⌘K`** 开关右侧独立置顶看板（默认仅宿主前台，支持调色盘点击录制任意组合键或全局生效）；**`⌘⇧P`** 切换置顶、**`⌘W`** 收回 |
-| **AGY 右侧辅助栏** | **`⌥⌘E`**（Win / Linux：`Ctrl+Alt+E`）一键打开 / 切到 AGY 右侧辅助栏并直接显示 **目录树**（可自定义）；**`⌘⇧B`** / **`Ctrl+Shift+B`** 显隐辅助栏 | **`⌃⌥K`**（Win / Linux：`Ctrl+Alt+Shift+K`）一键打开 / 切到 AGY 右侧辅助栏并直接显示 **上下文看板**（可自定义）；顶部菜单栏支持 **左键 `<5ms` 显隐 / 右键切 3 档指标** |
+| **AGY 右侧辅助栏** | **`⌥⌘E`**（Win / Linux：`Ctrl+Alt+E`）一键打开 / 切到 AGY 右侧辅助栏并直接显示 **目录树**（支持从 `Overview` 或跨插件状态呼出；右键标签选 `Pin Tab` 可跨会话常驻；支持自定义）；**`⌘⇧B`** / **`Ctrl+Shift+B`** 显隐辅助栏 | **`⌃⌥K`**（Win / Linux：`Ctrl+Alt+Shift+K`）一键打开 / 切到 AGY 右侧辅助栏并直接显示 **上下文看板**（支持从 `Overview` 或跨插件状态呼出；右键标签选 `Pin Tab` 可跨会话常驻；支持自定义）；顶部菜单栏支持 **左键 `<5ms` 显隐 / 右键切 3 档指标** |
 | **对话斜杠 & 深链接** | 输入 **`/agy-finder`**；点击回复路径旁的 **`[📂]`** 或 [`sidecar://agy-finder/tree/`](sidecar://agy-finder/tree/) 直达目录树 | 输入 **`/context-viewer`**；或打开 [`sidecar://context-viewer/dashboard/`](sidecar://context-viewer/dashboard/) |
 | **终端 CLI 快捷命令** | `agy-finder`（等同 `agy-finder toggle` 开关抽屉） · `agy-finder aux [path]`（切换 AGY 侧栏目录树）<br/>`agy-finder open [path]` · `close` · `shortcut [<combo>\|off\|reset]` · `aux-shortcut [<combo>\|off\|reset]` · `hotkey <preset>` · `status [--json]` · `quit` | `agy-context`（终端彩色进度条汇总） · `agy-context aux`（切换 AGY 侧栏看板）<br/>`agy-context float [close\|quit]` · `menubar [context\|speed\|quota\|on\|off]` · `shortcut [status\|<combo>\|reset\|off\|--global]` · `aux-shortcut [status\|<combo>\|reset\|off]` · `turns` · `json [--full]` · `web` |
 | **面板内高频键位** | `↑` / `↓` 移动 · `←` / `→` 折展 · `Enter` 预览或展开 · `/` 或 `⌘/Ctrl+F` 搜索 · `⌘/Ctrl+.` 隐藏项 · `?` 快捷键 · `Esc` 关闭 | 右上角调色盘录制双快捷键与 5 套热力图配色 · 窗口上限 `自动 / 200K / 256K / 1M` 快切 · 顶部胶囊直跳核心视图 |
@@ -188,8 +188,8 @@ agy-plugins/
 ├── install.sh                         # 统一安装 / 列表 / 卸载脚本（macOS / Linux）
 ├── install.ps1                        # 统一安装 / 列表 / 卸载脚本（Windows PowerShell）
 ├── plugins/
-│   ├── agy-finder/                    # 项目目录树插件（v0.2.0）
-│   └── agy-context-viewer/            # 上下文与 Token 看板插件（context-viewer v1.7.0）
+│   ├── agy-finder/                    # 项目目录树插件（v0.2.1）
+│   └── agy-context-viewer/            # 上下文与 Token 看板插件（context-viewer v1.7.1）
 └── scripts/
     ├── verify.mjs                     # 全仓规范、隐私、PNG 元数据、子插件与安装器门禁
     ├── package-all.mjs                # 零依赖构建各插件独立 Release ZIP 与 SHA-256

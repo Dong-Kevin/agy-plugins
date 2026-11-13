@@ -2,7 +2,7 @@
 
 # Antigravity Context & Token Viewer (`agy-context-viewer`)
 
-[![Version](https://img.shields.io/badge/version-v1.7.0-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
+[![Version](https://img.shields.io/badge/version-v1.7.1-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-818cf8)](#quick-install)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D%2018-22c55e)](#quick-install)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-a855f7)](#privacy--security)
@@ -178,7 +178,7 @@ Or download `context-viewer-v1.7.0.zip` and `context-viewer-v1.7.0.zip.sha256` f
    - You can also configure everything visually inside the dashboard's top-right palette customizer drawer.
 2. **Right-Side Pinned Floating Window (`📌` `⌥⌘K`) & AGY Aux Pane Jump (`⌃⌥K`)**
    - Press **`⌥⌘K`** on macOS (`Ctrl+Alt+K` inside the dashboard on Windows / Linux), click the **`📌` button** in the dashboard header, or run `agy-context float` in your terminal to toggle the floating window;
-   - Press **`⌃⌥K`** (or run `agy-context aux`) to reveal and switch Antigravity's native Right Aux Pane straight to the Context Dashboard;
+   - Press **`⌃⌥K`** (or run `agy-context aux`) to wake Antigravity's native Right Aux Pane straight to the Context Dashboard even from `Overview`, collapsed, or cross-plugin states (right-click the tab → `Pin Tab` to keep it pinned across threads and protect it from `×`; on cold start before any tab loads, a native HUD prompt guides first-time open; `⌃⌥` / `⌥⌘` chords are recommended on macOS to avoid single `Ctrl+<Letter>` editor conflicts);
    - Open the top-right palette drawer to click-and-record custom key chords for both **Floating Window** and **AGY Aux Pane**, switch between **Host App Only** (default, conflict-free) and **Global** scope, or reset / disable either shortcut;
    - Click the title-bar `📌` pill (or press `Cmd+Shift+P`) to toggle always-on-top; press `⌥⌘K` again, `Cmd+W`, left-click the menu bar badge, or run `agy-context float close` to dismiss.
 3. **Embedded Auxiliary Pane Sidecar**

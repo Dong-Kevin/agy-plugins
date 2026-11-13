@@ -2,7 +2,7 @@
 
 # Antigravity Context & Token Viewer (`agy-context-viewer`)
 
-[![Version](https://img.shields.io/badge/version-v1.7.0-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
+[![Version](https://img.shields.io/badge/version-v1.7.1-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-818cf8)](#一键安装)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D%2018-22c55e)](#一键安装)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-a855f7)](#隐私与安全机制)
@@ -178,7 +178,7 @@ cd agy-plugins
    - 也可点击看板右上角调色盘按钮在「快捷入口模式与外观定制」抽屉中一键切换。
 2. **屏幕右侧独立置顶小窗（`📌` `⌥⌘K`）与 AGY 侧栏直达（`⌃⌥K`）**
    - 在 Antigravity 前台直接按下 **`⌥⌘K`**（Windows / Linux 看板内为 `Ctrl+Alt+K`）、点击看板顶栏 **`📌` 按钮** 或在终端执行 `agy-context float`，即可一键打开或关闭屏幕右侧独立小窗；
-   - 按 **`⌃⌥K`**（或运行 `agy-context aux`）可直接唤醒并将 Antigravity 原生右侧辅助栏切到上下文看板；
+   - 按 **`⌃⌥K`**（或运行 `agy-context aux`）可直接从 `Overview`、收起态或跨插件状态下唤醒并将 Antigravity 原生右侧辅助栏切到上下文看板（右键插件标签选择 `Pin Tab` 可跨会话常驻并防止被 `×` 关闭；首次冷启动未加载时将给出原生悬浮提示；建议搭配 `⌃⌥` / `⌥⌘` 组合以避开单 `Ctrl+<字母>` 编辑器快捷键冲突）；
    - 点击看板右上角调色盘按钮打开「快捷入口模式与外观定制」，可在 **独立悬浮窗快捷键** 与 **AGY 侧栏看板键** 行直接点击按键录制自定义组合键、切换「仅宿主前台 / 全局生效」或停用 / 恢复默认；
    - 点击窗口标题栏右侧 `📌 已置顶`（或按 `Cmd+Shift+P`）可切换置顶 / 普通窗口层级；再次按 `⌥⌘K`、按 `Cmd+W`、左键点击菜单栏图标或运行 `agy-context float close` 即可收回。
 3. **宿主右侧辅助栏内嵌模式**

@@ -1129,21 +1129,97 @@ export function readAuxPaneTrigger() {
     convId: typeof raw?.convId === 'string' ? raw.convId : '',
     revealPath: typeof raw?.revealPath === 'string' ? raw.revealPath : '',
     at: Number(raw?.at || 0),
+    openingSeq: Number(raw?.openingSeq || 0),
     ackSeq: Number(raw?.ackSeq || 0),
     ackAt: Number(raw?.ackAt || 0),
     ackPlugin: typeof raw?.ackPlugin === 'string' ? raw.ackPlugin : '',
     switchedSeq: Number(raw?.switchedSeq || 0),
-    activeConvId: typeof raw?.activeConvId === 'string' ? raw.activeConvId : ''
+    activeConvId: typeof raw?.activeConvId === 'string' ? raw.activeConvId : '',
+    activeConvUpdatedAt: Number(raw?.activeConvUpdatedAt || 0),
+    viewBatchMs: Number(raw?.viewBatchMs || 0),
+    viewWinnerId: typeof raw?.viewWinnerId === 'string' ? raw.viewWinnerId : ''
   };
+}
+
+/**
+ * Resolves the most recently active Antigravity Desktop conversation ID by comparing
+ * timestamps across Desktop view-time annotations, transcript mtimes, visible Aux focus
+ * hints, and the previous Aux bridge active conversation.
+ */
+export function resolveDesktopForegroundConversationId({ curTrigger = null, persistViewBatch = false } = {}) {
+  const cur = curTrigger && typeof curTrigger === 'object' ? curTrigger : readAuxPaneTrigger();
+  const hint = readActiveSessionHint();
+  const recent = listRecentConversations(24);
+  const desktopTop = recent.filter((c) => c.source === 'desktop' && !c.isSubagent);
+  const desktopAny = desktopTop.length ? desktopTop : recent.filter((c) => c.source === 'desktop');
+  const pool = desktopAny.length ? desktopAny : recent.filter((c) => !c.isSubagent);
+  const inPool = (id) => Boolean(id) && (!pool.length || pool.some((c) => c.id === id));
+
+  const candidates = [];
+  let maxViewMs = 0;
+  let resolvedViewWinnerId = '';
+
+  if (pool.length) {
+    for (const c of pool) {
+      if ((c.viewTimeMs || 0) > maxViewMs) maxViewMs = c.viewTimeMs;
+    }
+    if (maxViewMs > 0) {
+      const tied = pool.filter((c) => Math.abs((c.viewTimeMs || 0) - maxViewMs) <= 80);
+      const knownBatchMs = Math.max(Number(cur.viewBatchMs || 0), Number(hint.lastBatchViewMs || 0));
+      const prevWinner = cur.viewWinnerId || hint.resolvedConvId || cur.activeConvId || '';
+      const viewWinner = tied.length > 1 && prevWinner
+        ? (maxViewMs > knownBatchMs
+            ? (tied.find((c) => c.id !== prevWinner) || tied[0])
+            : (tied.find((c) => c.id === prevWinner) || tied[0]))
+        : tied[0];
+      if (viewWinner?.id) {
+        resolvedViewWinnerId = viewWinner.id;
+        candidates.push({ id: viewWinner.id, ts: maxViewMs });
+        if (persistViewBatch && maxViewMs > Number(hint.lastBatchViewMs || 0)) {
+          updateActiveSessionHint({ resolvedConvId: viewWinner.id, lastBatchViewMs: maxViewMs });
+        }
+      }
+    }
+
+    const newestTurn = [...pool].sort((a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0))[0];
+    if (
+      newestTurn?.id &&
+      (newestTurn.updatedAtMs || 0) > 0 &&
+      (maxViewMs === 0 || ((newestTurn.viewTimeMs || 0) === 0 && !newestTurn.isSubagent && newestTurn.updatedAtMs > maxViewMs))
+    ) {
+      candidates.push({ id: newestTurn.id, ts: newestTurn.updatedAtMs });
+    }
+  }
+
+  if (CONV_ID_RE.test(String(hint.userFocusedConvId || '')) && (hint.userFocusedAt || 0) > 0 && inPool(hint.userFocusedConvId)) {
+    candidates.push({ id: hint.userFocusedConvId, ts: hint.userFocusedAt });
+  }
+
+  if (CONV_ID_RE.test(String(cur.activeConvId || '')) && Number(cur.activeConvUpdatedAt || 0) > 0 && inPool(cur.activeConvId)) {
+    candidates.push({ id: cur.activeConvId, ts: Number(cur.activeConvUpdatedAt) });
+  }
+
+  candidates.sort((a, b) => b.ts - a.ts);
+  const chosenId = candidates[0]?.id || (
+    (CONV_ID_RE.test(String(hint.userFocusedConvId || '')) ? hint.userFocusedConvId : '') ||
+    (CONV_ID_RE.test(String(hint.resolvedConvId || '')) ? hint.resolvedConvId : '') ||
+    (CONV_ID_RE.test(String(cur.activeConvId || '')) ? cur.activeConvId : '') ||
+    pool[0]?.id ||
+    ''
+  );
+  if (persistViewBatch && typeof persistViewBatch === 'object') {
+    persistViewBatch.viewBatchMs = maxViewMs > 0 ? maxViewMs : Number(cur.viewBatchMs || 0);
+    persistViewBatch.viewWinnerId = resolvedViewWinnerId || cur.viewWinnerId || '';
+  }
+  return chosenId;
 }
 
 export function writeAuxPaneTrigger({ targetPlugin = 'context-viewer', uri = '', action = 'toggle', convId = '', revealPath = '' } = {}) {
   const filePath = getSharedAuxTriggerPath();
   const cur = readAuxPaneTrigger();
-  const hint = readActiveSessionHint();
-  const resolvedActive = (typeof convId === 'string' && CONV_ID_RE.test(convId.trim()))
-    ? convId.trim()
-    : (cur.activeConvId || (CONV_ID_RE.test(String(hint.userFocusedConvId || '')) ? hint.userFocusedConvId : '') || (CONV_ID_RE.test(String(hint.resolvedConvId || '')) ? hint.resolvedConvId : '') || '');
+  const explicitConvId = (typeof convId === 'string' && CONV_ID_RE.test(convId.trim())) ? convId.trim() : '';
+  const batchMeta = {};
+  const resolvedActive = explicitConvId || resolveDesktopForegroundConversationId({ curTrigger: cur, persistViewBatch: batchMeta });
   const next = {
     seq: Math.max(0, Number(cur.seq || 0)) + 1,
     targetPlugin: String(targetPlugin || 'context-viewer'),
@@ -1152,14 +1228,32 @@ export function writeAuxPaneTrigger({ targetPlugin = 'context-viewer', uri = '',
     convId: (typeof convId === 'string' && convId.trim()) ? convId.trim() : resolvedActive,
     revealPath: typeof revealPath === 'string' ? revealPath : '',
     at: Date.now(),
+    openingSeq: 0,
     ackSeq: cur.ackSeq,
     ackAt: cur.ackAt,
     ackPlugin: cur.ackPlugin,
     switchedSeq: 0,
-    activeConvId: resolvedActive
+    activeConvId: resolvedActive,
+    activeConvUpdatedAt: explicitConvId ? Date.now() : Number(cur.activeConvUpdatedAt || 0),
+    viewBatchMs: batchMeta.viewBatchMs ?? Number(cur.viewBatchMs || 0),
+    viewWinnerId: explicitConvId || batchMeta.viewWinnerId || cur.viewWinnerId || ''
   };
   writeJsonAtomic(filePath, next);
   return next;
+}
+
+export function markAuxPaneOpening({ seq } = {}) {
+  const targetSeq = Number(seq || 0);
+  const cur = readAuxPaneTrigger();
+  if (!targetSeq || targetSeq <= cur.openingSeq) {
+    return { ok: true, claimed: false, trigger: cur };
+  }
+  const next = {
+    ...cur,
+    openingSeq: targetSeq
+  };
+  writeJsonAtomic(getSharedAuxTriggerPath(), next);
+  return { ok: true, claimed: true, trigger: next };
 }
 
 export function ackAuxPaneTrigger({ seq, plugin = 'context-viewer' } = {}) {
@@ -1200,12 +1294,14 @@ export function recordAuxActiveConversation({ convId = '' } = {}) {
   const filePath = getSharedAuxTriggerPath();
   const raw = readJsonSafe(filePath, null);
   const cur = readAuxPaneTrigger();
-  if (raw && cur.activeConvId === cleanId) {
+  const now = Date.now();
+  if (raw && cur.activeConvId === cleanId && now - Number(cur.activeConvUpdatedAt || 0) < 1000) {
     return { ok: true, activeConvId: cleanId };
   }
   writeJsonAtomic(filePath, {
     ...cur,
-    activeConvId: cleanId
+    activeConvId: cleanId,
+    activeConvUpdatedAt: now
   });
   return { ok: true, activeConvId: cleanId };
 }

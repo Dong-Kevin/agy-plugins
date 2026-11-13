@@ -18,6 +18,7 @@ import {
   getDrawerStatus,
   getShortcutSettings,
   HOTKEY_PRESETS,
+  markAuxPaneOpening,
   markAuxPaneSwitched,
   recordActiveContextHint,
   recordAuxActiveConversation,
@@ -132,7 +133,9 @@ function createHandlers(getDefaultConvId, makeResponse, transformHtml = (html) =
     apiWorkspace: async (data = {}) => {
       const roots = resolveActiveRoots(data, getDefaultConvId);
       const convId = String(data.conversationId || getDefaultConvId() || '').trim();
+      const visible = data.visible !== '0' && data.visible !== 'false' && data.visible !== false;
       recordActiveContextHint({
+        visible,
         conversationId: convId,
         roots,
         primaryRoot: roots[0] || '',
@@ -220,11 +223,16 @@ function createHandlers(getDefaultConvId, makeResponse, transformHtml = (html) =
         reset: Boolean(data.reset),
         pinned: data.pinned,
         revealPath: data.revealPath,
-        convId: data.convId
+        convId: data.convId,
+        recording: data.recording
       });
     },
 
     apiAuxTriggerGet: async (data = {}) => {
+      const holdMs = Math.max(0, Math.min(1500, Number(data.holdMs || 0)));
+      if (holdMs > 0) {
+        await new Promise((r) => setTimeout(r, holdMs));
+      }
       const since = Number(data.since || 0);
       const timeoutMs = Number(data.waitMs ?? data.timeoutMs ?? 8000);
       return waitForAuxPaneTrigger({ since, timeoutMs });
@@ -232,6 +240,9 @@ function createHandlers(getDefaultConvId, makeResponse, transformHtml = (html) =
 
     apiAuxTriggerPost: async (data = {}) => {
       const act = String(data.action || 'trigger').toLowerCase();
+      if (act === 'opening') {
+        return markAuxPaneOpening({ seq: Number(data.seq || 0) });
+      }
       if (act === 'ack') {
         return ackAuxPaneTrigger({
           seq: Number(data.seq || 0),
@@ -259,7 +270,7 @@ function createHandlers(getDefaultConvId, makeResponse, transformHtml = (html) =
 async function startOfficialSidecar() {
   if (process.env.ANTIGRAVITY_SIDECAR_HOT_RELOAD !== '0') {
     let reloadTimer = null;
-    for (const f of ['main.mjs', 'path_utils.mjs', 'mentions.mjs', 'drawer.mjs']) {
+    for (const f of ['main.mjs', 'path_utils.mjs', 'mentions.mjs', 'drawer.mjs', 'app.js', 'styles.css', 'index.html']) {
       watchFile(join(__dirname, f), { interval: 2500 }, (curr, prev) => {
         if (curr.mtimeMs > 0 && curr.mtimeMs !== prev.mtimeMs && !reloadTimer) {
           reloadTimer = setTimeout(() => process.exit(0), 350);

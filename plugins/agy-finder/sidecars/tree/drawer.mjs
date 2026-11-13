@@ -13,10 +13,13 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   renameSync,
   rmSync,
   statSync,
@@ -734,11 +737,128 @@ export function readAuxPaneTrigger() {
     convId: typeof raw?.convId === 'string' ? raw.convId : '',
     revealPath: typeof raw?.revealPath === 'string' ? raw.revealPath : '',
     at: Number(raw?.at || 0),
+    openingSeq: Number(raw?.openingSeq || 0),
     ackSeq: Number(raw?.ackSeq || 0),
     ackAt: Number(raw?.ackAt || 0),
     ackPlugin: typeof raw?.ackPlugin === 'string' ? raw.ackPlugin : '',
     switchedSeq: Number(raw?.switchedSeq || 0),
-    activeConvId: typeof raw?.activeConvId === 'string' ? raw.activeConvId : ''
+    activeConvId: typeof raw?.activeConvId === 'string' ? raw.activeConvId : '',
+    activeConvUpdatedAt: Number(raw?.activeConvUpdatedAt || 0),
+    viewBatchMs: Number(raw?.viewBatchMs || 0),
+    viewWinnerId: typeof raw?.viewWinnerId === 'string' ? raw.viewWinnerId : ''
+  };
+}
+
+function isSubagentTranscriptHead(logPath) {
+  let fd = null;
+  try {
+    fd = openSync(logPath, 'r');
+    const buf = Buffer.alloc(4096);
+    const bytesRead = readSync(fd, buf, 0, buf.length, 0);
+    if (bytesRead <= 0) return false;
+    const raw = buf.subarray(0, bytesRead).toString('utf8');
+    const lines = raw.split('\n');
+    let firstType = '';
+    let hasUserInput = false;
+    for (let i = 0; i < Math.min(lines.length, 8); i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      let stepType = '';
+      try {
+        const obj = JSON.parse(line);
+        stepType = String(obj?.type || '');
+      } catch {
+        const mType = line.match(/"type"\s*:\s*"([^"]+)"/);
+        if (mType) stepType = mType[1];
+      }
+      if (!stepType) continue;
+      if (!firstType) firstType = stepType;
+      if (stepType === 'USER_INPUT') {
+        hasUserInput = true;
+        break;
+      }
+    }
+    return !hasUserInput && firstType === 'SYSTEM_MESSAGE';
+  } catch {
+    return false;
+  } finally {
+    if (fd !== null) {
+      try { closeSync(fd); } catch {}
+    }
+  }
+}
+
+function findLatestDesktopConversationCandidate({ prevResolvedId = '', knownBatchMs = 0 } = {}) {
+  const appDataDir = getAppDataDir();
+  const brainDir = join(appDataDir, 'brain');
+  const annDir = join(appDataDir, 'annotations');
+  if (!existsSync(brainDir)) return null;
+
+  const entries = [];
+  try {
+    for (const entry of readdirSync(brainDir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !CONV_ID_RE.test(entry.name)) continue;
+      const id = entry.name;
+      const logFull = join(brainDir, id, '.system_generated', 'logs', 'transcript_full.jsonl');
+      const logMini = join(brainDir, id, '.system_generated', 'logs', 'transcript.jsonl');
+      const target = existsSync(logFull) ? logFull : (existsSync(logMini) ? logMini : '');
+      if (!target) continue;
+      let mtimeMs = 0;
+      try { mtimeMs = statSync(target).mtimeMs; } catch {}
+      let viewTimeMs = 0;
+      const annPath = join(annDir, `${id}.pbtxt`);
+      if (existsSync(annPath)) {
+        try {
+          const raw = readFileSync(annPath, 'utf-8');
+          const mView = raw.match(/last_user_view_time:\s*\{\s*seconds:\s*(\d+)(?:\s+nanos:\s*(\d+))?\s*\}/);
+          if (mView) {
+            viewTimeMs = Number(mView[1]) * 1000 + Math.round(Number(mView[2] || 0) / 1e6);
+          }
+        } catch {}
+      }
+      if (viewTimeMs === 0 && isSubagentTranscriptHead(target)) {
+        continue;
+      }
+      if (mtimeMs > 0 || viewTimeMs > 0) {
+        entries.push({ id, mtimeMs, viewTimeMs });
+      }
+    }
+  } catch {}
+  if (!entries.length) return null;
+
+  let maxViewMs = 0;
+  for (const e of entries) {
+    if (e.viewTimeMs > maxViewMs) maxViewMs = e.viewTimeMs;
+  }
+  const candidates = [];
+  let viewWinnerId = '';
+  if (maxViewMs > 0) {
+    const tied = entries.filter((e) => Math.abs(e.viewTimeMs - maxViewMs) <= 80);
+    const winner = (tied.length > 1 && prevResolvedId)
+      ? (maxViewMs > knownBatchMs
+          ? (tied.find((e) => e.id !== prevResolvedId) || tied[0])
+          : (tied.find((e) => e.id === prevResolvedId) || tied[0]))
+      : tied[0];
+    if (winner) {
+      viewWinnerId = winner.id;
+      candidates.push({ id: winner.id, ts: maxViewMs });
+    }
+  }
+  const newestTurn = [...entries].sort((a, b) => b.mtimeMs - a.mtimeMs)[0];
+  if (
+    newestTurn &&
+    newestTurn.mtimeMs > 0 &&
+    (maxViewMs === 0 || (newestTurn.viewTimeMs === 0 && newestTurn.mtimeMs > maxViewMs))
+  ) {
+    candidates.push({ id: newestTurn.id, ts: newestTurn.mtimeMs });
+  }
+  candidates.sort((a, b) => b.ts - a.ts);
+  if (!candidates[0]) return null;
+  return {
+    id: candidates[0].id,
+    ts: candidates[0].ts,
+    maxViewMs,
+    viewWinnerId
   };
 }
 
@@ -746,9 +866,39 @@ export function writeAuxPaneTrigger({ targetPlugin = 'agy-finder', uri = '', act
   const filePath = getSharedAuxTriggerPath();
   const cur = readAuxPaneTrigger();
   const hint = readActiveContextHint();
-  const resolvedActive = (typeof convId === 'string' && CONV_ID_RE.test(convId.trim()))
-    ? convId.trim()
-    : (cur.activeConvId || (CONV_ID_RE.test(String(hint.conversationId || '')) ? hint.conversationId : '') || '');
+  const explicitConvId = (typeof convId === 'string' && CONV_ID_RE.test(convId.trim())) ? convId.trim() : '';
+
+  let resolvedActive = explicitConvId;
+  let nextViewBatchMs = Number(cur.viewBatchMs || 0);
+  let nextViewWinnerId = cur.viewWinnerId || '';
+  if (!resolvedActive) {
+    const candidates = [];
+    const latestDesktop = findLatestDesktopConversationCandidate({
+      prevResolvedId: cur.viewWinnerId || hint.conversationId || cur.activeConvId || '',
+      knownBatchMs: nextViewBatchMs
+    });
+    if (latestDesktop?.id && latestDesktop.ts > 0) {
+      candidates.push(latestDesktop);
+      if (latestDesktop.maxViewMs > 0) nextViewBatchMs = latestDesktop.maxViewMs;
+      if (latestDesktop.viewWinnerId) nextViewWinnerId = latestDesktop.viewWinnerId;
+    }
+    if (CONV_ID_RE.test(String(hint.conversationId || '')) && Number(hint.updatedAt || 0) > 0) {
+      candidates.push({ id: hint.conversationId, ts: Number(hint.updatedAt) });
+    }
+    if (CONV_ID_RE.test(String(cur.activeConvId || '')) && Number(cur.activeConvUpdatedAt || 0) > 0) {
+      candidates.push({ id: cur.activeConvId, ts: Number(cur.activeConvUpdatedAt) });
+    }
+    candidates.sort((a, b) => b.ts - a.ts);
+    resolvedActive = (
+      candidates[0]?.id ||
+      (CONV_ID_RE.test(String(hint.conversationId || '')) ? hint.conversationId : '') ||
+      (CONV_ID_RE.test(String(cur.activeConvId || '')) ? cur.activeConvId : '') ||
+      ''
+    );
+  } else {
+    nextViewWinnerId = explicitConvId;
+  }
+
   const next = {
     seq: Math.max(0, Number(cur.seq || 0)) + 1,
     targetPlugin: String(targetPlugin || 'agy-finder'),
@@ -757,14 +907,32 @@ export function writeAuxPaneTrigger({ targetPlugin = 'agy-finder', uri = '', act
     convId: (typeof convId === 'string' && convId.trim()) ? convId.trim() : resolvedActive,
     revealPath: typeof revealPath === 'string' ? revealPath : '',
     at: Date.now(),
+    openingSeq: 0,
     ackSeq: cur.ackSeq,
     ackAt: cur.ackAt,
     ackPlugin: cur.ackPlugin,
     switchedSeq: 0,
-    activeConvId: resolvedActive
+    activeConvId: resolvedActive,
+    activeConvUpdatedAt: explicitConvId ? Date.now() : Number(cur.activeConvUpdatedAt || 0),
+    viewBatchMs: nextViewBatchMs,
+    viewWinnerId: nextViewWinnerId
   };
   writeJsonFileAtomic(filePath, next);
   return next;
+}
+
+export function markAuxPaneOpening({ seq } = {}) {
+  const targetSeq = Number(seq || 0);
+  const cur = readAuxPaneTrigger();
+  if (!targetSeq || targetSeq <= cur.openingSeq) {
+    return { ok: true, claimed: false, trigger: cur };
+  }
+  const next = {
+    ...cur,
+    openingSeq: targetSeq
+  };
+  writeJsonFileAtomic(getSharedAuxTriggerPath(), next);
+  return { ok: true, claimed: true, trigger: next };
 }
 
 export function ackAuxPaneTrigger({ seq, plugin = 'agy-finder' } = {}) {
@@ -805,12 +973,14 @@ export function recordAuxActiveConversation({ convId = '' } = {}) {
   const filePath = getSharedAuxTriggerPath();
   const raw = readJsonSafe(filePath);
   const cur = readAuxPaneTrigger();
-  if (raw && cur.activeConvId === cleanId) {
+  const now = Date.now();
+  if (raw && cur.activeConvId === cleanId && now - Number(cur.activeConvUpdatedAt || 0) < 1000) {
     return { ok: true, activeConvId: cleanId };
   }
   writeJsonFileAtomic(filePath, {
     ...cur,
-    activeConvId: cleanId
+    activeConvId: cleanId,
+    activeConvUpdatedAt: now
   });
   return { ok: true, activeConvId: cleanId };
 }
@@ -874,14 +1044,18 @@ export function recordActiveContextHint(partial = {}) {
   try {
     const cur = readActiveContextHint();
     const next = { ...cur };
-    if (typeof partial.conversationId === 'string' && CONV_ID_RE.test(partial.conversationId.trim())) {
-      next.conversationId = partial.conversationId.trim();
-    }
-    if (Array.isArray(partial.roots) && partial.roots.length > 0) {
-      next.roots = partial.roots.filter((r) => typeof r === 'string' && existsSync(r));
-    }
-    if (typeof partial.primaryRoot === 'string' && existsSync(partial.primaryRoot)) {
-      next.primaryRoot = partial.primaryRoot;
+    const allowContextOverwrite = partial.visible !== false;
+    if (allowContextOverwrite) {
+      if (typeof partial.conversationId === 'string' && CONV_ID_RE.test(partial.conversationId.trim())) {
+        next.conversationId = partial.conversationId.trim();
+      }
+      if (Array.isArray(partial.roots) && partial.roots.length > 0) {
+        next.roots = partial.roots.filter((r) => typeof r === 'string' && existsSync(r));
+      }
+      if (typeof partial.primaryRoot === 'string' && existsSync(partial.primaryRoot)) {
+        next.primaryRoot = partial.primaryRoot;
+      }
+      next.updatedAt = Date.now();
     }
     if (typeof partial.lastRevealPath === 'string' && partial.lastRevealPath.trim()) {
       next.lastRevealPath = partial.lastRevealPath.trim();
@@ -890,7 +1064,6 @@ export function recordActiveContextHint(partial = {}) {
     if (typeof partial.agentApiExe === 'string' && partial.agentApiExe.trim()) {
       next.agentApiExe = partial.agentApiExe.trim();
     }
-    next.updatedAt = Date.now();
     writeJsonFileAtomic(getActiveContextPath(), next);
     return next;
   } catch {
@@ -1174,11 +1347,26 @@ export async function controlDrawer(options = {}, deps = {}) {
       convId: String(options.convId || ''),
       revealPath: String(options.revealPath || '')
     });
+    const deadline = Date.now() + 650;
+    let latest = readAuxPaneTrigger();
+    while (Date.now() < deadline && Number(latest.ackSeq || 0) < Number(trigger.seq || 1)) {
+      await new Promise((r) => setTimeout(r, 45));
+      latest = readAuxPaneTrigger();
+    }
+    const acked = Number(latest.ackSeq || 0) >= Number(trigger.seq || 1);
+    const opened = Number(latest.openingSeq || 0) >= Number(trigger.seq || 1);
     const settings = getShortcutSettings(platform);
+    let message = `已切换 AGY 右侧辅助栏「目录树」（快捷键 ${settings.auxShortcut.display}）`;
+    if (!acked) {
+      message = opened
+        ? '侧栏已展开：因目录树标签曾被 × 关闭，请在右侧 Extensions 点开一次「AGY Finder」（右键标签选 Pin Tab 可永久固定）'
+        : '首次启动请先在右侧 Overview → Extensions 点开一次「AGY Finder」（右键标签选 Pin Tab 后即可跨会话随时呼出）';
+    }
     return {
       ...getDrawerStatus(platform),
-      trigger,
-      message: `已发送切换 AGY 右侧辅助栏「目录树」信号（快捷键 ${settings.auxShortcut.display}）`
+      acked,
+      trigger: latest,
+      message
     };
   }
 
@@ -1239,6 +1427,9 @@ export async function controlDrawer(options = {}, deps = {}) {
       });
     }
 
+    const ctrlHint = (platform === 'darwin' && isAux && enabled && /^Ctrl\+[A-Z]$/.test(nextAux.accelerator || ''))
+      ? '（若与宿主编辑器快捷键冲突，可改用 ⌃⌥ 或 ⌥⌘ 组合）'
+      : '';
     return {
       ...getDrawerStatus(platform),
       hotkeyPreset: nextDrawer.presetId,
@@ -1246,8 +1437,24 @@ export async function controlDrawer(options = {}, deps = {}) {
       drawerShortcut: nextDrawer,
       auxShortcut: nextAux,
       message: enabled
-        ? `已生效：按 ${label} 即可切换${targetDesc}`
+        ? `已生效：按 ${label} 即可切换${targetDesc}${ctrlHint}`
         : `已关闭${targetDesc}快捷键`
+    };
+  }
+
+  if (action === 'set-recording') {
+    if (!disableDrawer && platform === 'darwin') {
+      const current = readDrawerState();
+      if (current) {
+        await sendDaemonCommand(current, {
+          cmd: 'setShortcutRecording',
+          recording: Boolean(options.recording)
+        }).catch(() => {});
+      }
+    }
+    return {
+      ...getDrawerStatus(platform),
+      ok: true
     };
   }
 
@@ -1437,7 +1644,7 @@ export async function controlDrawer(options = {}, deps = {}) {
 // ---------------------------------------------------------------------------
 
 function getAppDataDir() {
-  return process.env.ANTIGRAVITY_APPDATA_DIR || join(homedir(), '.gemini', 'antigravity');
+  return process.env.ANTIGRAVITY_APPDATA_DIR || process.env.AG_DIR || join(homedir(), '.gemini', 'antigravity');
 }
 
 let cachedRecentConv = { at: 0, convId: '' };
@@ -1736,6 +1943,10 @@ async function dispatchDrawerRpc(rawPath, method, rawBody, stateObj, hooks = {})
           : '已关闭独立目录树抽屉快捷键'
       };
     }
+    if (act === 'set-recording') {
+      hooks.onSetRecording?.(Boolean(data.recording));
+      return { ok: true };
+    }
     if (act === 'set-aux-shortcut') {
       const res = setAuxShortcutConfig(data);
       if (!res.ok) {
@@ -1748,13 +1959,16 @@ async function dispatchDrawerRpc(rawPath, method, rawBody, stateObj, hooks = {})
       hooks.onSetDrawerShortcut?.(res.drawerShortcut);
       hooks.onSetAuxShortcut?.(res.auxShortcut);
       writeDrawerState(stateObj);
+      const ctrlHint = (process.platform === 'darwin' && res.auxShortcut.enabled && /^Ctrl\+[A-Z]$/.test(res.auxShortcut.accelerator || ''))
+        ? '（若与宿主编辑器快捷键冲突，可改用 ⌃⌥ 或 ⌥⌘ 组合）'
+        : '';
       return {
         ok: true,
         shortcut: res.drawerShortcut,
         drawerShortcut: res.drawerShortcut,
         auxShortcut: res.auxShortcut,
         message: res.auxShortcut.enabled
-          ? `AGY 侧栏目录树快捷键已设为 ${res.auxShortcut.display}`
+          ? `AGY 侧栏目录树快捷键已设为 ${res.auxShortcut.display}${ctrlHint}`
           : '已关闭 AGY 侧栏目录树快捷键'
       };
     }
@@ -1797,6 +2011,9 @@ async function dispatchDrawerRpc(rawPath, method, rawBody, stateObj, hooks = {})
     }
     if (method === 'POST') {
       const act = String(data.action || 'trigger').toLowerCase();
+      if (act === 'opening') {
+        return markAuxPaneOpening({ seq: Number(data.seq || 0) });
+      }
       if (act === 'ack') {
         return ackAuxPaneTrigger({
           seq: Number(data.seq || 0),
@@ -1917,6 +2134,7 @@ async function startMacNativeDaemon({
       stateObj.auxShortcut = cfg;
       sendToChild({ type: 'setAuxShortcut', ...buildShortcutDaemonPayload(cfg) });
     },
+    onSetRecording: (recording) => sendToChild({ type: 'setShortcutRecording', recording: Boolean(recording) }),
     onSetPinned: (p) => sendToChild({ type: 'setPinned', pinned: p }),
     onHide: () => sendToChild({ type: 'hideWindow' }),
     onShow: (rp) => sendToChild({ type: 'showWindow', revealPath: rp || '' }),
@@ -1971,7 +2189,6 @@ async function startMacNativeDaemon({
     }
 
     if (msg.type === 'auxHotkeyTriggered') {
-      const latest = getShortcutSettings();
       const trigger = writeAuxPaneTrigger({
         targetPlugin: 'agy-finder',
         uri: 'sidecar://agy-finder/tree/',
@@ -1979,13 +2196,25 @@ async function startMacNativeDaemon({
       });
       const checkTimer = setTimeout(() => {
         const cur = readAuxPaneTrigger();
-        if (cur.seq === trigger.seq && cur.ackSeq < trigger.seq) {
-          sendToChild({
-            type: 'showHud',
-            message: `请先在 Antigravity 主窗口打开对话，再按 ${latest.auxShortcut.display} 打开目录树`
-          });
+        if (Number(cur.ackSeq || 0) >= Number(trigger.seq || 1)) return;
+        const opened = Number(cur.openingSeq || 0) >= Number(trigger.seq || 1);
+        if (opened) {
+          const graceTimer = setTimeout(() => {
+            const afterGrace = readAuxPaneTrigger();
+            if (Number(afterGrace.ackSeq || 0) >= Number(trigger.seq || 1)) return;
+            sendToChild({
+              type: 'showHud',
+              message: '右侧栏已展开：请点开一次「AGY Finder」（右键标签 Pin Tab 固定后，按快捷键即可自动开栏直达）'
+            });
+          }, 750);
+          graceTimer.unref?.();
+          return;
         }
-      }, 420);
+        sendToChild({
+          type: 'showHud',
+          message: '首次启动请先在右侧 Overview → Extensions 点开一次「AGY Finder」（右键 Pin Tab 后跨会话直接呼出）'
+        });
+      }, 720);
       checkTimer.unref?.();
       return;
     }
@@ -2041,6 +2270,8 @@ async function startMacNativeDaemon({
     } else if (cmdObj.cmd === 'setPinned' && typeof cmdObj.pinned === 'boolean') {
       stateObj.pinned = cmdObj.pinned;
       sendToChild({ type: 'setPinned', pinned: stateObj.pinned });
+    } else if (cmdObj.cmd === 'setShortcutRecording') {
+      sendToChild({ type: 'setShortcutRecording', recording: Boolean(cmdObj.recording) });
     }
     writeDrawerState(stateObj);
   };

@@ -2,7 +2,7 @@
   "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "agy-finder",
   "displayName": "AGY Finder 项目目录树",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "轻量跨平台的右侧项目目录树（Aux Pane）插件：支持点击聊天回复中的文档或代码路径（绝对路径与相对路径）直接在右侧展开目录树并高亮定位，内置会话日志增量路径提取兜底。",
   "author": {
     "name": "Dong-Kevin",

@@ -43,6 +43,7 @@ import {
   injectCsrfMeta,
   launchCliTerminal,
   LOOPBACK_SECURITY_HEADERS,
+  markAuxPaneOpening,
   markAuxPaneSwitched,
   MENUBAR_MODES,
   readAuxPaneTrigger,
@@ -372,16 +373,25 @@ export async function controlFloatWindow(options = {}, deps = {}) {
       action: action === 'open-aux' ? 'open' : 'toggle',
       convId: typeof options.convId === 'string' ? options.convId : ''
     });
-    await new Promise((r) => setTimeout(r, 420));
-    const latest = readAuxPaneTrigger();
+    const deadline = Date.now() + 650;
+    let latest = readAuxPaneTrigger();
+    while (Date.now() < deadline && Number(latest.ackSeq || 0) < Number(trig.seq || 1)) {
+      await new Promise((r) => setTimeout(r, 45));
+      latest = readAuxPaneTrigger();
+    }
     const acked = Number(latest.ackSeq || 0) >= Number(trig.seq || 1);
+    const opened = Number(latest.openingSeq || 0) >= Number(trig.seq || 1);
+    let message = '已切换 Antigravity 右侧辅助栏「上下文看板」';
+    if (!acked) {
+      message = opened
+        ? '侧栏已展开：因看板标签曾被 × 关闭，请在右侧 Extensions 点开一次「上下文看板」（右键标签选 Pin Tab 可永久固定）'
+        : '首次启动请先在右侧 Overview → Extensions 点开一次「上下文看板」（右键标签选 Pin Tab 后即可跨会话随时呼出）';
+    }
     return {
       ok: true,
       acked,
       trigger: latest,
-      message: acked
-        ? '已切换 Antigravity 右侧辅助栏「上下文看板」'
-        : '已发送切换指令（若右侧栏未响应，请确认 Antigravity 桌面端正在运行且至少加载过一次「上下文看板」）'
+      message
     };
   }
 
@@ -590,10 +600,13 @@ export async function controlFloatWindow(options = {}, deps = {}) {
     }
     const fresh = getFloatWindowStatus(platform);
     const scopeLabel = auxSc.scope === 'global' ? '全局生效' : '仅宿主前台生效';
+    const ctrlHint = (platform === 'darwin' && /^Ctrl\+[A-Z]$/.test(auxSc.accelerator || ''))
+      ? '（若与宿主编辑器快捷键冲突，可改用 ⌃⌥ 或 ⌥⌘ 组合）'
+      : '';
     const message = !auxSc.enabled
       ? '已关闭 AGY 右侧辅助栏看板快捷键'
       : platform === 'darwin'
-        ? `已启用 AGY 侧栏看板快捷键 ${auxSc.display}（${scopeLabel}），可一键打开或切换右侧辅助栏「上下文看板」`
+        ? `已启用 AGY 侧栏看板快捷键 ${auxSc.display}（${scopeLabel}），可一键打开或切换右侧辅助栏「上下文看板」${ctrlHint}`
         : `已保存 AGY 侧栏看板快捷键 ${auxSc.display}（焦点位于看板内时可直接切换）`;
     return {
       ...(nextStatus || fresh),
@@ -602,6 +615,19 @@ export async function controlFloatWindow(options = {}, deps = {}) {
       auxShortcut: auxSc,
       shortcut: sc,
       message
+    };
+  }
+
+  if (action === 'set-recording') {
+    if (platform === 'darwin' && current) {
+      await sendCmdFn(current, {
+        cmd: 'setRecording',
+        recording: Boolean(options.recording)
+      }).catch(() => {});
+    }
+    return {
+      ...getFloatWindowStatus(platform),
+      ok: true
     };
   }
 
@@ -1208,6 +1234,9 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
     return waitForAuxPaneTrigger({ since, timeoutMs: waitMs });
   }
   if (u.pathname === '/api/aux-pane-trigger' && method === 'POST') {
+    if (data.action === 'opening') {
+      return markAuxPaneOpening({ seq: Number(data.seq || 0) });
+    }
     if (data.action === 'ack') {
       return ackAuxPaneTrigger({
         seq: Number(data.seq || 0),
@@ -1274,6 +1303,13 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
     };
   }
   if (u.pathname === '/api/entrypoints' && method === 'POST') {
+    if (data.target === 'shortcut-recording' || typeof data.recording === 'boolean') {
+      hooks.onSetRecording?.(Boolean(data.recording));
+      return {
+        ...getSidebarEntryStatus(),
+        ok: true
+      };
+    }
     const isAuxShortcutUpdate = (
       data.target === 'aux-shortcut' ||
       data.auxShortcutReset === true ||
@@ -1328,6 +1364,9 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
       }
       const auxSc = saved.auxShortcut;
       const scopeLabel = auxSc.scope === 'global' ? '全局生效' : '仅宿主前台生效';
+      const ctrlHint = (process.platform === 'darwin' && /^Ctrl\+[A-Z]$/.test(auxSc.accelerator || ''))
+        ? '（若与宿主编辑器快捷键冲突，可改用 ⌃⌥ 或 ⌥⌘ 组合）'
+        : '';
       return {
         ...getSidebarEntryStatus(),
         ok: true,
@@ -1335,7 +1374,7 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
         message: !auxSc.enabled
           ? '已关闭 AGY 右侧辅助栏看板快捷键'
           : process.platform === 'darwin'
-            ? `已启用 AGY 侧栏看板快捷键 ${auxSc.display}（${scopeLabel}），可一键打开或切换右侧辅助栏「上下文看板」`
+            ? `已启用 AGY 侧栏看板快捷键 ${auxSc.display}（${scopeLabel}），可一键打开或切换右侧辅助栏「上下文看板」${ctrlHint}`
             : `已保存 AGY 侧栏看板快捷键 ${auxSc.display}（焦点位于看板内时可直接切换）`
       };
     }
@@ -1689,7 +1728,7 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
         mode: state.mode
       },
       message: auxSc.enabled
-        ? `已启用 AGY 侧栏看板快捷键 ${auxSc.display}（${scopeLabel}），可一键打开或切换右侧辅助栏「上下文看板」`
+        ? `已启用 AGY 侧栏看板快捷键 ${auxSc.display}（${scopeLabel}），可一键打开或切换右侧辅助栏「上下文看板」${/^Ctrl\+[A-Z]$/.test(auxSc.accelerator || '') ? '（若与宿主编辑器快捷键冲突，可改用 ⌃⌥ 或 ⌥⌘ 组合）' : ''}`
         : '已关闭 AGY 右侧辅助栏看板快捷键'
     };
   };
@@ -1859,6 +1898,8 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
       } else if (action === 'setPinned' && typeof cmd.pinned === 'boolean') {
         state.pinned = cmd.pinned;
         sendToChild({ type: 'setPinned', pinned: cmd.pinned });
+      } else if (action === 'setRecording') {
+        sendToChild({ type: 'setRecording', recording: Boolean(cmd.recording) });
       }
 
       state.cmdSeq = Number(cmd.seq || Date.now());
@@ -1915,10 +1956,24 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
       });
       setTimeout(() => {
         const latest = readAuxPaneTrigger();
-        if (Number(latest.ackSeq || 0) < Number(trig.seq || 1)) {
-          sendToChild({ type: 'showHud', text: '请先在 Antigravity 打开过一次「上下文看板」再使用侧栏快捷键' });
+        if (Number(latest.ackSeq || 0) >= Number(trig.seq || 1)) return;
+        const opened = Number(latest.openingSeq || 0) >= Number(trig.seq || 1);
+        if (opened) {
+          setTimeout(() => {
+            const afterGrace = readAuxPaneTrigger();
+            if (Number(afterGrace.ackSeq || 0) >= Number(trig.seq || 1)) return;
+            sendToChild({
+              type: 'showHud',
+              text: '右侧栏已展开：请点开一次「上下文看板」（右键标签 Pin Tab 固定后，按快捷键即可自动开栏直达）'
+            });
+          }, 750).unref?.();
+          return;
         }
-      }, 420).unref?.();
+        sendToChild({
+          type: 'showHud',
+          text: '首次使用请先在右侧 Overview → Extensions 点开一次「上下文看板」（右键 Pin Tab 后跨会话直接呼出）'
+        });
+      }, 720).unref?.();
     } else if (msg.type === 'menubarModeChanged') {
       const nextMode = setMenubarMode(msg.mode);
       state.menubarMode = nextMode;
@@ -1970,6 +2025,7 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
           onSetMenubarMode: handleSetMenubarModeInDaemon,
           onSetShortcut: handleSetShortcutInDaemon,
           onSetAuxShortcut: handleSetAuxShortcutInDaemon,
+          onSetRecording: (recording) => { sendToChild({ type: 'setRecording', recording: Boolean(recording) }); },
           onRefreshMenubar: () => { refreshMenubarStatusItem(true).catch(() => {}); }
         });
         sendToChild({ type: 'rpcReply', id: msg.id, ok: true, status: 200, payload });

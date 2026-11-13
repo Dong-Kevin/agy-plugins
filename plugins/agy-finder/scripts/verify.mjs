@@ -12,6 +12,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync
 } from 'node:fs';
 import { request as httpRequest } from 'node:http';
@@ -20,12 +21,19 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
+  ackAuxPaneTrigger,
   getAuxShortcutConfig,
   getDrawerShortcutConfig,
   getShortcutSettings,
+  markAuxPaneOpening,
+  readActiveContextHint,
+  readAuxPaneTrigger,
+  recordActiveContextHint,
+  recordAuxActiveConversation,
   saveShortcutSettings,
   setAuxShortcutConfig,
-  setDrawerShortcutConfig
+  setDrawerShortcutConfig,
+  writeAuxPaneTrigger
 } from '../sidecars/tree/drawer.mjs';
 import { getConversationMentions } from '../sidecars/tree/mentions.mjs';
 import {
@@ -355,6 +363,85 @@ function verifyShortcutAndCli() {
     assert.equal(auxTrigJson.trigger.uri, 'sidecar://agy-finder/tree/');
     assert.equal(auxTrigJson.trigger.revealPath, 'plugin.json');
 
+    // Hidden prewarmed iframe hint isolation & opening/deferred ack exclusivity
+    recordActiveContextHint({ conversationId: 'b2000000-0000-4000-8000-000000000002', visible: true });
+    recordActiveContextHint({ conversationId: 'c3000000-0000-4000-8000-000000000003', visible: false });
+    assert.equal(
+      readActiveContextHint().conversationId,
+      'b2000000-0000-4000-8000-000000000002',
+      'Hidden Aux iframe (visible=false) must not overwrite active conversation hint'
+    );
+    recordAuxActiveConversation({ convId: 'b2000000-0000-4000-8000-000000000002' });
+    const auxOpen = writeAuxPaneTrigger({
+      targetPlugin: 'agy-finder',
+      uri: 'sidecar://agy-finder/tree/',
+      action: 'toggle'
+    });
+    assert.equal(markAuxPaneOpening({ seq: auxOpen.seq }).claimed, true);
+    assert.equal(markAuxPaneOpening({ seq: auxOpen.seq }).claimed, false);
+    assert.ok(readAuxPaneTrigger().ackSeq < auxOpen.seq);
+    assert.equal(ackAuxPaneTrigger({ seq: auxOpen.seq, plugin: 'agy-finder' }).claimed, true);
+    assert.equal(readAuxPaneTrigger().ackSeq, auxOpen.seq);
+
+    // Background conversation with newer mtimeMs & older viewTimeMs + subagent transcript isolation
+    const prevAgDir = process.env.AG_DIR;
+    const prevAppDataDir = process.env.ANTIGRAVITY_APPDATA_DIR;
+    const tempAgDir = mkdtempSync(join(tmpdir(), 'agy-finder-ag-'));
+    try {
+      process.env.AG_DIR = tempAgDir;
+      process.env.ANTIGRAVITY_APPDATA_DIR = tempAgDir;
+      const bgId = '00000000-0000-4000-8000-000000000004';
+      const fgId = '00000000-0000-4000-8000-000000000005';
+      const subId = '00000000-0000-4000-8000-000000000006';
+      for (const [id, lines] of [
+        [bgId, [{ type: 'USER_INPUT', content: 'background thread' }]],
+        [fgId, [{ type: 'USER_INPUT', content: 'foreground thread' }]],
+        [subId, [{ type: 'SYSTEM_MESSAGE', content: 'subagent system prompt' }]]
+      ]) {
+        const logDir = join(tempAgDir, 'brain', id, '.system_generated', 'logs');
+        mkdirSync(logDir, { recursive: true });
+        writeFileSync(join(logDir, 'transcript.jsonl'), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+      }
+      mkdirSync(join(tempAgDir, 'annotations'), { recursive: true });
+      const bgSec = Math.floor((Date.now() + 10000) / 1000);
+      const fgSec = Math.floor((Date.now() + 30000) / 1000);
+      writeFileSync(
+        join(tempAgDir, 'annotations', `${bgId}.pbtxt`),
+        `title: "bg"\nlast_user_view_time: {\n  seconds: ${bgSec}\n  nanos: 0\n}\n`
+      );
+      writeFileSync(
+        join(tempAgDir, 'annotations', `${fgId}.pbtxt`),
+        `title: "fg"\nlast_user_view_time: {\n  seconds: ${fgSec}\n  nanos: 0\n}\n`
+      );
+      const newerSec = fgSec + 60;
+      utimesSync(join(tempAgDir, 'brain', bgId, '.system_generated', 'logs', 'transcript.jsonl'), newerSec, newerSec);
+      utimesSync(join(tempAgDir, 'brain', subId, '.system_generated', 'logs', 'transcript.jsonl'), newerSec + 30, newerSec + 30);
+
+      const trigFg = writeAuxPaneTrigger({ targetPlugin: 'agy-finder', uri: 'sidecar://agy-finder/tree/', action: 'toggle' });
+      assert.equal(trigFg.convId, fgId, 'Background conversation or subagent mtimeMs must not hijack foreground convId');
+
+      const trigFgRepeat = writeAuxPaneTrigger({ targetPlugin: 'agy-finder', uri: 'sidecar://agy-finder/tree/', action: 'toggle' });
+      assert.equal(trigFgRepeat.convId, fgId, 'Repeated Aux hotkey without tab switch must stay on same foreground convId');
+    } finally {
+      if (prevAgDir === undefined) delete process.env.AG_DIR;
+      else process.env.AG_DIR = prevAgDir;
+      if (prevAppDataDir === undefined) delete process.env.ANTIGRAVITY_APPDATA_DIR;
+      else process.env.ANTIGRAVITY_APPDATA_DIR = prevAppDataDir;
+      rmSync(tempAgDir, { recursive: true, force: true });
+    }
+
+    const afAppSource = readFileSync(join(ROOT, 'sidecars/tree/app.js'), 'utf8');
+    assert.ok(
+      afAppSource.includes('IntersectionObserver') &&
+        afAppSource.includes('intersectionRect') &&
+        afAppSource.includes('agy_aux_ever_visible') &&
+        afAppSource.includes('holdMs') &&
+        afAppSource.includes('toggleConversation(targetConvId)') &&
+        afAppSource.includes('agy_aux_last_reveal_seq') &&
+        !afAppSource.includes('return window.innerWidth > 40 && window.innerHeight > 40;'),
+      'tree/app.js must implement IntersectionObserver visibility check, holdMs wakeup, toggleConversation bridge, and revealPath preservation'
+    );
+
     pass('Shortcut settings persistence, dual custom chords, collision guard & cli.mjs aux commands');
   } finally {
     if (prevDataDir === undefined) delete process.env.AGY_FINDER_DATA_DIR;
@@ -480,6 +567,11 @@ async function verifyStandaloneHttp() {
     const auxPollJson = await auxPoll.json();
     assert.equal(auxPollJson.changed, true);
     assert.equal(auxPollJson.trigger.revealPath, 'README.md');
+
+    const auxHoldRes = await fetch(`${baseUrl}/api/aux-pane-trigger?waitMs=0&holdMs=20`);
+    assert.equal(auxHoldRes.status, 200);
+    const auxHoldJson = await auxHoldRes.json();
+    assert.equal(auxHoldJson.trigger.revealPath, 'README.md');
 
     // Host header guard
     const evilHostRes = await httpGetRaw(`${baseUrl}/api/workspace`, { Host: 'evil.example:1234' });

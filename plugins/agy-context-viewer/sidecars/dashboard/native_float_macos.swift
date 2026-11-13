@@ -396,7 +396,9 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
   func showHudNotice(_ text: String) {
     hudHideWorkItem?.cancel()
     let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-    let panelWidth: CGFloat = 340
+    let font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
+    let textWidth = ceil((text as NSString).size(withAttributes: [.font: font]).width)
+    let panelWidth: CGFloat = min(660, max(320, textWidth + 36))
     let panelHeight: CGFloat = 48
     let rect = NSRect(
       x: screenFrame.midX - panelWidth / 2.0,
@@ -448,7 +450,7 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
       self?.hudWindow?.orderOut(nil)
     }
     hudHideWorkItem = work
-    DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: work)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 3.4, execute: work)
   }
 
   func toggleWindowFromHotkey() {
@@ -858,6 +860,14 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
     case "showHud":
       if let text = msg["text"] as? String, !text.isEmpty {
         showHudNotice(text)
+      }
+    case "setRecording":
+      isRecordingShortcut = (msg["recording"] as? Bool) ?? false
+      syncHotKeyRegistration()
+    case "activateHost":
+      if let targetApp = findAntigravityApp(),
+         NSWorkspace.shared.frontmostApplication?.processIdentifier != targetApp.processIdentifier {
+        targetApp.activate(options: [])
       }
     case "setMenubarMode":
       if let m = msg["mode"] as? String, !m.isEmpty {

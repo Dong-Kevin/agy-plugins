@@ -2,7 +2,7 @@
 
 # AGY Finder (`agy-finder`)
 
-[![Version](https://img.shields.io/badge/version-v0.2.0-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
+[![Version](https://img.shields.io/badge/version-v0.2.1-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-818cf8)](#installation)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D%2018-22c55e)](#installation)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-a855f7)](#key-features)
@@ -48,7 +48,7 @@ Designed to give Antigravity Desktop a persistent workspace explorer and instant
 | Trigger | Default Hotkey / Command | Behavior |
 | :--- | :--- | :--- |
 | **Right-Side Floating Drawer (macOS)** | **`⌘⇧E`** | Uses Carbon `RegisterEventHotKey` active **only when `Antigravity` is frontmost** by default — zero conflicts and **zero Accessibility permission prompts**. Click-to-record custom chords, presets (`⌘⌥E`, `⌃⇧E`, `⌘⇧Y`), or global scope via `⌨`. |
-| **AGY Right Aux Pane Direct Jump (macOS)** | **`⌥⌘E`** | Brings Antigravity's native Right Aux Pane to **AGY Finder File Tree** directly (click-to-record custom chord via `⌨` or `agy-finder aux-shortcut`, or trigger via `agy-finder aux`). |
+| **AGY Right Aux Pane Direct Jump (macOS)** | **`⌥⌘E`** | Wakes Antigravity's native Right Aux Pane straight to **AGY Finder File Tree** even from `Overview`, collapsed, or cross-plugin states (right-click the tab → `Pin Tab` to keep it pinned across threads; shows a native HUD prompt on unmounted cold start; customize via `⌨` or `agy-finder aux-shortcut`, with `⌥⌘` / `⌃⌥` combos recommended) |
 | **Host Auxiliary Pane Toggle** | **`⌘⇧B`** (macOS)<br/>**`Ctrl+Shift+B`** (Win / Linux) | Toggles Antigravity's native Right Aux Pane; right-click the tab to `Pin Tab`. |
 | **In-Chat Slash & Deep Links** | **`/agy-finder`**<br/>Click **`[📂]`** or [`sidecar://agy-finder/tree/`](sidecar://agy-finder/tree/) | Opens the file tree panel or reveals & highlights the exact target path from chat replies. |
 | **Cross-Platform Terminal CLI** | **`agy-finder`** (drawer)<br/>**`agy-finder aux`** (Aux Pane) | Toggles the floating drawer or jumps into AGY's Right Aux Pane File Tree from terminal or OS hotkey tools (e.g., bind `Ctrl+Shift+E` / `Ctrl+Alt+E` on Win / Linux). |
