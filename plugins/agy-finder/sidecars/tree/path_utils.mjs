@@ -228,21 +228,49 @@ export function resolveTargetPath(rawInput, roots = []) {
       }
     }
   } else {
-    const cleanRel = cleanedPath.replace(/^[./\\]+(?=\w|\.)/, '');
     for (const r of validRoots) {
-      const candidate = resolve(r, cleanRel || cleanedPath);
+      const candidate = resolve(r, cleanedPath);
       if (existsSync(candidate)) {
         absPath = candidate;
-        matchedRoot = r;
         exists = true;
+        if (isSubpath(r, candidate)) {
+          matchedRoot = r;
+        } else {
+          let realCand = '';
+          try {
+            realCand = realpathSync(candidate);
+          } catch {}
+          for (const vr of validRoots) {
+            if (isSubpath(vr, candidate)) {
+              matchedRoot = vr;
+              break;
+            }
+            if (realCand) {
+              try {
+                if (isSubpath(realpathSync(vr), realCand)) {
+                  matchedRoot = vr;
+                  break;
+                }
+              } catch {}
+            }
+          }
+        }
         break;
       }
     }
     if (!absPath) {
       const fallbackRoot = validRoots[0] || process.cwd();
       absPath = resolve(fallbackRoot, cleanedPath);
-      matchedRoot = fallbackRoot;
       exists = existsSync(absPath);
+      if (isSubpath(fallbackRoot, absPath)) {
+        matchedRoot = fallbackRoot;
+      } else if (exists) {
+        try {
+          if (isSubpath(realpathSync(fallbackRoot), realpathSync(absPath))) {
+            matchedRoot = fallbackRoot;
+          }
+        } catch {}
+      }
     }
   }
 
@@ -386,6 +414,11 @@ export function searchWorkspaceFiles(rootPath, query, opts = {}) {
   }
 
   const queue = [''];
+  let realRoot = rootAbs;
+  try {
+    realRoot = realpathSync(rootAbs);
+  } catch {}
+  const visitedRealDirs = new Set([realRoot]);
   const matches = [];
   let visited = 0;
   let truncated = false;
@@ -443,6 +476,16 @@ export function searchWorkspaceFiles(rootPath, query, opts = {}) {
       }
 
       if (isDirectory) {
+        let dirReal = '';
+        try {
+          dirReal = realpathSync(fullPath);
+        } catch {
+          continue;
+        }
+        if (dirname(dirReal) === dirReal || visitedRealDirs.has(dirReal)) {
+          continue;
+        }
+        visitedRealDirs.add(dirReal);
         queue.push(relPath);
       }
     }

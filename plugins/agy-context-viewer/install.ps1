@@ -21,7 +21,9 @@ $PluginDirName = "context-viewer"
 $OrigPluginsDir = if ($env:ANTIGRAVITY_PLUGINS_DIR) { $env:ANTIGRAVITY_PLUGINS_DIR } elseif ($env:AGY_PLUGINS_DIR) { $env:AGY_PLUGINS_DIR } else { "" }
 $PluginsRoot = if ($OrigPluginsDir) { $OrigPluginsDir } else { Join-Path $HOME ".gemini\config\plugins" }
 $TargetDir = Join-Path $PluginsRoot $PluginDirName
-$BinDir = if ($env:ANTIGRAVITY_BIN_DIR) { $env:ANTIGRAVITY_BIN_DIR } elseif ($env:AGY_BIN_DIR) { $env:AGY_BIN_DIR } else { Join-Path $HOME ".local\bin" }
+$OrigBinDir = if ($env:ANTIGRAVITY_BIN_DIR) { $env:ANTIGRAVITY_BIN_DIR } elseif ($env:AGY_BIN_DIR) { $env:AGY_BIN_DIR } else { "" }
+$BinDir = if ($OrigBinDir) { $OrigBinDir } else { Join-Path $HOME ".local\bin" }
+$ShouldManageBin = [bool]($OrigBinDir -or (-not $OrigPluginsDir))
 $CliWrapper = Join-Path $BinDir "agy-context.cmd"
 $CliLoader = Join-Path $BinDir "agy-context-loader.mjs"
 $RepoSlug = if ($env:REPO) { $env:REPO } else { "Dong-Kevin/agy-plugins" }
@@ -32,18 +34,23 @@ if ($Uninstall) {
   if ((-not $OrigPluginsDir) -and (Test-Path $ExistingCli) -and (Get-Command node -ErrorAction SilentlyContinue)) {
     try { & node $ExistingCli float quit 2>&1 | Out-Null } catch {}
   }
+  if ($ShouldManageBin -and (Test-Path $CliLoader)) {
+    $ExpectedEntry = [System.IO.Path]::GetFullPath((Join-Path $TargetDir "sidecars\dashboard\cli.mjs"))
+    $ExpectedB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($ExpectedEntry))
+    $LoaderRaw = Get-Content $CliLoader -Raw -ErrorAction SilentlyContinue
+    if ($LoaderRaw -and ($LoaderRaw.Contains($ExpectedB64) -or $LoaderRaw.Contains($TargetDir))) {
+      Remove-Item -Force $CliLoader
+      if ((Test-Path $CliWrapper) -and ((Get-Content $CliWrapper -Raw -ErrorAction SilentlyContinue) -match "agy-context-loader\.mjs")) {
+        Remove-Item -Force $CliWrapper
+        Write-Host "[context-viewer] 已移除命令行入口：$CliWrapper" -ForegroundColor Green
+      }
+    }
+  }
   if (Test-Path $TargetDir) {
     Remove-Item -Recurse -Force $TargetDir
     Write-Host "[context-viewer] 已移除插件目录：$TargetDir" -ForegroundColor Green
   } else {
     Write-Host "[context-viewer] 未检测到已安装目录：$TargetDir" -ForegroundColor Cyan
-  }
-  if (Test-Path $CliWrapper) {
-    Remove-Item -Force $CliWrapper
-    Write-Host "[context-viewer] 已移除命令行入口：$CliWrapper" -ForegroundColor Green
-  }
-  if (Test-Path $CliLoader) {
-    Remove-Item -Force $CliLoader
   }
   Write-Host "[context-viewer] 用户本地会话归档与统计偏好设置已安全保留，未做删除。" -ForegroundColor Cyan
   exit 0
@@ -139,18 +146,20 @@ try {
   }
 
   # 4. Create codepage-independent Unicode-safe `agy-context.cmd` + `agy-context-loader.mjs`
-  New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
-  $CliEntry = [System.IO.Path]::GetFullPath((Join-Path $TargetDir "sidecars\dashboard\cli.mjs"))
-  $CliEntryB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($CliEntry))
-  $LoaderContent = @(
-    "import { pathToFileURL } from 'node:url';",
-    "const entry = Buffer.from('$CliEntryB64', 'base64').toString('utf8');",
-    "process.argv[1] = entry;",
-    "await import(pathToFileURL(entry).href);"
-  ) -join "`n"
-  $CmdContent = "@echo off`r`nnode `"%~dp0agy-context-loader.mjs`" %*`r`n"
-  [System.IO.File]::WriteAllText($CliLoader, "$LoaderContent`n", [System.Text.Encoding]::ASCII)
-  [System.IO.File]::WriteAllText($CliWrapper, $CmdContent, [System.Text.Encoding]::ASCII)
+  if ($ShouldManageBin) {
+    New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+    $CliEntry = [System.IO.Path]::GetFullPath((Join-Path $TargetDir "sidecars\dashboard\cli.mjs"))
+    $CliEntryB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($CliEntry))
+    $LoaderContent = @(
+      "import { pathToFileURL } from 'node:url';",
+      "const entry = Buffer.from('$CliEntryB64', 'base64').toString('utf8');",
+      "process.argv[1] = entry;",
+      "await import(pathToFileURL(entry).href);"
+    ) -join "`n"
+    $CmdContent = "@echo off`r`nnode `"%~dp0agy-context-loader.mjs`" %*`r`n"
+    [System.IO.File]::WriteAllText($CliLoader, "$LoaderContent`n", [System.Text.Encoding]::ASCII)
+    [System.IO.File]::WriteAllText($CliWrapper, $CmdContent, [System.Text.Encoding]::ASCII)
+  }
 
   # 5. Enable via agy CLI if available
   if ((-not $OrigPluginsDir) -and (Get-Command agy -ErrorAction SilentlyContinue)) {

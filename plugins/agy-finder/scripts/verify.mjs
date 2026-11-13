@@ -12,6 +12,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   utimesSync,
   writeFileSync
 } from 'node:fs';
@@ -19,6 +20,7 @@ import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import vm from 'node:vm';
 
 import {
   ackAuxPaneTrigger,
@@ -626,6 +628,351 @@ function verifyInstaller() {
   }
 }
 
+// 9. Behavioral regression tests for R2 (relative dotfile / .. path resolution) & R5 (symlink loop / dedupe search)
+function verifyPathResolutionAndSymlinkSearch() {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'agy-finder-r2r5-'));
+  const ws = join(tempRoot, 'ws');
+  const outside = join(tempRoot, 'outside');
+  try {
+    mkdirSync(join(ws, 'src'), { recursive: true });
+    mkdirSync(join(ws, 'dirA'), { recursive: true });
+    mkdirSync(join(ws, 'dirB'), { recursive: true });
+    mkdirSync(outside, { recursive: true });
+
+    writeFileSync(join(ws, '.env'), 'SECRET=1\n');
+    writeFileSync(join(ws, 'env'), 'PLAIN=1\n');
+    writeFileSync(join(ws, 'README.md'), 'inner readme\n');
+    writeFileSync(join(tempRoot, 'README.md'), 'outer readme\n');
+    writeFileSync(join(outside, 'guide.md'), 'outside guide\n');
+    writeFileSync(join(ws, 'src', 'real_target.txt'), 'needle\n');
+
+    // R2: dotfiles and parent traversal must NOT be stripped by regex
+    const dotEnvRes = resolveTargetPath('.env', [ws]);
+    assert.equal(dotEnvRes.exists, true);
+    assert.equal(dotEnvRes.absPath, resolve(ws, '.env'));
+    assert.equal(dotEnvRes.relPath, '.env');
+    assert.equal(dotEnvRes.isExternalRoot, false);
+
+    const plainEnvRes = resolveTargetPath('env', [ws]);
+    assert.equal(plainEnvRes.exists, true);
+    assert.equal(plainEnvRes.absPath, resolve(ws, 'env'));
+    assert.equal(plainEnvRes.relPath, 'env');
+
+    const dotSlashEnvRes = resolveTargetPath('./.env', [ws]);
+    assert.equal(dotSlashEnvRes.exists, true);
+    assert.equal(dotSlashEnvRes.absPath, resolve(ws, '.env'));
+
+    const parentReadmeRes = resolveTargetPath('../README.md', [ws]);
+    assert.equal(parentReadmeRes.exists, true);
+    assert.equal(parentReadmeRes.absPath, resolve(tempRoot, 'README.md'));
+    assert.notEqual(parentReadmeRes.absPath, resolve(ws, 'README.md'));
+    assert.equal(parentReadmeRes.isExternalRoot, true);
+
+    const outsideGuideRes = resolveTargetPath('../outside/guide.md', [ws]);
+    assert.equal(outsideGuideRes.exists, true);
+    assert.equal(outsideGuideRes.absPath, resolve(outside, 'guide.md'));
+    assert.equal(outsideGuideRes.isExternalRoot, true);
+
+    // R5: self-loop, duplicate alias & mutual symlink directories must terminate cleanly without duplicates
+    let symlinkCreated = false;
+    try {
+      symlinkSync('.', join(ws, 'self-loop'));
+      symlinkSync('src', join(ws, 'src-alias'));
+      symlinkSync('../dirB', join(ws, 'dirA', 'to-b'));
+      symlinkSync('../dirA', join(ws, 'dirB', 'to-a'));
+      symlinkCreated = true;
+    } catch {}
+
+    if (symlinkCreated) {
+      const searchRes = searchWorkspaceFiles(ws, 'real_target', { maxVisited: 500 });
+      assert.equal(searchRes.ok, true);
+      assert.equal(searchRes.truncated, false, 'Symlink loops must not exhaust maxVisited');
+      const exactMatches = searchRes.results.filter((r) => r.name === 'real_target.txt');
+      assert.equal(exactMatches.length, 1, 'Duplicate directory symlink alias must not yield duplicate child entries');
+    }
+
+    pass('R2 dotfile/parent relative path resolution & R5 symlink cycle/alias deduplication');
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+}
+
+// 10. Behavioral VM test for R3 (cached expanded dir refresh on reveal + visible auto-sync) & UX #3 (search states)
+async function verifyFinderFrontendBehavior() {
+  const appCode = readFileSync(join(ROOT, 'sidecars', 'tree', 'app.js'), 'utf8');
+  const wsRoot = '/mock-ws';
+
+  const makeEl = (id = '') => {
+    const attrs = new Map();
+    const classes = new Set();
+    const listeners = new Map();
+    return {
+      id,
+      value: '',
+      innerHTML: '',
+      textContent: '',
+      scrollTop: 0,
+      dataset: {},
+      style: {},
+      classList: {
+        add: (...names) => names.forEach((n) => classes.add(n)),
+        remove: (...names) => names.forEach((n) => classes.delete(n)),
+        toggle: (n, force) => {
+          const on = force === undefined ? !classes.has(n) : Boolean(force);
+          if (on) classes.add(n);
+          else classes.delete(n);
+          return on;
+        },
+        contains: (n) => classes.has(n)
+      },
+      addEventListener: (type, fn) => {
+        if (!listeners.has(type)) listeners.set(type, []);
+        listeners.get(type).push(fn);
+      },
+      dispatch: (type, ev = {}) => {
+        for (const fn of listeners.get(type) || []) {
+          fn({ target: ev.target || {}, ...ev });
+        }
+      },
+      setAttribute: (k, v) => attrs.set(k, String(v)),
+      getAttribute: (k) => (attrs.has(k) ? attrs.get(k) : null),
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      scrollIntoView: () => {},
+      remove: () => {}
+    };
+  };
+
+  const els = new Map();
+  const getEl = (id) => {
+    if (!els.has(id)) els.set(id, makeEl(id));
+    return els.get(id);
+  };
+
+  const treeData = new Map([
+    ['', [{ name: 'src', relPath: 'src', absPath: `${wsRoot}/src`, fileUri: `file://${wsRoot}/src`, isDirectory: true }]],
+    ['src', [{ name: 'alpha.js', relPath: 'src/alpha.js', absPath: `${wsRoot}/src/alpha.js`, fileUri: `file://${wsRoot}/src/alpha.js`, isDirectory: false }]]
+  ]);
+  const treeFetches = [];
+  let searchMode = 'truncated';
+  const intervalCbs = [];
+
+  const mockLocation = {
+    href: `http://127.0.0.1/?path=${encodeURIComponent(`${wsRoot}/src/alpha.js`)}`,
+    search: `?path=${encodeURIComponent(`${wsRoot}/src/alpha.js`)}`,
+    hash: '',
+    pathname: '/',
+    origin: 'http://127.0.0.1'
+  };
+
+  const docListeners = new Map();
+  const winListeners = new Map();
+  const sessionMap = new Map();
+
+  const sandbox = {
+    console,
+    Date,
+    Math,
+    JSON,
+    URL,
+    URLSearchParams,
+    Set,
+    Map,
+    Array,
+    Object,
+    String,
+    Number,
+    Boolean,
+    Promise,
+    Error,
+    decodeURIComponent,
+    encodeURIComponent,
+    setTimeout,
+    clearTimeout,
+    clearInterval,
+    setInterval: (fn, ms) => {
+      intervalCbs.push({ fn, ms });
+      return intervalCbs.length;
+    },
+    requestAnimationFrame: (fn) => { fn(); return 1; },
+    sessionStorage: {
+      getItem: (k) => (sessionMap.has(k) ? sessionMap.get(k) : null),
+      setItem: (k, v) => sessionMap.set(k, String(v))
+    },
+    navigator: { platform: 'MacIntel', clipboard: { writeText: async () => {} } },
+    MutationObserver: class { observe() {} disconnect() {} },
+    ResizeObserver: class { observe() {} disconnect() {} },
+    IntersectionObserver: class { observe() {} disconnect() {} },
+    getComputedStyle: () => ({ color: 'rgb(255, 255, 255)', getPropertyValue: () => '' }),
+    location: mockLocation,
+    document: {
+      documentElement: {
+        clientWidth: 320,
+        clientHeight: 600,
+        appendChild: () => {},
+        getAttribute: () => null,
+        hasAttribute: () => false,
+        removeAttribute: () => {},
+        setAttribute: () => {},
+        style: {}
+      },
+      hidden: false,
+      visibilityState: 'visible',
+      getElementById: getEl,
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      addEventListener: (t, fn) => {
+        if (!docListeners.has(t)) docListeners.set(t, []);
+        docListeners.get(t).push(fn);
+      },
+      createElement: () => makeEl('')
+    },
+    window: null,
+    fetch: async (urlStr) => {
+      const u = new URL(urlStr, 'http://127.0.0.1');
+      if (u.pathname === '/api/workspace') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, roots: [{ path: wsRoot, name: 'mock-ws' }], primaryRoot: wsRoot, showHidden: false })
+        };
+      }
+      if (u.pathname === '/api/shortcut') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, settings: { hotkeyPreset: 'cmd+shift+e', auxShortcut: {} }, presets: [] })
+        };
+      }
+      if (u.pathname === '/api/mentions') {
+        return { ok: true, status: 200, json: async () => ({ ok: true, mentions: [] }) };
+      }
+      if (u.pathname === '/api/tree') {
+        const dir = u.searchParams.get('dir') || '';
+        treeFetches.push(dir);
+        const items = (treeData.get(dir) || []).map((entry) => ({ ...entry }));
+        return { ok: true, status: 200, json: async () => ({ ok: true, items }) };
+      }
+      if (u.pathname === '/api/resolve') {
+        const p = u.searchParams.get('path') || '';
+        const name = p.split('/').pop();
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            exists: true,
+            absPath: p,
+            rootPath: wsRoot,
+            rootName: 'mock-ws',
+            relPath: `src/${name}`,
+            isDirectory: false,
+            ancestorRelDirs: ['src'],
+            fileUri: `file://${p}`
+          })
+        };
+      }
+      if (u.pathname === '/api/search') {
+        if (searchMode === 'error') {
+          return { ok: false, status: 500, json: async () => ({ ok: false, error: 'Simulated search failure' }) };
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            truncated: searchMode === 'truncated',
+            results: [{
+              name: 'needle.js',
+              relPath: 'src/needle.js',
+              absPath: `${wsRoot}/src/needle.js`,
+              fileUri: `file://${wsRoot}/src/needle.js`,
+              isDirectory: false
+            }]
+          })
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    }
+  };
+  sandbox.window = {
+    location: mockLocation,
+    history: { replaceState: () => {} },
+    matchMedia: () => ({ matches: false, addEventListener: () => {} }),
+    getComputedStyle: () => ({ color: 'rgb(255, 255, 255)', getPropertyValue: () => '' }),
+    addEventListener: (t, fn) => {
+      if (!winListeners.has(t)) winListeners.set(t, []);
+      winListeners.get(t).push(fn);
+    },
+    parent: null,
+    self: null,
+    top: null
+  };
+  sandbox.window.self = sandbox.window;
+  sandbox.window.top = sandbox.window;
+  sandbox.window.fetch = sandbox.fetch;
+  sandbox.globalThis = sandbox;
+
+  vm.runInNewContext(appCode, sandbox, { filename: 'app.js' });
+  await new Promise((r) => setTimeout(r, 40));
+
+  const container = getEl('tree-content');
+  assert.ok(container.innerHTML.includes('alpha.js'), 'Initial deep link reveal must render alpha.js');
+
+  // R3 check 1: mutate already-cached expanded `src` dir, then reveal newly created `beta.js`
+  const fetchesBeforeSecondReveal = treeFetches.length;
+  treeData.get('src').push({
+    name: 'beta.js',
+    relPath: 'src/beta.js',
+    absPath: `${wsRoot}/src/beta.js`,
+    fileUri: `file://${wsRoot}/src/beta.js`,
+    isDirectory: false
+  });
+  mockLocation.search = `?path=${encodeURIComponent(`${wsRoot}/src/beta.js`)}`;
+  mockLocation.href = `http://127.0.0.1/${mockLocation.search}`;
+  const deepLinkInterval = intervalCbs.find((c) => c.ms === 350);
+  assert.ok(deepLinkInterval, '350ms deep-link watcher must be registered');
+  deepLinkInterval.fn();
+  await new Promise((r) => setTimeout(r, 40));
+
+  assert.ok(
+    treeFetches.slice(fetchesBeforeSecondReveal).includes('src'),
+    'revealPathInTree must force-refresh already-cached ancestor dir src (R3)'
+  );
+  assert.ok(container.innerHTML.includes('beta.js'), 'Tree UI must show newly created beta.js after reveal');
+
+  // UX #1 check: visible expanded directory auto-sync picks up externally added `gamma.js`
+  treeData.get('src').push({
+    name: 'gamma.js',
+    relPath: 'src/gamma.js',
+    absPath: `${wsRoot}/src/gamma.js`,
+    fileUri: `file://${wsRoot}/src/gamma.js`,
+    isDirectory: false
+  });
+  const syncInterval = intervalCbs.find((c) => c.ms === 3500);
+  assert.ok(syncInterval, '3500ms visible expanded-dir sync interval must be registered');
+  await syncInterval.fn();
+  await new Promise((r) => setTimeout(r, 25));
+  assert.ok(container.innerHTML.includes('gamma.js'), 'Visible auto-sync must render newly added gamma.js');
+
+  // UX #3 check: search loading / truncated banner / error banner
+  const searchInput = getEl('search-input');
+  searchInput.value = 'needle';
+  searchInput.dispatch('input', { target: searchInput });
+  assert.ok(container.innerHTML.includes('搜索中'), 'Search input must immediately show loading state');
+  await new Promise((r) => setTimeout(r, 220));
+  assert.ok(container.innerHTML.includes('af-search-note'), 'Truncated search result must display truncation note');
+  assert.ok(container.innerHTML.includes('needle.js'), 'Search result must render matched item');
+
+  searchMode = 'error';
+  searchInput.value = 'errquery';
+  searchInput.dispatch('input', { target: searchInput });
+  await new Promise((r) => setTimeout(r, 220));
+  assert.ok(container.innerHTML.includes('af-search-error'), 'Failed search request must display error banner');
+
+  pass('VM behavioral checks: R3 reveal cache refresh, UX #1 visible sync, and UX #3 search states');
+}
+
 async function main() {
   verifyManifestAndAssets();
   verifySyntax();
@@ -635,6 +982,8 @@ async function main() {
   verifyShortcutAndCli();
   await verifyStandaloneHttp();
   verifyInstaller();
+  verifyPathResolutionAndSymlinkSearch();
+  await verifyFinderFrontendBehavior();
   console.log('\nAll agy-finder verification checks passed.');
 }
 

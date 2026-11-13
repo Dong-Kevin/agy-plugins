@@ -6,18 +6,21 @@
  */
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
-  statSync
+  statSync,
+  utimesSync,
+  writeFileSync
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, extname, join, relative, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -286,20 +289,137 @@ function verifyRootInstaller() {
     assert.ok(!existsSync(join(tempBin, 'agy-finder')));
     assert.ok(!existsSync(join(tempBin, 'agy-context')));
 
-    pass('Unified root install.sh (--list, selective install, alias match & --uninstall)');
+    // R6: isolated AGY_PLUGINS_DIR install & uninstall WITHOUT AGY_BIN_DIR must preserve existing $HOME/.local/bin CLI tools
+    const fakeHome = mkdtempSync(join(tmpdir(), 'agy-plugins-fakehome-'));
+    const isolatedPlugins = mkdtempSync(join(tmpdir(), 'agy-plugins-iso-'));
+    const fakeBinDir = join(fakeHome, '.local', 'bin');
+    const sentinelFinder = join(fakeBinDir, 'agy-finder');
+    const sentinelContext = join(fakeBinDir, 'agy-context');
+    try {
+      mkdirSync(fakeBinDir, { recursive: true });
+      writeFileSync(sentinelFinder, '#!/usr/bin/env bash\necho SENTINEL_FINDER\n');
+      writeFileSync(sentinelContext, '#!/usr/bin/env bash\necho SENTINEL_CONTEXT\n');
+
+      const isoEnv = {
+        ...process.env,
+        HOME: fakeHome,
+        AGY_PLUGINS_DIR: isolatedPlugins,
+        ANTIGRAVITY_PLUGINS_DIR: isolatedPlugins
+      };
+      delete isoEnv.AGY_BIN_DIR;
+      delete isoEnv.ANTIGRAVITY_BIN_DIR;
+
+      execFileSync('bash', [join(ROOT, 'install.sh')], { cwd: ROOT, env: isoEnv, stdio: 'pipe' });
+      assert.equal(readFileSync(sentinelFinder, 'utf-8'), '#!/usr/bin/env bash\necho SENTINEL_FINDER\n');
+      assert.equal(readFileSync(sentinelContext, 'utf-8'), '#!/usr/bin/env bash\necho SENTINEL_CONTEXT\n');
+
+      execFileSync('bash', [join(ROOT, 'install.sh'), '--uninstall'], { cwd: ROOT, env: isoEnv, stdio: 'pipe' });
+      assert.ok(existsSync(sentinelFinder), 'Isolated uninstall must preserve existing HOME agy-finder CLI');
+      assert.ok(existsSync(sentinelContext), 'Isolated uninstall must preserve existing HOME agy-context CLI');
+      assert.equal(readFileSync(sentinelFinder, 'utf-8'), '#!/usr/bin/env bash\necho SENTINEL_FINDER\n');
+      assert.equal(readFileSync(sentinelContext, 'utf-8'), '#!/usr/bin/env bash\necho SENTINEL_CONTEXT\n');
+    } finally {
+      rmSync(fakeHome, { recursive: true, force: true });
+      rmSync(isolatedPlugins, { recursive: true, force: true });
+    }
+
+    pass('Unified root install.sh (--list, selective install, R6 isolated HOME bin safety & --uninstall)');
   } finally {
     rmSync(tempPlugins, { recursive: true, force: true });
     rmSync(tempBin, { recursive: true, force: true });
   }
 }
 
-function main() {
+async function verifyCrossPluginAuxTriggerLock() {
+  const auxDir = mkdtempSync(join(tmpdir(), 'agy-plugins-auxlock-'));
+  const triggerPath = join(auxDir, 'agy_aux_pane_trigger.json');
+  const finderModUrl = pathToFileURL(join(ROOT, 'plugins', 'agy-finder', 'sidecars', 'tree', 'drawer.mjs')).href;
+  const cvModUrl = pathToFileURL(join(ROOT, 'plugins', 'agy-context-viewer', 'sidecars', 'dashboard', 'collector.mjs')).href;
+
+  const spawnWorker = (workerScript, extraEnv = {}) =>
+    new Promise((resolvePromise, rejectPromise) => {
+      const child = spawn(process.execPath, ['--input-type=module', '-e', workerScript], {
+        env: { ...process.env, AGY_AUX_TRIGGER_PATH: triggerPath, ...extraEnv },
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      let out = '';
+      let err = '';
+      child.stdout.on('data', (d) => { out += d.toString('utf8'); });
+      child.stderr.on('data', (d) => { err += d.toString('utf8'); });
+      child.on('exit', (code) => {
+        if (code !== 0) rejectPromise(new Error(`Worker exited ${code}: ${err || out}`));
+        else resolvePromise(out.trim());
+      });
+    });
+
+  try {
+    // 1. 8 concurrent processes (4 agy-finder + 4 context-viewer) performing 5 trigger writes each (= 40 increments)
+    const writeJobs = [];
+    for (let i = 0; i < 8; i++) {
+      const modUrl = i < 4 ? finderModUrl : cvModUrl;
+      const pluginName = i < 4 ? 'agy-finder' : 'context-viewer';
+      const code = `
+        import { writeAuxPaneTrigger } from ${JSON.stringify(modUrl)};
+        for (let k = 0; k < 5; k++) {
+          writeAuxPaneTrigger({ targetPlugin: ${JSON.stringify(pluginName)}, action: 'open', convId: 'conv-' + ${i} + '-' + k });
+        }
+      `;
+      writeJobs.push(spawnWorker(code));
+    }
+    await Promise.all(writeJobs);
+
+    const afterWrites = JSON.parse(readFileSync(triggerPath, 'utf-8'));
+    assert.equal(afterWrites.seq, 40, `Expected seq=40 after 8x5 locked increments, got ${afterWrites.seq}`);
+    assert.ok(!existsSync(`${triggerPath}.lock`), 'Trigger lock file must be released after writes');
+
+    // 2. 8 concurrent processes race to claim openingSeq and ackSeq on seq=40 (only 1 winner per claim)
+    const claimJobs = [];
+    for (let i = 0; i < 8; i++) {
+      const modUrl = i < 4 ? finderModUrl : cvModUrl;
+      const pluginName = i < 4 ? 'agy-finder' : 'context-viewer';
+      const code = `
+        import { markAuxPaneOpening, ackAuxPaneTrigger } from ${JSON.stringify(modUrl)};
+        const openRes = markAuxPaneOpening({ seq: 40 });
+        const ackRes = ackAuxPaneTrigger({ seq: 40, plugin: ${JSON.stringify(pluginName)} });
+        console.log(JSON.stringify({ openClaimed: Boolean(openRes.claimed), ackClaimed: Boolean(ackRes.claimed) }));
+      `;
+      claimJobs.push(spawnWorker(code));
+    }
+    const claimResults = (await Promise.all(claimJobs)).map((line) => JSON.parse(line));
+    const openWinners = claimResults.filter((r) => r.openClaimed).length;
+    const ackWinners = claimResults.filter((r) => r.ackClaimed).length;
+    assert.equal(openWinners, 1, `Expected exactly 1 markAuxPaneOpening winner, got ${openWinners}`);
+    assert.equal(ackWinners, 1, `Expected exactly 1 ackAuxPaneTrigger winner, got ${ackWinners}`);
+
+    // 3. Stale dead-PID lock recovery
+    const lockPath = `${triggerPath}.lock`;
+    writeFileSync(lockPath, `999999:${Date.now() - 20000}:deadtoken`);
+    const staleDate = new Date(Date.now() - 10000);
+    utimesSync(lockPath, staleDate, staleDate);
+
+    await spawnWorker(`
+      import { writeAuxPaneTrigger } from ${JSON.stringify(cvModUrl)};
+      const next = writeAuxPaneTrigger({ targetPlugin: 'context-viewer', action: 'toggle' });
+      if (next.seq !== 41) throw new Error('Expected seq=41 after stale lock recovery, got ' + next.seq);
+    `);
+    const finalTrigger = JSON.parse(readFileSync(triggerPath, 'utf-8'));
+    assert.equal(finalTrigger.seq, 41, 'Stale dead-PID lock must be recovered cleanly');
+    assert.ok(!existsSync(lockPath), 'Lock file must not linger after stale recovery');
+
+    pass('R1 cross-plugin 8-process Aux trigger lock integrity & stale lock recovery');
+  } finally {
+    rmSync(auxDir, { recursive: true, force: true });
+  }
+}
+
+async function main() {
   const allFiles = walkFiles(ROOT);
   verifyRootStructureAndSyntax(allFiles);
   const pluginDirs = verifyPluginCatalog();
   verifyPrivacyPngAndGitIdentity(allFiles);
   verifyIndividualPlugins(pluginDirs);
   verifyRootInstaller();
+  await verifyCrossPluginAuxTriggerLock();
   console.log('\nAll agy-plugins repository checks passed.');
 }
 

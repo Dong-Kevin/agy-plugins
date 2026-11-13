@@ -15,7 +15,8 @@ PLUGIN_DIR_NAME="context-viewer"
 ORIG_PLUGINS_DIR="${ANTIGRAVITY_PLUGINS_DIR:-${AGY_PLUGINS_DIR:-}}"
 PLUGINS_ROOT="${ORIG_PLUGINS_DIR:-${HOME}/.gemini/config/plugins}"
 TARGET_DIR="${PLUGINS_ROOT}/${PLUGIN_DIR_NAME}"
-BIN_DIR="${ANTIGRAVITY_BIN_DIR:-${AGY_BIN_DIR:-${HOME}/.local/bin}}"
+ORIG_BIN_DIR="${ANTIGRAVITY_BIN_DIR:-${AGY_BIN_DIR:-}}"
+BIN_DIR="${ORIG_BIN_DIR:-${HOME}/.local/bin}"
 CLI_WRAPPER="${BIN_DIR}/agy-context"
 REPO_SLUG="${REPO:-Dong-Kevin/agy-plugins}"
 GIT_REF="${REF:-main}"
@@ -29,15 +30,24 @@ if [[ "${1:-}" == "--uninstall" || "${1:-}" == "uninstall" ]]; then
   if [[ -z "${ORIG_PLUGINS_DIR}" && -f "${TARGET_DIR}/sidecars/dashboard/cli.mjs" ]]; then
     node "${TARGET_DIR}/sidecars/dashboard/cli.mjs" float quit >/dev/null 2>&1 || true
   fi
+  if [[ -n "${ORIG_BIN_DIR}" || -z "${ORIG_PLUGINS_DIR}" ]] && [[ -L "${CLI_WRAPPER}" || -f "${CLI_WRAPPER}" ]]; then
+    SHOULD_REMOVE_WRAPPER=false
+    if [[ -L "${CLI_WRAPPER}" ]]; then
+      LINK_TARGET="$(readlink "${CLI_WRAPPER}" || true)"
+      [[ "${LINK_TARGET}" == "${TARGET_DIR}"* ]] && SHOULD_REMOVE_WRAPPER=true
+    elif grep -Fq "${TARGET_DIR}/sidecars/dashboard/cli.mjs" "${CLI_WRAPPER}" 2>/dev/null; then
+      SHOULD_REMOVE_WRAPPER=true
+    fi
+    if [[ "${SHOULD_REMOVE_WRAPPER}" == true ]]; then
+      rm -f "${CLI_WRAPPER}"
+      ok "已移除命令行入口：${CLI_WRAPPER}"
+    fi
+  fi
   if [[ -d "${TARGET_DIR}" ]]; then
     rm -rf "${TARGET_DIR}"
     ok "已移除插件目录：${TARGET_DIR}"
   else
     info "未检测到已安装目录：${TARGET_DIR}"
-  fi
-  if [[ -L "${CLI_WRAPPER}" || -f "${CLI_WRAPPER}" ]]; then
-    rm -f "${CLI_WRAPPER}"
-    ok "已移除命令行入口：${CLI_WRAPPER}"
   fi
   info "用户本地会话归档与统计偏好设置已安全保留，未做删除。"
   exit 0
@@ -147,13 +157,15 @@ if [[ -z "${ORIG_PLUGINS_DIR}" ]]; then
   fi
 fi
 
-# 4. Install `agy-context` CLI wrapper into ~/.local/bin for terminal / agy CLI users
-mkdir -p "${BIN_DIR}"
-cat > "${CLI_WRAPPER}" <<EOF
+# 4. Install `agy-context` CLI wrapper into ~/.local/bin (skip when isolated plugins dir is used without explicit BIN_DIR)
+if [[ -n "${ORIG_BIN_DIR}" || -z "${ORIG_PLUGINS_DIR}" ]]; then
+  mkdir -p "${BIN_DIR}"
+  cat > "${CLI_WRAPPER}" <<EOF
 #!/usr/bin/env bash
 exec node "${TARGET_DIR}/sidecars/dashboard/cli.mjs" "\$@"
 EOF
-chmod +x "${CLI_WRAPPER}"
+  chmod +x "${CLI_WRAPPER}"
+fi
 
 # 5. If `agy` CLI is installed, enable plugin via official CLI (never hand-edit config.json)
 if [[ -z "${ORIG_PLUGINS_DIR}" ]] && command -v agy >/dev/null 2>&1; then

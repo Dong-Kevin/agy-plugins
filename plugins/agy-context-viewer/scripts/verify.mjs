@@ -2739,6 +2739,26 @@ async function main() {
       'dashboard/app.js 缺少 IntersectionObserver 真可见性检测、holdMs 无节流唤醒或防假阳性保护'
     );
 
+    // Verify Hero Card Quota promotion & collapsible cumulative block in index.html
+    const cvHtmlSource = readFileSync(join(ROOT, 'sidecars', 'dashboard', 'index.html'), 'utf-8');
+    const heroCardMatch = cvHtmlSource.match(/id="panel-context"[\s\S]*?<article class="card hero-card">([\s\S]*?)<\/article>/);
+    assert(heroCardMatch, '未找到 #panel-context 首个 Hero 卡片');
+    const heroHtml = heroCardMatch[1];
+    assert(
+      heroHtml.includes('id="ctx-quota-box"') &&
+        heroHtml.includes('id="cum-collapse-body"') &&
+        heroHtml.indexOf('id="ctx-quota-box"') < heroHtml.indexOf('id="ctx-takeaway"') &&
+        heroHtml.indexOf('id="ctx-takeaway"') < heroHtml.indexOf('id="cum-collapse-body"'),
+      'Hero 卡片应将 #ctx-quota-box 提升至首屏，并将 #cum-collapse-body 默认折叠后置于 takeaway 之后'
+    );
+    assert(
+      (cvHtmlSource.match(/id="ctx-quota-box"/g) || []).length === 1,
+      '#ctx-quota-box 在 index.html 中应仅出现一次（已从 Card 2 迁移至 Hero Card）'
+    );
+
+    // Real VM behavioral test for R4 (out-of-order conversation switches & per-conversation ETag) and UX #2 (collapsible summary & toggle)
+    await verifyDashboardFrontendBehavior(cvAppSource);
+
     // macOS Swift native host typecheck
     if (process.platform === 'darwin' && existsSync('/usr/bin/swiftc')) {
       execFileSync('/usr/bin/swiftc', ['-typecheck', join(ROOT, 'sidecars', 'dashboard', 'native_float_macos.swift')], {
@@ -2755,6 +2775,313 @@ async function main() {
   }
 
   console.log(`[verify] 全部校验通过！当前版本：v${manifest.version}（共检查 ${allFiles.length} 个源码文件）`);
+}
+
+async function verifyDashboardFrontendBehavior(appSource) {
+  const makeEl = (id = '', initClasses = []) => {
+    const classes = new Set(initClasses);
+    const attrs = new Map();
+    const listeners = new Map();
+    return {
+      id,
+      value: '',
+      textContent: '',
+      innerHTML: '',
+      scrollTop: 0,
+      dataset: {},
+      style: {},
+      className: '',
+      classList: {
+        add: (...names) => names.forEach((n) => classes.add(n)),
+        remove: (...names) => names.forEach((n) => classes.delete(n)),
+        toggle: (n, force) => {
+          const on = force === undefined ? !classes.has(n) : Boolean(force);
+          if (on) classes.add(n);
+          else classes.delete(n);
+          return on;
+        },
+        contains: (n) => classes.has(n)
+      },
+      addEventListener: (type, fn) => {
+        if (!listeners.has(type)) listeners.set(type, []);
+        listeners.get(type).push(fn);
+      },
+      dispatch: (type, ev = {}) => {
+        for (const fn of listeners.get(type) || []) {
+          fn({ target: ev.target || {}, ...ev });
+        }
+      },
+      setAttribute: (k, v) => attrs.set(k, String(v)),
+      getAttribute: (k) => (attrs.has(k) ? attrs.get(k) : null),
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      remove: () => {}
+    };
+  };
+
+  const els = new Map();
+  const getEl = (id) => {
+    if (!els.has(id)) els.set(id, makeEl(id));
+    return els.get(id);
+  };
+
+  const cumBody = makeEl('cum-collapse-body', ['cum-collapse-body', 'hidden']);
+  els.set('cum-collapse-body', cumBody);
+  const cumTrigger = makeEl('cum-collapse-trigger-btn', ['collapse-trigger', 'cum-collapse-trigger']);
+  cumTrigger.dataset.toggle = 'cum-collapse-body';
+  cumTrigger.setAttribute('aria-expanded', 'false');
+
+  const convSelect = getEl('conv-select');
+  const followBtn = getEl('btn-follow-current');
+  const takeaway = getEl('ctx-takeaway');
+  const cumSummaryChip = getEl('cum-summary-chip');
+
+  const convA = ['11111111', '2222', '3333', '4444', '555555555501'].join('-');
+  const convB = ['11111111', '2222', '3333', '4444', '555555555502'].join('-');
+  const convC = ['11111111', '2222', '3333', '4444', '555555555503'].join('-');
+
+  const mkSnap = (convId, title, etag, totalTok = 1200, cost = 0.12) => ({
+    ok: true,
+    etag,
+    conversationId: convId,
+    conversationTitle: title,
+    source: 'desktop',
+    modelName: 'gemini-3.1-pro',
+    recentConversations: [
+      { id: convA, title: 'Alpha', source: 'desktop' },
+      { id: convB, title: 'Bravo', source: 'desktop' },
+      { id: convC, title: 'Charlie', source: 'desktop' }
+    ],
+    window: { used: 1000, budget: 10000, remaining: 9000, pct: 10, serverBudget: 10000, serverPct: 10 },
+    context: {
+      usedTokens: 1000,
+      budgetTokens: 10000,
+      inputTokens: 400,
+      cacheTokens: 600,
+      outputTokens: 200,
+      cacheHitPercent: 60,
+      roundCostUSD: 0.02,
+      sessionCostUSD: cost,
+      isPriced: true,
+      sessionTotals: {
+        cacheTokens: 600,
+        inputTokens: 400,
+        outputTokens: 200,
+        thinkingTokens: 50,
+        totalTokens: totalTok,
+        cacheHitPercent: 60
+      },
+      error: { kind: 'none' },
+      breakdown: { groups: [] }
+    },
+    speed: { tps: 45, durationSec: 2.1, ttftSec: 0.3, outputTokens: 200 },
+    audit: { groups: {} },
+    quotaStatus: {
+      active: { label: 'Pro 5h', remainingPercent: 85 },
+      pools: [{ label: 'Pro 5h', remainingPercent: 85 }]
+    },
+    sparkline: [],
+    turns: []
+  });
+
+  let resolveSlowB = null;
+  let holdNextB = false;
+  const seenContextQueries = [];
+  const intervalCbs = [];
+  const sessionMap = new Map();
+  const localMap = new Map();
+  const rootAttrs = new Map();
+  const rootStyles = new Map();
+
+  const sandbox = {
+    console,
+    Date,
+    Math,
+    JSON,
+    URL,
+    URLSearchParams,
+    Set,
+    Map,
+    Array,
+    Object,
+    String,
+    Number,
+    Boolean,
+    Promise,
+    Error,
+    NodeFilter: { SHOW_TEXT: 4 },
+    MutationObserver: class { observe() {} disconnect() {} },
+    ResizeObserver: class { observe() {} disconnect() {} },
+    IntersectionObserver: class { observe() {} disconnect() {} },
+    getComputedStyle: () => ({ color: 'rgb(255, 255, 255)', getPropertyValue: () => '' }),
+    setTimeout,
+    clearTimeout,
+    clearInterval,
+    setInterval: (fn, ms) => {
+      intervalCbs.push({ fn, ms });
+      return intervalCbs.length;
+    },
+    requestAnimationFrame: (fn) => { fn(); return 1; },
+    localStorage: {
+      getItem: (k) => (localMap.has(k) ? localMap.get(k) : null),
+      setItem: (k, v) => localMap.set(k, String(v))
+    },
+    sessionStorage: {
+      getItem: (k) => (sessionMap.has(k) ? sessionMap.get(k) : null),
+      setItem: (k, v) => sessionMap.set(k, String(v))
+    },
+    navigator: { platform: 'MacIntel', userAgent: 'Mozilla/5.0' },
+    document: {
+      readyState: 'complete',
+      hidden: false,
+      visibilityState: 'visible',
+      documentElement: {
+        clientWidth: 340,
+        clientHeight: 700,
+        dataset: {},
+        appendChild: () => {},
+        style: {
+          getPropertyValue: (k) => rootStyles.get(k) || '',
+          setProperty: (k, v) => rootStyles.set(k, String(v)),
+          removeProperty: (k) => rootStyles.delete(k)
+        },
+        getAttribute: (k) => (rootAttrs.has(k) ? rootAttrs.get(k) : null),
+        setAttribute: (k, v) => rootAttrs.set(k, String(v)),
+        hasAttribute: (k) => rootAttrs.has(k),
+        removeAttribute: (k) => rootAttrs.delete(k)
+      },
+      head: { appendChild: () => {} },
+      body: makeEl('body'),
+      getElementById: getEl,
+      querySelector: () => null,
+      querySelectorAll: (sel) => (sel === '.collapse-trigger' ? [cumTrigger] : []),
+      createTreeWalker: () => ({ nextNode: () => false, currentNode: null }),
+      addEventListener: () => {},
+      createElement: () => makeEl('')
+    },
+    window: null,
+    fetch: async (urlStr) => {
+      const u = new URL(urlStr, 'http://127.0.0.1');
+      if (u.pathname === '/api/settings') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            settings: {},
+            uiPreferences: { themeMode: 'auto', preset: 'violet', budgetOverride: 0 },
+            shortcut: {},
+            auxShortcut: {},
+            menubar: { supported: false, enabled: false }
+          })
+        };
+      }
+      if (u.pathname === '/api/history') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            etag: 'hist-1',
+            presets: [],
+            totals: { totalTokens: 1200 },
+            daily: [],
+            models: [],
+            plans: []
+          })
+        };
+      }
+      if (u.pathname === '/api/float-window' || u.pathname === '/api/entrypoints' || u.pathname === '/api/aux-pane-trigger') {
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+      if (u.pathname === '/api/context') {
+        const qConv = u.searchParams.get('conversationId') || convA;
+        const qEtag = u.searchParams.get('etag') || '';
+        seenContextQueries.push({ convId: qConv, etag: qEtag, force: u.searchParams.get('force') === '1' });
+        if (qConv === convB && holdNextB) {
+          holdNextB = false;
+          const payload = await new Promise((r) => { resolveSlowB = r; });
+          return { ok: true, status: 200, json: async () => payload };
+        }
+        const map = {
+          [convA]: mkSnap(convA, 'Alpha', 'etag-a', 1200, 0.12),
+          [convB]: mkSnap(convB, 'Bravo', 'etag-b', 2400, 0.24),
+          [convC]: mkSnap(convC, 'Charlie', 'etag-c', 3600, 0.36)
+        };
+        const snap = map[qConv] || mkSnap(convA, 'Alpha', 'etag-a', 1200, 0.12);
+        if (qEtag && qEtag === snap.etag) {
+          return { ok: true, status: 200, json: async () => ({ ok: true, unchanged: true, etag: snap.etag }) };
+        }
+        return { ok: true, status: 200, json: async () => snap };
+      }
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    }
+  };
+  sandbox.window = {
+    location: { origin: 'http://127.0.0.1', href: 'http://127.0.0.1/' },
+    matchMedia: () => ({ matches: false, addEventListener: () => {} }),
+    getComputedStyle: () => ({ color: 'rgb(255, 255, 255)', getPropertyValue: () => '' }),
+    addEventListener: () => {},
+    sidecar: { conversationId: convA },
+    self: null,
+    top: null,
+    fetch: sandbox.fetch
+  };
+  sandbox.location = sandbox.window.location;
+  sandbox.window.self = sandbox.window;
+  sandbox.window.top = sandbox.window;
+  sandbox.globalThis = sandbox;
+
+  runInNewContext(appSource, sandbox, { filename: 'dashboard-app.js' });
+  await new Promise((r) => setTimeout(r, 40));
+
+  assert(takeaway.textContent.includes('Alpha'), `初始渲染应显示 Alpha，实际：${takeaway.textContent}`);
+  assert(
+    cumSummaryChip.textContent.includes('1.20K') && cumSummaryChip.textContent.includes('$0.12'),
+    `折叠摘要胶囊应显示累计 1.20K 与 $0.12，实际：${cumSummaryChip.textContent}`
+  );
+
+  // Verify UX #2 collapsible toggle works via real wired click handler
+  assert(cumBody.classList.contains('hidden'), '累计吞吐默认应处于折叠状态');
+  cumTrigger.dispatch('click', { target: cumTrigger });
+  assert(!cumBody.classList.contains('hidden') && cumTrigger.getAttribute('aria-expanded') === 'true', '点击折叠标题后应展开累计区块');
+
+  // Verify R4: start slow switch to convB, immediately switch to convC, then resolve stale convB
+  holdNextB = true;
+  convSelect.value = convB;
+  convSelect.dispatch('change', { target: convSelect });
+  await new Promise((r) => setTimeout(r, 10));
+  assert(typeof resolveSlowB === 'function', '慢请求 B 应已发出并挂起');
+
+  convSelect.value = convC;
+  convSelect.dispatch('change', { target: convSelect });
+  await new Promise((r) => setTimeout(r, 30));
+  assert(takeaway.textContent.includes('Charlie'), `快速切换后应显示最新对话 Charlie，实际：${takeaway.textContent}`);
+
+  // Resolve slow stale convB AFTER convC is active
+  resolveSlowB(mkSnap(convB, 'Bravo', 'etag-b', 2400, 0.24));
+  await new Promise((r) => setTimeout(r, 30));
+  assert(
+    takeaway.textContent.includes('Charlie') && !takeaway.textContent.includes('Bravo'),
+    `滞后返回的历史对话 B 不得覆盖当前 Charlie，实际：${takeaway.textContent}`
+  );
+
+  // Trigger 1500ms ETag poll and verify it sends Charlie's etag-c (never stale etag-b)
+  const pollInterval = intervalCbs.find((c) => c.ms === 1500);
+  assert(pollInterval, '应注册 1500ms context 轮询定时器');
+  const queryStart = seenContextQueries.length;
+  pollInterval.fn();
+  await new Promise((r) => setTimeout(r, 20));
+  const pollReq = seenContextQueries.slice(queryStart).pop();
+  assert(
+    pollReq && pollReq.convId === convC && pollReq.etag === 'etag-c',
+    `轮询必须携带当前对话 convC 的 etag-c，实际：${JSON.stringify(pollReq)}`
+  );
+
+  // Switch back to follow-current and verify reset to host convA
+  followBtn.dispatch('click', { target: followBtn });
+  await new Promise((r) => setTimeout(r, 30));
+  assert(takeaway.textContent.includes('Alpha'), `点击跟随当前后应回到宿主对话 Alpha，实际：${takeaway.textContent}`);
 }
 
 main().catch((err) => {

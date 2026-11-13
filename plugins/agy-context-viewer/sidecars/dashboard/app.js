@@ -49,7 +49,12 @@
     hostConvId: window.sidecar?.conversationId || '',
     workspaceUri: '',
     contextEtag: '',
+    contextEtagConv: '',
+    contextReqSeq: 0,
+    contextInFlight: false,
     historyEtag: '',
+    historyReqSeq: 0,
+    historyInFlight: false,
     contextData: null,
     historyData: null,
     settingsData: null,
@@ -417,48 +422,82 @@
   }
 
   async function loadContext(force = false) {
+    if (!force && state.contextInFlight) return;
     const liveHostId = window.sidecar?.conversationId || state.hostConvId || '';
     if (liveHostId && liveHostId !== state.hostConvId) {
       state.hostConvId = liveHostId;
-      if (!state.selectedConvId) state.contextEtag = '';
+      if (!state.selectedConvId) {
+        state.contextEtag = '';
+        state.contextEtagConv = '';
+      }
     }
     const targetConv = state.selectedConvId || state.hostConvId || '';
+    if (state.contextEtagConv !== targetConv) {
+      state.contextEtag = '';
+      state.contextEtagConv = targetConv;
+    }
+
+    const reqSeq = ++state.contextReqSeq;
+    state.contextInFlight = true;
     const qs = new URLSearchParams();
     if (targetConv) qs.set('conversationId', targetConv);
     if (force) qs.set('force', '1');
     else if (state.contextEtag) qs.set('etag', state.contextEtag);
 
-    const snap = await apiFetch(`/api/context?${qs.toString()}`);
-    if (snap?.recentConversations) {
-      renderConversationPicker(snap.recentConversations, snap.conversationId);
-    }
-    if (snap?.unchanged && state.contextData) {
-      return;
-    }
-    if (snap?.ok) {
-      state.contextEtag = snap.etag || '';
-      state.contextData = snap;
-      renderContextPanel(snap);
-      renderTopCapsules();
+    try {
+      const snap = await apiFetch(`/api/context?${qs.toString()}`);
+      const activeTarget = state.selectedConvId || state.hostConvId || '';
+      if (reqSeq !== state.contextReqSeq || targetConv !== activeTarget) {
+        return;
+      }
+      if (snap?.recentConversations) {
+        renderConversationPicker(snap.recentConversations, snap.conversationId);
+      }
+      if (snap?.unchanged && state.contextData && (!targetConv || state.contextData.conversationId === targetConv)) {
+        return;
+      }
+      if (snap?.ok) {
+        state.contextEtag = snap.etag || '';
+        state.contextEtagConv = targetConv;
+        state.contextData = snap;
+        renderContextPanel(snap);
+        renderTopCapsules();
+      }
+    } finally {
+      if (reqSeq === state.contextReqSeq) {
+        state.contextInFlight = false;
+      }
     }
   }
 
   async function loadHistory(force = false) {
+    if (!force && state.historyInFlight) return;
+    const reqSeq = ++state.historyReqSeq;
+    state.historyInFlight = true;
     const qs = new URLSearchParams();
     if (force) qs.set('force', '1');
     else if (state.historyEtag) qs.set('etag', state.historyEtag);
 
-    const hist = await apiFetch(`/api/history?${qs.toString()}`);
-    if (hist?.unchanged && state.historyData) {
-      return;
-    }
-    if (hist?.ok) {
-      state.historyEtag = hist.etag || '';
-      state.historyData = hist;
-      populatePlanPresetsIfNeeded(hist.presets);
-      renderHistoryPanel(hist);
-      renderCostPanel(hist);
-      renderTopCapsules();
+    try {
+      const hist = await apiFetch(`/api/history?${qs.toString()}`);
+      if (reqSeq !== state.historyReqSeq) {
+        return;
+      }
+      if (hist?.unchanged && state.historyData) {
+        return;
+      }
+      if (hist?.ok) {
+        state.historyEtag = hist.etag || '';
+        state.historyData = hist;
+        populatePlanPresetsIfNeeded(hist.presets);
+        renderHistoryPanel(hist);
+        renderCostPanel(hist);
+        renderTopCapsules();
+      }
+    } finally {
+      if (reqSeq === state.historyReqSeq) {
+        state.historyInFlight = false;
+      }
     }
   }
 
@@ -825,6 +864,13 @@
     setText(
       'ctx-session-cost',
       ctx.sessionCostUSD > 0 ? `${fmtUSD(ctx.sessionCostUSD)}（约 ${fmtCNY(ctx.sessionCostUSD)}）` : '$0.00'
+    );
+    const cumSummaryCost = ctx.sessionCostUSD > 0 ? fmtUSD(ctx.sessionCostUSD) : '$0.00';
+    setText(
+      'cum-summary-chip',
+      st.totalTokens > 0
+        ? `累计 ${fmtTokens(st.totalTokens, 1)} · ${cumSummaryCost}`
+        : `累计 -- · ${cumSummaryCost}`
     );
 
     // Card 2: Speed & Latency
@@ -2137,6 +2183,8 @@
     $('conv-select')?.addEventListener('change', (e) => {
       state.selectedConvId = e.target.value || '';
       state.contextEtag = '';
+      state.contextEtagConv = state.selectedConvId || state.hostConvId || '';
+      state.contextInFlight = false;
       $('btn-follow-current')?.classList.toggle('hidden', !state.selectedConvId);
       apiFetch('/api/entrypoints', {
         method: 'POST',
@@ -2150,6 +2198,8 @@
       if ($('conv-select')) $('conv-select').value = '';
       $('btn-follow-current')?.classList.add('hidden');
       state.contextEtag = '';
+      state.contextEtagConv = state.hostConvId || '';
+      state.contextInFlight = false;
       apiFetch('/api/entrypoints', {
         method: 'POST',
         body: { pinnedConvId: '' }

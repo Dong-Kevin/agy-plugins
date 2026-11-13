@@ -1,23 +1,21 @@
 # agy-plugins ROADMAP
 
-更新时间：2026-11-13 22:17（Asia/Shanghai）。
+更新时间：2026-11-14 00:34（Asia/Shanghai）。
 
 ## 本次交付目标
 
-1. 已完成开源插件合集仓库 `Dong-Kevin/agy-plugins` 初始化、双插件迁移与交接。
-2. 文档与截图升级：将总仓标题统一为 `# AGY Plugins`，补齐双插件桌面快捷键 / 对话入口 / CLI 快捷命令速查，将「让 Antigravity Agent 协助安装」设为快速安装首选，并新增 3 张零隐私泄露的 `agy-finder` 截图及刷新定制抽屉截图。
-3. 双快捷键与 AGY 右侧辅助栏稳定性修复（`context-viewer v1.7.1` / `agy-finder v0.2.1`）：
-   - 解决 `Overview` 态（右侧栏折叠）、跨会话 `Pin Tab` 及跨插件切换时无法自动开栏/切回的问题：将 `isAuxIframeVisible()` 改为跨同源/跨源顶层视口 `IntersectionObserver({ root: null })` 实测几何交集，彻底消除 Blink `display: none` 预热 iframe 假阳性抢占；将唤醒退避迁至本地 Node 端 `holdMs` 参数规避隐藏 iframe `DOMTimer` 节流；兼容跨会话 `Pin Tab` 标签并支持前端静态资源热重载重启。
+1. 发布 `v2026.11.14` 稳定性与首屏体验升级（`context-viewer v1.7.2` / `agy-finder v0.2.2`）：
+   - 加固跨插件并发锁、路径与符号链接解析、定位缓存刷新、切会话竞态防覆盖与隔离安装边界：包括跨插件共享 `agy_aux_pane_trigger.json` 原子文件锁与死锁自动回收、相对点文件（`.env`）与父目录（`../`）解析修复、定位已展开缓存目录强制刷新、会话快速切换乱序防覆盖与按会话隔离 `ETag`、工作区搜索符号链接环路/重复别名物理目录去重、隔离 `AGY_PLUGINS_DIR` 安装/卸载保护已有 `$HOME/.local/bin` CLI 入口及归属校验。
+   - 落地体验与测试升级：`agy-finder` 可见展开目录自动增量同步与搜索加载/截断/错误提示横幅、`context-viewer` 首屏 Hero 卡片提升模型配额条并默认折叠累计四维吞吐区块，补齐 8 进程并发锁、`node:vm` 真实前端交互、点文件/符号链接搜索及隔离 `HOME/.local/bin` 回归测试。
 
 ## 当前阶段与状态
 
 - **已完成**：
-  - 仓库初始化与本地安全隔离：完成 `git init -b main`、绑定远端 `origin`、锁定仓库级 `Dong-Kevin` 与 GitHub `noreply` 提交身份，配置 `.gitignore`、`LICENSE` 及仓库管理的 `scripts/pre-push` -> `.git/hooks/pre-push` 门禁。
-  - 双插件双快捷键与 Aux Pane 直达修复升级：
-    - `plugins/agy-context-viewer/`（`context-viewer v1.7.1`）：`app.js` 改用 `IntersectionObserver`（`intersectionRect > 40px` + `agy_aux_ever_visible` 优先权）判定真实可见性，取消 `window.innerWidth > 40` 在 `display: none` 预热槽中的误判，并打通 `Pin Tab` 跨会话在屏切换与 Node 端 `holdMs` 无节流唤醒；`main.mjs` 新增 `/api/aux-pane-trigger` `holdMs` 支持及 `app.js` / `styles.css` / `index.html` 热重载监听；`collector.mjs` 维持 `viewBatchMs`/`viewWinnerId` 消歧与后台 `mtimeMs` 防劫持；`float_window.mjs` 调整 `720ms + 750ms` 复检与 HUD 提示；`scripts/verify.mjs` 补充 `IntersectionObserver` / `holdMs` 防回归断言。
-    - `plugins/agy-finder/`（`agy-finder v0.2.1`）：`app.js` 与 `main.mjs` 同步 `IntersectionObserver` 真可见性判定、`holdMs` 无节流唤醒、`Pin Tab` 跨会话支持及静态资源热重载监听，并完整保留 `revealPath` 定位链路；`drawer.mjs` 维持 `isSubagentTranscriptHead` / `viewBatchMs` 消歧与 `720ms + 750ms` 复检 HUD；`scripts/verify.mjs` 新增 `holdMs=20` 环回 HTTP 检查与前端防回归断言。
-    - 文档与打包验证：全仓重新打包生成 `agy-finder-v0.2.1.zip` 与 `context-viewer-v1.7.1.zip`。
-    - 本地安装升级与实机验收：已运行 `./install.sh` 将本机插件热升级至 `context-viewer v1.7.1`（保留用户自定义侧栏键 `⌃K` / `Ctrl+K`）与 `agy-finder v0.2.1`（`⇧⌘E` / `⌥⌘E` 就绪），守护进程与宿主 Sidecar 均已自动重启加载新版；Antigravity 桌面端前台实机验证通过（含 `Overview` 折叠态自动开栏、自定义 `⌃K` / `⌥⌘E`、跨插件与跨会话 `Pin Tab` 切换）。
+  - 仓库初始化与过往发布基线：完成 `git init -b main`、绑定远端 `origin`、锁定 `Dong-Kevin` 与 GitHub `noreply` 身份、`scripts/pre-push` 门禁及 `v2026.11.13`（`agy-finder v0.2.1`、`context-viewer v1.7.1`）发布。
+  - `v2026.11.14` 发布就绪（`agy-finder v0.2.2` / `context-viewer v1.7.2`）：
+    - `plugins/agy-finder/`（`v0.2.2`）：`drawer.mjs` 新增 `withAuxTriggerLock`（`wx` 原子锁 + `Atomics.wait` + PID/mtime 死锁回收）保护 5 个触发器变更函数；`path_utils.mjs` 修复 `.env` / `../` 相对路径裁剪并增加 `realpathSync` 环路与根挂载防护；`app.js` / `styles.css` 修复 `revealPathInTree` 强制刷新（`fetchDir(..., true)`）、新增 `syncVisibleExpandedDirs()`（3.5s 可见期轮询）及搜索态/截断/错误提示横幅；`install.ps1` 增加隔离安装/卸载 CLI 保护与归属校验；`scripts/verify.mjs` 补充相对点文件/符号链接搜索与 `node:vm` 定位刷新及搜索前端行为测试。
+    - `plugins/agy-context-viewer/`（`context-viewer v1.7.2`）：`collector.mjs` 同步落盘 `withAuxTriggerLock` 保护共享 Aux 触发器；`app.js` 新增 `contextReqSeq` / `contextEtagConv` / `contextInFlight` 与 `historyReqSeq` 乱序防覆盖护栏；`index.html` / `styles.css` 将 `#ctx-quota-box` 提升至 Hero 卡片首屏并把累计吞吐与折算金额改为默认折叠（带实时摘要胶囊 `#cum-summary-chip`）；`install.sh` 与 `install.ps1` 补全隔离安装 `BIN_DIR` 保护与卸载归属检查；`scripts/verify.mjs` 新增 Hero DOM 与 `node:vm` 乱序竞态测试。
+    - 全仓校验、打包与本地热升级：根 `scripts/verify.mjs` 新增 8 进程跨插件并发锁竞争/陈旧锁恢复测试与隔离 `HOME/.local/bin` 哨兵保护测试；生成 `RELEASE_REF=v2026.11.14` 发布包 `dist/agy-finder-v0.2.2.zip` 与 `dist/context-viewer-v1.7.2.zip`；执行 `./install.sh` 完成本机热升级并确认 `Ctrl+K` 自定义快捷键完整保留。
 - **跨平台待测项**：
   - `agy-finder` 与 `agy-context-viewer` 的 Windows PowerShell 5.1 / 7 + `cmd.exe`、Linux 桌面端及 `Node.js 18` 最低版本尚未在对应宿主机实机运行。
 
@@ -31,6 +29,6 @@
 
 ## 最近验证
 
-- `node scripts/verify.mjs --strict-git-identity`：通过（含仓库结构与语法、官方 Schema 与唯一性、全仓隐私/PNG/noreply 门禁、`agy-context-viewer` v1.7.1 6/6 阶段、`agy-finder` v0.2.1 8/8 项含 `holdMs` 与 `IntersectionObserver` 防回归、统一 `install.sh` 隔离安装/卸载），时间：`2026-11-13 22:17`（Asia/Shanghai）。
-- `RELEASE_REF=v2026.11.13 node scripts/package-all.mjs && (cd dist && shasum -a 256 -c *.sha256)`：通过，构建 `dist/agy-finder-v0.2.1.zip` 与 `dist/context-viewer-v1.7.1.zip` 及 `.sha256` 校验通过（`OK`），时间：`2026-11-13 22:17`（Asia/Shanghai）。
-- `./install.sh` + 实机守护与宿主 Sidecar 检查：通过，本机已热升级为 `context-viewer v1.7.1`（`daemonVersion: 7`，`daemonBuildId: 938e533c504cd7ad`，`⌥⌘K` / 已保留 `⌃K` 就绪）与 `agy-finder v0.2.1`（`daemonVersion: 2`，`daemonBuildId: be0fcd3f8b842d72`，`⇧⌘E` / `⌥⌘E` 就绪），用户已在 macOS Antigravity 桌面端确认可用，时间：`2026-11-13 20:47`（Asia/Shanghai）。
+- `node scripts/verify.mjs --strict-git-identity`：通过（含两插件语法/Swift `-typecheck`/隐私门禁/`node:vm` 前端行为测试、点文件与符号链接搜索、8 进程跨插件并发锁与陈旧锁回收、隔离 `HOME/.local/bin` 哨兵保护），时间：`2026-11-14 00:06`（Asia/Shanghai，随 `push` 门禁复跑）。
+- `RELEASE_REF=v2026.11.14 LC_ALL=C node scripts/package-all.mjs && (cd dist && LC_ALL=C shasum -a 256 -c *.sha256)`：通过，生成 `dist/agy-finder-v0.2.2.zip`（81.9 KB）与 `dist/context-viewer-v1.7.2.zip`（166.6 KB），SHA-256 校验 `OK`，时间：`2026-11-14 00:34`（Asia/Shanghai）。
+- `./install.sh` + 本机守护与配置检查：通过，本机已热升级至 `agy-finder 0.2.2`（`⇧⌘E` / `⌥⌘E`）与 `context-viewer 1.7.2`（`⌥⌘K` / 保留自定义 `Ctrl+K`，菜单栏常驻就绪），时间：`2026-11-14 00:06`（Asia/Shanghai）。

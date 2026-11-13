@@ -22,6 +22,10 @@
     revealedRelPath: '',
     searchQuery: '',
     searchResults: null,
+    searchTruncated: false,
+    searchLoading: false,
+    searchError: '',
+    searchReqSeq: 0,
     mentions: [],
     mentionsEtag: '',
     mentionsCollapsed: false,
@@ -192,16 +196,36 @@
     const container = $('tree-content');
     if (!container) return;
 
-    if (state.searchQuery.trim() && Array.isArray(state.searchResults)) {
-      if (state.searchResults.length === 0) {
-        container.innerHTML = '<div class="af-empty">没有匹配的文件或目录</div>';
+    const activeQuery = state.searchQuery.trim();
+    if (activeQuery) {
+      if (state.searchLoading && !Array.isArray(state.searchResults)) {
+        container.innerHTML = '<div class="af-empty">搜索中…</div>';
         return;
       }
-      container.innerHTML = state.searchResults
-        .map((item) => {
-          const ic = item.isDirectory ? iconFolder(false) : iconFile();
-          const parent = item.relPath.includes('/') ? item.relPath.slice(0, item.relPath.lastIndexOf('/')) : '';
-          return `
+      if (state.searchError && !Array.isArray(state.searchResults)) {
+        container.innerHTML = `<div class="af-search-error">搜索失败：${esc(state.searchError)}</div>`;
+        return;
+      }
+      if (Array.isArray(state.searchResults)) {
+        const bannerHtml = state.searchError
+          ? `<div class="af-search-error">搜索更新失败：${esc(state.searchError)}</div>`
+          : (state.searchLoading
+              ? '<div class="af-search-note">正在更新搜索结果…</div>'
+              : (state.searchTruncated
+                  ? `<div class="af-search-note">搜索范围已达上限，仅显示前 ${state.searchResults.length} 项匹配结果；可输入更精确的文件名或路径。</div>`
+                  : ''));
+        if (state.searchResults.length === 0) {
+          const emptyText = state.searchTruncated
+            ? '没有匹配的文件或目录（已达扫描上限，请缩小关键词或开启隐藏文件）'
+            : '没有匹配的文件或目录';
+          container.innerHTML = `${bannerHtml}<div class="af-empty">${emptyText}</div>`;
+          return;
+        }
+        container.innerHTML = bannerHtml + state.searchResults
+          .map((item) => {
+            const ic = item.isDirectory ? iconFolder(false) : iconFile();
+            const parent = item.relPath.includes('/') ? item.relPath.slice(0, item.relPath.lastIndexOf('/')) : '';
+            return `
             <div class="af-tree-row${item.relPath === state.selectedRelPath ? ' is-selected' : ''}"
                  data-search-abs="${esc(item.absPath)}"
                  data-file-uri="${esc(item.fileUri)}"
@@ -212,9 +236,10 @@
               <span class="af-node-label">${esc(item.name)}</span>
               ${parent ? `<span class="af-node-sub">${esc(parent)}</span>` : ''}
             </div>`;
-        })
-        .join('');
-      return;
+          })
+          .join('');
+        return;
+      }
     }
 
     if (!state.activeRoot) {
@@ -414,15 +439,18 @@
 
     const expanded = getExpandedSet(state.activeRoot);
     expanded.add('');
-    const dirsToLoad = [''];
+    // Force refresh root, all ancestor dirs, and already-expanded target dir so newly created files appear immediately (R3)
+    const dirsSet = new Set(['']);
     for (const d of res.ancestorRelDirs || []) {
       expanded.add(d);
-      if (!state.dirCache.has(cacheKey(state.activeRoot, d))) {
-        dirsToLoad.push(d);
-      }
+      dirsSet.add(d);
     }
+    if (res.isDirectory && res.relPath && expanded.has(res.relPath)) {
+      dirsSet.add(res.relPath);
+    }
+    const dirsToLoad = Array.from(dirsSet);
 
-    await Promise.all(dirsToLoad.map((d) => fetchDir(state.activeRoot, d).catch(() => [])));
+    await Promise.all(dirsToLoad.map((d) => fetchDir(state.activeRoot, d, true).catch(() => [])));
 
     state.selectedRelPath = res.relPath || '';
     state.selectedAbsPath = res.absPath;
@@ -952,25 +980,48 @@
     clearTimeout(searchTimer);
 
     const trimmed = value.trim();
+    const reqSeq = ++state.searchReqSeq;
     if (!trimmed) {
       state.searchResults = null;
+      state.searchTruncated = false;
+      state.searchLoading = false;
+      state.searchError = '';
       renderTree();
       return;
     }
 
+    state.searchLoading = true;
+    state.searchError = '';
+    renderTree();
+
     searchTimer = setTimeout(async () => {
-      if (!state.activeRoot) return;
+      if (!state.activeRoot) {
+        if (reqSeq === state.searchReqSeq) {
+          state.searchLoading = false;
+          renderTree();
+        }
+        return;
+      }
       try {
         const res = await apiGet('/api/search', {
           root: state.activeRoot,
           q: trimmed,
           showHidden: state.showHidden ? '1' : '0'
         });
-        if (state.searchQuery.trim() === trimmed) {
+        if (reqSeq === state.searchReqSeq && state.searchQuery.trim() === trimmed) {
           state.searchResults = Array.isArray(res.results) ? res.results : [];
+          state.searchTruncated = Boolean(res.truncated);
+          state.searchLoading = false;
+          state.searchError = '';
           renderTree();
         }
-      } catch {}
+      } catch (err) {
+        if (reqSeq === state.searchReqSeq && state.searchQuery.trim() === trimmed) {
+          state.searchLoading = false;
+          state.searchError = err?.message || '搜索请求失败';
+          renderTree();
+        }
+      }
     }, 160);
   }
 
@@ -1698,10 +1749,83 @@
     })();
   }
 
+  let syncVisibleInFlight = false;
+
+  function dirEntriesSignature(entries) {
+    if (!Array.isArray(entries)) return '';
+    return entries.map((e) => `${e.relPath}:${e.isDirectory ? 'D' : 'F'}`).join('\n');
+  }
+
+  function isTreeVisibleNow() {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      return false;
+    }
+    try {
+      if (window.self !== window.top && typeof isAuxIframeVisible === 'function') {
+        return isAuxIframeVisible();
+      }
+    } catch {}
+    return true;
+  }
+
+  async function syncVisibleExpandedDirs() {
+    const root = state.activeRoot;
+    if (!root || state.searchQuery.trim() || syncVisibleInFlight || !isTreeVisibleNow()) {
+      return;
+    }
+    syncVisibleInFlight = true;
+    try {
+      const expanded = getExpandedSet(root);
+      const dirsToSync = [''];
+      for (const d of expanded) {
+        if (d && dirsToSync.length < 25) {
+          dirsToSync.push(d);
+        }
+      }
+      let changed = false;
+      for (let i = 0; i < dirsToSync.length; i += 4) {
+        if (state.activeRoot !== root || state.searchQuery.trim()) return;
+        const batch = dirsToSync.slice(i, i + 4);
+        await Promise.all(
+          batch.map(async (relDir) => {
+            const key = cacheKey(root, relDir);
+            const prevSig = state.dirCache.has(key) ? dirEntriesSignature(state.dirCache.get(key)) : null;
+            try {
+              const items = await fetchDir(root, relDir, true);
+              const nextSig = dirEntriesSignature(items);
+              if (prevSig !== nextSig) {
+                changed = true;
+              }
+            } catch (err) {
+              if (relDir && err && (err.status === 404 || /不存在|404|not found|ENOENT/i.test(String(err.message || '')))) {
+                expanded.delete(relDir);
+                state.dirCache.delete(key);
+                changed = true;
+              }
+            }
+          })
+        );
+      }
+      if (changed && state.activeRoot === root && !state.searchQuery.trim()) {
+        const viewport = $('tree-viewport');
+        const prevScrollTop = viewport ? viewport.scrollTop : 0;
+        renderTree();
+        if (viewport) viewport.scrollTop = prevScrollTop;
+      }
+    } finally {
+      syncVisibleInFlight = false;
+    }
+  }
+
   async function bootstrap() {
     applyTheme();
     bindEvents();
     startAuxPaneBridgeCoordinator();
+    auxVisibilityCallbacks.add(() => {
+      if (isAuxIframeVisible()) {
+        syncVisibleExpandedDirs().catch(() => {});
+      }
+    });
     const ws = await refreshWorkspace(false).catch((err) => {
       showToast(err.message);
       return null;
@@ -1712,6 +1836,7 @@
       revealPathInTree(ws.lastRevealPath).catch(() => {});
     }
     setInterval(checkDeepLinkUrl, 350);
+    setInterval(() => syncVisibleExpandedDirs().catch(() => {}), 3500);
     await pollMentions();
     setInterval(pollMentions, 2500);
   }

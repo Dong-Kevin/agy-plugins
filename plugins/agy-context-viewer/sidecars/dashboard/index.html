@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy" content="frame-src 'none'; child-src 'none'">
   <title>上下文与 Token 看板</title>
   <script src="/preload.js"></script>
-  <link rel="stylesheet" href="/styles.css?v=1.7.1">
+  <link rel="stylesheet" href="/styles.css?v=1.7.2">
 </head>
 <body>
   <div class="app-shell">
@@ -243,48 +243,65 @@
             <div id="ctx-seg-legend" class="seg-legend"></div>
           </div>
 
-          <!-- Session Cumulative 4-Dimension Throughput -->
-          <div class="cum-section">
-            <div class="cum-head">
-              <span class="sub-heading no-margin">本会话累计四维吞吐（含历史轮次）</span>
-              <span id="cum-cache-overall" class="muted xs num">累计缓存率 --</span>
+          <!-- Active Model Quota Bar (promoted to Hero Card for first-screen visibility) -->
+          <div id="ctx-quota-box" class="quota-inline hidden">
+            <div class="quota-inline-head">
+              <span id="ctx-quota-title" class="quota-name">当前模型配额池</span>
+              <span id="ctx-quota-val" class="num-strong">--</span>
             </div>
-            <div class="four-grid compact-tiles">
-              <div class="stat-tile">
-                <span class="m-label">累计缓存读取</span>
-                <span id="cum-cache-tok" class="m-val accent-text">--</span>
-              </div>
-              <div class="stat-tile">
-                <span class="m-label">累计新增输入</span>
-                <span id="cum-input-tok" class="m-val">--</span>
-              </div>
-              <div class="stat-tile">
-                <span class="m-label">累计生成输出</span>
-                <span id="cum-output-tok" class="m-val">--</span>
-                <span id="cum-think-sub" class="m-sub">含思考 --</span>
-              </div>
-              <div class="stat-tile">
-                <span class="m-label">会话总吞吐</span>
-                <span id="cum-total-tok" class="m-val">--</span>
-              </div>
-            </div>
+            <div class="thin-track"><div id="ctx-quota-bar" class="thin-fill"></div></div>
           </div>
 
           <div id="ctx-takeaway" class="takeaway-box">正在同步当前对话上下文指标…</div>
 
-          <div class="cost-strip">
-            <div class="cost-strip-item">
-              <span class="muted">本轮 API 参考估值</span>
-              <strong id="ctx-round-cost" class="num">--</strong>
-            </div>
-            <div class="cost-strip-item">
-              <span class="muted">当前会话累计折算</span>
-              <strong id="ctx-session-cost" class="num">--</strong>
+          <!-- Collapsible Session Cumulative Throughput & Cost Strip -->
+          <div class="cum-section">
+            <button type="button" class="collapse-trigger cum-collapse-trigger" data-toggle="cum-collapse-body" aria-expanded="false">
+              <span class="title-group">
+                <span class="sub-heading no-margin">累计四维吞吐与折算</span>
+                <span id="cum-summary-chip" class="meta-chip num">累计 --</span>
+              </span>
+              <span class="chevron">▾</span>
+            </button>
+            <div id="cum-collapse-body" class="cum-collapse-body hidden">
+              <div class="cum-head">
+                <span class="muted xs">含当前会话历史轮次</span>
+                <span id="cum-cache-overall" class="muted xs num">累计缓存率 --</span>
+              </div>
+              <div class="four-grid compact-tiles">
+                <div class="stat-tile">
+                  <span class="m-label">累计缓存读取</span>
+                  <span id="cum-cache-tok" class="m-val accent-text">--</span>
+                </div>
+                <div class="stat-tile">
+                  <span class="m-label">累计新增输入</span>
+                  <span id="cum-input-tok" class="m-val">--</span>
+                </div>
+                <div class="stat-tile">
+                  <span class="m-label">累计生成输出</span>
+                  <span id="cum-output-tok" class="m-val">--</span>
+                  <span id="cum-think-sub" class="m-sub">含思考 --</span>
+                </div>
+                <div class="stat-tile">
+                  <span class="m-label">会话总吞吐</span>
+                  <span id="cum-total-tok" class="m-val">--</span>
+                </div>
+              </div>
+              <div class="cost-strip">
+                <div class="cost-strip-item">
+                  <span class="muted">本轮 API 参考估值</span>
+                  <strong id="ctx-round-cost" class="num">--</strong>
+                </div>
+                <div class="cost-strip-item">
+                  <span class="muted">当前会话累计折算</span>
+                  <strong id="ctx-session-cost" class="num">--</strong>
+                </div>
+              </div>
             </div>
           </div>
         </article>
 
-        <!-- Card 2: Generation Speed, Latency & Model Quota Pool -->
+        <!-- Card 2: Generation Speed & Latency -->
         <article class="card">
           <div class="card-head wrap-gap">
             <div class="title-group">
@@ -319,15 +336,6 @@
           </div>
 
           <div id="sp-takeaway" class="takeaway-box compact">等待模型返回生成耗时统计…</div>
-
-          <!-- Active Model Quota Bar -->
-          <div id="ctx-quota-box" class="quota-inline hidden">
-            <div class="quota-inline-head">
-              <span id="ctx-quota-title" class="quota-name">当前模型配额池</span>
-              <span id="ctx-quota-val" class="num-strong">--</span>
-            </div>
-            <div class="thin-track"><div id="ctx-quota-bar" class="thin-fill"></div></div>
-          </div>
 
           <!-- Turn-by-turn Context & Speed Sparkline -->
           <div id="spark-wrap" class="spark-wrap hidden">
@@ -674,6 +682,6 @@
       </section>
     </main>
   </div>
-  <script src="/app.js?v=1.7.1"></script>
+  <script src="/app.js?v=1.7.2"></script>
 </body>
 </html>

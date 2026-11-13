@@ -23,8 +23,10 @@ import {
   renameSync,
   rmSync,
   statSync,
+  unlinkSync,
   watch,
-  writeFileSync
+  writeFileSync,
+  writeSync
 } from 'node:fs';
 import { createServer } from 'node:http';
 import { homedir } from 'node:os';
@@ -862,107 +864,205 @@ function findLatestDesktopConversationCandidate({ prevResolvedId = '', knownBatc
   };
 }
 
-export function writeAuxPaneTrigger({ targetPlugin = 'agy-finder', uri = '', action = 'toggle', convId = '', revealPath = '' } = {}) {
-  const filePath = getSharedAuxTriggerPath();
-  const cur = readAuxPaneTrigger();
-  const hint = readActiveContextHint();
-  const explicitConvId = (typeof convId === 'string' && CONV_ID_RE.test(convId.trim())) ? convId.trim() : '';
+const AUX_TRIGGER_WAIT_ARR = new Int32Array(new SharedArrayBuffer(4));
 
-  let resolvedActive = explicitConvId;
-  let nextViewBatchMs = Number(cur.viewBatchMs || 0);
-  let nextViewWinnerId = cur.viewWinnerId || '';
-  if (!resolvedActive) {
-    const candidates = [];
-    const latestDesktop = findLatestDesktopConversationCandidate({
-      prevResolvedId: cur.viewWinnerId || hint.conversationId || cur.activeConvId || '',
-      knownBatchMs: nextViewBatchMs
-    });
-    if (latestDesktop?.id && latestDesktop.ts > 0) {
-      candidates.push(latestDesktop);
-      if (latestDesktop.maxViewMs > 0) nextViewBatchMs = latestDesktop.maxViewMs;
-      if (latestDesktop.viewWinnerId) nextViewWinnerId = latestDesktop.viewWinnerId;
+function isAuxLockPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === 'EPERM';
+  }
+}
+
+function withAuxTriggerLock(fn) {
+  const filePath = getSharedAuxTriggerPath();
+  const lockPath = `${filePath}.lock`;
+  try {
+    mkdirSync(dirname(lockPath), { recursive: true });
+  } catch {}
+
+  const token = `${process.pid}:${Date.now()}:${randomBytes(6).toString('hex')}`;
+  const deadline = Date.now() + 4000;
+  let acquired = false;
+  let attempt = 0;
+
+  while (!acquired && Date.now() < deadline) {
+    let fd = null;
+    try {
+      fd = openSync(lockPath, 'wx', 0o600);
+      writeSync(fd, token);
+      acquired = true;
+    } catch (err) {
+      if (err?.code === 'ENOENT') {
+        try { mkdirSync(dirname(lockPath), { recursive: true }); } catch {}
+        continue;
+      }
+      if (err?.code !== 'EEXIST') break;
+
+      try {
+        const st = statSync(lockPath);
+        const ageMs = Date.now() - Number(st.mtimeMs || 0);
+        if (ageMs >= 5000) {
+          let raw = '';
+          try { raw = readFileSync(lockPath, 'utf8'); } catch {}
+          const ownerPid = Number(String(raw || '').split(':')[0]);
+          if (!isAuxLockPidAlive(ownerPid) || ageMs >= 15000) {
+            const stalePath = `${lockPath}.stale.${process.pid}.${Date.now()}`;
+            try {
+              renameSync(lockPath, stalePath);
+              try { unlinkSync(stalePath); } catch {}
+              continue;
+            } catch {}
+          }
+        }
+      } catch (statErr) {
+        if (statErr?.code === 'ENOENT') continue;
+      }
+
+      const waitMs = Math.min(16, 2 + attempt * 2);
+      attempt += 1;
+      try {
+        Atomics.wait(AUX_TRIGGER_WAIT_ARR, 0, 0, waitMs);
+      } catch {}
+    } finally {
+      if (fd !== null) {
+        try { closeSync(fd); } catch {}
+      }
     }
-    if (CONV_ID_RE.test(String(hint.conversationId || '')) && Number(hint.updatedAt || 0) > 0) {
-      candidates.push({ id: hint.conversationId, ts: Number(hint.updatedAt) });
-    }
-    if (CONV_ID_RE.test(String(cur.activeConvId || '')) && Number(cur.activeConvUpdatedAt || 0) > 0) {
-      candidates.push({ id: cur.activeConvId, ts: Number(cur.activeConvUpdatedAt) });
-    }
-    candidates.sort((a, b) => b.ts - a.ts);
-    resolvedActive = (
-      candidates[0]?.id ||
-      (CONV_ID_RE.test(String(hint.conversationId || '')) ? hint.conversationId : '') ||
-      (CONV_ID_RE.test(String(cur.activeConvId || '')) ? cur.activeConvId : '') ||
-      ''
-    );
-  } else {
-    nextViewWinnerId = explicitConvId;
   }
 
-  const next = {
-    seq: Math.max(0, Number(cur.seq || 0)) + 1,
-    targetPlugin: String(targetPlugin || 'agy-finder'),
-    uri: String(uri || ''),
-    action: String(action || 'toggle'),
-    convId: (typeof convId === 'string' && convId.trim()) ? convId.trim() : resolvedActive,
-    revealPath: typeof revealPath === 'string' ? revealPath : '',
-    at: Date.now(),
-    openingSeq: 0,
-    ackSeq: cur.ackSeq,
-    ackAt: cur.ackAt,
-    ackPlugin: cur.ackPlugin,
-    switchedSeq: 0,
-    activeConvId: resolvedActive,
-    activeConvUpdatedAt: explicitConvId ? Date.now() : Number(cur.activeConvUpdatedAt || 0),
-    viewBatchMs: nextViewBatchMs,
-    viewWinnerId: nextViewWinnerId
-  };
-  writeJsonFileAtomic(filePath, next);
-  return next;
+  try {
+    return fn(filePath);
+  } finally {
+    if (acquired) {
+      try {
+        if (readFileSync(lockPath, 'utf8') === token) {
+          unlinkSync(lockPath);
+        }
+      } catch {}
+    }
+  }
+}
+
+export function writeAuxPaneTrigger({ targetPlugin = 'agy-finder', uri = '', action = 'toggle', convId = '', revealPath = '' } = {}) {
+  return withAuxTriggerLock((filePath) => {
+    const cur = readAuxPaneTrigger();
+    const hint = readActiveContextHint();
+    const explicitConvId = (typeof convId === 'string' && CONV_ID_RE.test(convId.trim())) ? convId.trim() : '';
+
+    let resolvedActive = explicitConvId;
+    let nextViewBatchMs = Number(cur.viewBatchMs || 0);
+    let nextViewWinnerId = cur.viewWinnerId || '';
+    if (!resolvedActive) {
+      const candidates = [];
+      const latestDesktop = findLatestDesktopConversationCandidate({
+        prevResolvedId: cur.viewWinnerId || hint.conversationId || cur.activeConvId || '',
+        knownBatchMs: nextViewBatchMs
+      });
+      if (latestDesktop?.id && latestDesktop.ts > 0) {
+        candidates.push(latestDesktop);
+        if (latestDesktop.maxViewMs > 0) nextViewBatchMs = latestDesktop.maxViewMs;
+        if (latestDesktop.viewWinnerId) nextViewWinnerId = latestDesktop.viewWinnerId;
+      }
+      if (CONV_ID_RE.test(String(hint.conversationId || '')) && Number(hint.updatedAt || 0) > 0) {
+        candidates.push({ id: hint.conversationId, ts: Number(hint.updatedAt) });
+      }
+      if (CONV_ID_RE.test(String(cur.activeConvId || '')) && Number(cur.activeConvUpdatedAt || 0) > 0) {
+        candidates.push({ id: cur.activeConvId, ts: Number(cur.activeConvUpdatedAt) });
+      }
+      candidates.sort((a, b) => b.ts - a.ts);
+      resolvedActive = (
+        candidates[0]?.id ||
+        (CONV_ID_RE.test(String(hint.conversationId || '')) ? hint.conversationId : '') ||
+        (CONV_ID_RE.test(String(cur.activeConvId || '')) ? cur.activeConvId : '') ||
+        ''
+      );
+    } else {
+      nextViewWinnerId = explicitConvId;
+    }
+
+    const next = {
+      seq: Math.max(0, Number(cur.seq || 0)) + 1,
+      targetPlugin: String(targetPlugin || 'agy-finder'),
+      uri: String(uri || ''),
+      action: String(action || 'toggle'),
+      convId: (typeof convId === 'string' && convId.trim()) ? convId.trim() : resolvedActive,
+      revealPath: typeof revealPath === 'string' ? revealPath : '',
+      at: Date.now(),
+      openingSeq: 0,
+      ackSeq: cur.ackSeq,
+      ackAt: cur.ackAt,
+      ackPlugin: cur.ackPlugin,
+      switchedSeq: 0,
+      activeConvId: resolvedActive,
+      activeConvUpdatedAt: explicitConvId ? Date.now() : Number(cur.activeConvUpdatedAt || 0),
+      viewBatchMs: nextViewBatchMs,
+      viewWinnerId: nextViewWinnerId
+    };
+    writeJsonFileAtomic(filePath, next);
+    return next;
+  });
 }
 
 export function markAuxPaneOpening({ seq } = {}) {
   const targetSeq = Number(seq || 0);
-  const cur = readAuxPaneTrigger();
-  if (!targetSeq || targetSeq <= cur.openingSeq) {
-    return { ok: true, claimed: false, trigger: cur };
+  if (!targetSeq) {
+    return { ok: true, claimed: false, trigger: readAuxPaneTrigger() };
   }
-  const next = {
-    ...cur,
-    openingSeq: targetSeq
-  };
-  writeJsonFileAtomic(getSharedAuxTriggerPath(), next);
-  return { ok: true, claimed: true, trigger: next };
+  return withAuxTriggerLock((filePath) => {
+    const cur = readAuxPaneTrigger();
+    if (targetSeq <= cur.openingSeq) {
+      return { ok: true, claimed: false, trigger: cur };
+    }
+    const next = {
+      ...cur,
+      openingSeq: targetSeq
+    };
+    writeJsonFileAtomic(filePath, next);
+    return { ok: true, claimed: true, trigger: next };
+  });
 }
 
 export function ackAuxPaneTrigger({ seq, plugin = 'agy-finder' } = {}) {
   const targetSeq = Number(seq || 0);
-  const cur = readAuxPaneTrigger();
-  if (!targetSeq || targetSeq < cur.seq || cur.ackSeq >= targetSeq) {
-    return { ok: true, claimed: false, trigger: cur };
+  if (!targetSeq) {
+    return { ok: true, claimed: false, trigger: readAuxPaneTrigger() };
   }
-  const next = {
-    ...cur,
-    ackSeq: targetSeq,
-    ackAt: Date.now(),
-    ackPlugin: String(plugin || 'agy-finder')
-  };
-  writeJsonFileAtomic(getSharedAuxTriggerPath(), next);
-  return { ok: true, claimed: true, trigger: next };
+  return withAuxTriggerLock((filePath) => {
+    const cur = readAuxPaneTrigger();
+    if (targetSeq < cur.seq || cur.ackSeq >= targetSeq) {
+      return { ok: true, claimed: false, trigger: cur };
+    }
+    const next = {
+      ...cur,
+      ackSeq: targetSeq,
+      ackAt: Date.now(),
+      ackPlugin: String(plugin || 'agy-finder')
+    };
+    writeJsonFileAtomic(filePath, next);
+    return { ok: true, claimed: true, trigger: next };
+  });
 }
 
 export function markAuxPaneSwitched({ seq } = {}) {
   const targetSeq = Number(seq || 0);
-  const cur = readAuxPaneTrigger();
-  if (!targetSeq || targetSeq <= cur.switchedSeq) {
-    return { ok: true, claimed: false, trigger: cur };
+  if (!targetSeq) {
+    return { ok: true, claimed: false, trigger: readAuxPaneTrigger() };
   }
-  const next = {
-    ...cur,
-    switchedSeq: targetSeq
-  };
-  writeJsonFileAtomic(getSharedAuxTriggerPath(), next);
-  return { ok: true, claimed: true, trigger: next };
+  return withAuxTriggerLock((filePath) => {
+    const cur = readAuxPaneTrigger();
+    if (targetSeq <= cur.switchedSeq) {
+      return { ok: true, claimed: false, trigger: cur };
+    }
+    const next = {
+      ...cur,
+      switchedSeq: targetSeq
+    };
+    writeJsonFileAtomic(filePath, next);
+    return { ok: true, claimed: true, trigger: next };
+  });
 }
 
 export function recordAuxActiveConversation({ convId = '' } = {}) {
@@ -970,19 +1070,20 @@ export function recordAuxActiveConversation({ convId = '' } = {}) {
   if (!CONV_ID_RE.test(cleanId)) {
     return { ok: false, activeConvId: '' };
   }
-  const filePath = getSharedAuxTriggerPath();
-  const raw = readJsonSafe(filePath);
-  const cur = readAuxPaneTrigger();
-  const now = Date.now();
-  if (raw && cur.activeConvId === cleanId && now - Number(cur.activeConvUpdatedAt || 0) < 1000) {
+  return withAuxTriggerLock((filePath) => {
+    const raw = readJsonSafe(filePath);
+    const cur = readAuxPaneTrigger();
+    const now = Date.now();
+    if (raw && cur.activeConvId === cleanId && now - Number(cur.activeConvUpdatedAt || 0) < 1000) {
+      return { ok: true, activeConvId: cleanId };
+    }
+    writeJsonFileAtomic(filePath, {
+      ...cur,
+      activeConvId: cleanId,
+      activeConvUpdatedAt: now
+    });
     return { ok: true, activeConvId: cleanId };
-  }
-  writeJsonFileAtomic(filePath, {
-    ...cur,
-    activeConvId: cleanId,
-    activeConvUpdatedAt: now
   });
-  return { ok: true, activeConvId: cleanId };
 }
 
 export function waitForAuxPaneTrigger({ since = 0, timeoutMs = 8000 } = {}) {

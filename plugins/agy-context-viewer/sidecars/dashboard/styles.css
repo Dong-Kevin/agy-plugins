@@ -1178,14 +1178,34 @@ button:disabled { opacity: 0.42; cursor: not-allowed; }
 .cum-section {
   display: flex;
   flex-direction: column;
+  border: 1px solid var(--cv-border);
+  border-radius: var(--r-sm);
+  background: var(--cv-surface-2);
+  overflow: hidden;
+}
+.cum-collapse-trigger {
+  padding: 7px 10px;
+  gap: 8px;
+}
+.cum-collapse-trigger .title-group {
   gap: 6px;
-  padding-top: 2px;
+}
+.cum-collapse-body {
+  padding: 0 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--cv-border);
+}
+.cum-collapse-body.hidden {
+  display: none;
 }
 .cum-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  padding-top: 7px;
 }
 .compact-tiles .stat-tile {
   padding: 6.5px 9px;

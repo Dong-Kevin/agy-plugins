@@ -19,7 +19,9 @@ $ErrorActionPreference = "Stop"
 $OrigPluginsDir = if ($env:AGY_PLUGINS_DIR) { $env:AGY_PLUGINS_DIR } elseif ($env:ANTIGRAVITY_PLUGINS_DIR) { $env:ANTIGRAVITY_PLUGINS_DIR } else { "" }
 $PluginsDir = if ($OrigPluginsDir) { $OrigPluginsDir } else { Join-Path $HOME ".gemini\config\plugins" }
 $TargetDir = Join-Path $PluginsDir "agy-finder"
-$BinDir = if ($env:AGY_BIN_DIR) { $env:AGY_BIN_DIR } elseif ($env:ANTIGRAVITY_BIN_DIR) { $env:ANTIGRAVITY_BIN_DIR } else { Join-Path $HOME ".local\bin" }
+$OrigBinDir = if ($env:AGY_BIN_DIR) { $env:AGY_BIN_DIR } elseif ($env:ANTIGRAVITY_BIN_DIR) { $env:ANTIGRAVITY_BIN_DIR } else { "" }
+$BinDir = if ($OrigBinDir) { $OrigBinDir } else { Join-Path $HOME ".local\bin" }
+$ShouldManageBin = [bool]($OrigBinDir -or (-not $OrigPluginsDir))
 $CliWrapper = Join-Path $BinDir "agy-finder.cmd"
 $CliLoader = Join-Path $BinDir "agy-finder-loader.mjs"
 $RepoSlug = if ($env:REPO) { $env:REPO } else { "Dong-Kevin/agy-plugins" }
@@ -29,14 +31,23 @@ if ($Uninstall) {
   if ((-not $OrigPluginsDir) -and (Test-Path (Join-Path $TargetDir "sidecars\tree\cli.mjs")) -and (Get-Command node -ErrorAction SilentlyContinue)) {
     try { & node (Join-Path $TargetDir "sidecars\tree\cli.mjs") quit 2>&1 | Out-Null } catch {}
   }
+  if ($ShouldManageBin -and (Test-Path $CliLoader)) {
+    $ExpectedEntry = [System.IO.Path]::GetFullPath((Join-Path $TargetDir "sidecars\tree\cli.mjs"))
+    $ExpectedB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($ExpectedEntry))
+    $LoaderRaw = Get-Content $CliLoader -Raw -ErrorAction SilentlyContinue
+    if ($LoaderRaw -and ($LoaderRaw.Contains($ExpectedB64) -or $LoaderRaw.Contains($TargetDir))) {
+      Remove-Item -Force $CliLoader
+      if ((Test-Path $CliWrapper) -and ((Get-Content $CliWrapper -Raw -ErrorAction SilentlyContinue) -match "agy-finder-loader\.mjs")) {
+        Remove-Item -Force $CliWrapper
+      }
+    }
+  }
   if (Test-Path $TargetDir) {
     Remove-Item -Recurse -Force $TargetDir
     Write-Host "[agy-finder] 已卸载：$TargetDir"
   } else {
     Write-Host "[agy-finder] 未找到安装目录：$TargetDir"
   }
-  if (Test-Path $CliWrapper) { Remove-Item -Force $CliWrapper }
-  if (Test-Path $CliLoader) { Remove-Item -Force $CliLoader }
   exit 0
 }
 
@@ -117,18 +128,20 @@ try {
   Copy-Item -Force (Join-Path $ScriptDir "sidecars\tree\sidecar.json") $TmpSidecar
   Move-Item -Force $TmpSidecar (Join-Path $TargetDir "sidecars\tree\sidecar.json")
 
-  New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
-  $CliEntry = [System.IO.Path]::GetFullPath((Join-Path $TargetDir "sidecars\tree\cli.mjs"))
-  $CliEntryB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($CliEntry))
-  $LoaderContent = @(
-    "import { pathToFileURL } from 'node:url';",
-    "const entry = Buffer.from('$CliEntryB64', 'base64').toString('utf8');",
-    "process.argv[1] = entry;",
-    "await import(pathToFileURL(entry).href);"
-  ) -join "`n"
-  $CmdContent = "@echo off`r`nnode `"%~dp0agy-finder-loader.mjs`" %*`r`n"
-  [System.IO.File]::WriteAllText($CliLoader, "$LoaderContent`n", [System.Text.Encoding]::ASCII)
-  [System.IO.File]::WriteAllText($CliWrapper, $CmdContent, [System.Text.Encoding]::ASCII)
+  if ($ShouldManageBin) {
+    New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+    $CliEntry = [System.IO.Path]::GetFullPath((Join-Path $TargetDir "sidecars\tree\cli.mjs"))
+    $CliEntryB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($CliEntry))
+    $LoaderContent = @(
+      "import { pathToFileURL } from 'node:url';",
+      "const entry = Buffer.from('$CliEntryB64', 'base64').toString('utf8');",
+      "process.argv[1] = entry;",
+      "await import(pathToFileURL(entry).href);"
+    ) -join "`n"
+    $CmdContent = "@echo off`r`nnode `"%~dp0agy-finder-loader.mjs`" %*`r`n"
+    [System.IO.File]::WriteAllText($CliLoader, "$LoaderContent`n", [System.Text.Encoding]::ASCII)
+    [System.IO.File]::WriteAllText($CliWrapper, $CmdContent, [System.Text.Encoding]::ASCII)
+  }
 
   if ((-not $OrigPluginsDir) -and (Get-Command agy -ErrorAction SilentlyContinue)) {
     try { & agy plugin enable agy-finder 2>&1 | Out-Null } catch {}

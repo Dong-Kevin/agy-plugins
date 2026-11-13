@@ -453,6 +453,23 @@ html, body {
   font-size: 12px;
 }
 
+.af-search-note,
+.af-search-error {
+  margin: 4px 8px 6px;
+  padding: 6px 10px;
+  border-radius: 7px;
+  font-size: 11px;
+  line-height: 1.45;
+  border: 1px solid var(--af-border);
+  background: var(--af-surface-2);
+  color: var(--af-muted);
+}
+
+.af-search-error {
+  border-color: color-mix(in srgb, var(--af-dir-col) 48%, var(--af-border));
+  color: var(--af-fg);
+}
+
 .af-toast {
   position: fixed;
   left: 50%;
