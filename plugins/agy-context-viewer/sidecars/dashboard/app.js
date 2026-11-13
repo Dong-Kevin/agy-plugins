@@ -52,6 +52,7 @@
     contextEtagConv: '',
     contextReqSeq: 0,
     contextInFlight: false,
+    contextInFlightConv: '',
     historyEtag: '',
     historyReqSeq: 0,
     historyInFlight: false,
@@ -422,16 +423,22 @@
   }
 
   async function loadContext(force = false) {
-    if (!force && state.contextInFlight) return;
-    const liveHostId = window.sidecar?.conversationId || state.hostConvId || '';
-    if (liveHostId && liveHostId !== state.hostConvId) {
-      state.hostConvId = liveHostId;
-      if (!state.selectedConvId) {
-        state.contextEtag = '';
-        state.contextEtagConv = '';
+    const syncLiveHost = () => {
+      const liveHostId = window.sidecar?.conversationId || '';
+      if (liveHostId && liveHostId !== state.hostConvId) {
+        state.hostConvId = liveHostId;
+        if (!state.selectedConvId) {
+          state.contextEtag = '';
+          state.contextEtagConv = '';
+        }
       }
-    }
+    };
+
+    syncLiveHost();
     const targetConv = state.selectedConvId || state.hostConvId || '';
+    if (!force && state.contextInFlight && (state.contextInFlightConv || '') === targetConv) {
+      return;
+    }
     if (state.contextEtagConv !== targetConv) {
       state.contextEtag = '';
       state.contextEtagConv = targetConv;
@@ -439,6 +446,7 @@
 
     const reqSeq = ++state.contextReqSeq;
     state.contextInFlight = true;
+    state.contextInFlightConv = targetConv;
     const qs = new URLSearchParams();
     if (targetConv) qs.set('conversationId', targetConv);
     if (force) qs.set('force', '1');
@@ -446,6 +454,7 @@
 
     try {
       const snap = await apiFetch(`/api/context?${qs.toString()}`);
+      syncLiveHost();
       const activeTarget = state.selectedConvId || state.hostConvId || '';
       if (reqSeq !== state.contextReqSeq || targetConv !== activeTarget) {
         return;
@@ -466,6 +475,7 @@
     } finally {
       if (reqSeq === state.contextReqSeq) {
         state.contextInFlight = false;
+        state.contextInFlightConv = '';
       }
     }
   }
@@ -2185,6 +2195,7 @@
       state.contextEtag = '';
       state.contextEtagConv = state.selectedConvId || state.hostConvId || '';
       state.contextInFlight = false;
+      state.contextInFlightConv = '';
       $('btn-follow-current')?.classList.toggle('hidden', !state.selectedConvId);
       apiFetch('/api/entrypoints', {
         method: 'POST',
@@ -2200,6 +2211,7 @@
       state.contextEtag = '';
       state.contextEtagConv = state.hostConvId || '';
       state.contextInFlight = false;
+      state.contextInFlightConv = '';
       apiFetch('/api/entrypoints', {
         method: 'POST',
         body: { pinnedConvId: '' }
@@ -3277,12 +3289,12 @@
                 method: 'POST',
                 body: { action: 'switched', seq: trig.seq }
               }).catch(() => null);
-              if (sw?.claimed !== false) {
+              if (sw?.claimed) {
                 const ackRes = await apiFetch('/api/aux-pane-trigger', {
                   method: 'POST',
                   body: { action: 'ack', seq: trig.seq, plugin: 'context-viewer' }
                 }).catch(() => null);
-                if (ackRes?.claimed !== false) {
+                if (ackRes?.claimed) {
                   sessionStorage.setItem('agy_aux_last_ack_seq', String(trig.seq));
                 }
                 if (pendingOpenTrigger?.seq === trig.seq) {
@@ -3358,7 +3370,7 @@
               method: 'POST',
               body: { action: 'ack', seq, plugin: 'context-viewer' }
             }).catch(() => null);
-            if (ackRes?.claimed === false) return;
+            if (!ackRes?.claimed) return;
             await apiFetch('/api/aux-pane-trigger', {
               method: 'POST',
               body: { action: 'switched', seq }
@@ -3374,7 +3386,7 @@
             method: 'POST',
             body: { action: 'ack', seq, plugin: 'context-viewer' }
           }).catch(() => null);
-          if (ackRes?.claimed === false) return;
+          if (!ackRes?.claimed) return;
           sessionStorage.setItem('agy_aux_last_ack_seq', String(seq));
           if (trigger.action !== 'open') {
             postSidecarCloseKeyEvent();
@@ -3386,7 +3398,7 @@
           method: 'POST',
           body: { action: 'ack', seq, plugin: 'context-viewer' }
         }).catch(() => null);
-        if (ackRes?.claimed !== false) {
+        if (ackRes?.claimed) {
           sessionStorage.setItem('agy_aux_last_ack_seq', String(seq));
         }
         return;

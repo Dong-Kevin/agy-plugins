@@ -391,11 +391,9 @@ async function verifyCrossPluginAuxTriggerLock() {
     assert.equal(openWinners, 1, `Expected exactly 1 markAuxPaneOpening winner, got ${openWinners}`);
     assert.equal(ackWinners, 1, `Expected exactly 1 ackAuxPaneTrigger winner, got ${ackWinners}`);
 
-    // 3. Stale dead-PID lock recovery
+    // 3. Stale dead-PID lock recovery (immediate without waiting for 5s age threshold)
     const lockPath = `${triggerPath}.lock`;
-    writeFileSync(lockPath, `999999:${Date.now() - 20000}:deadtoken`);
-    const staleDate = new Date(Date.now() - 10000);
-    utimesSync(lockPath, staleDate, staleDate);
+    writeFileSync(lockPath, `999999:${Date.now()}:deadtoken`);
 
     await spawnWorker(`
       import { writeAuxPaneTrigger } from ${JSON.stringify(cvModUrl)};
@@ -406,7 +404,57 @@ async function verifyCrossPluginAuxTriggerLock() {
     assert.equal(finalTrigger.seq, 41, 'Stale dead-PID lock must be recovered cleanly');
     assert.ok(!existsSync(lockPath), 'Lock file must not linger after stale recovery');
 
-    pass('R1 cross-plugin 8-process Aux trigger lock integrity & stale lock recovery');
+    // 4. S1: Active live-PID lock timeout must fail closed (never overwrite shared trigger or claim)
+    const ownerToken = `${process.pid}:${Date.now()}:verify-live-owner`;
+    const frozenTrigger = JSON.stringify({
+      seq: 41,
+      targetPlugin: 'context-viewer',
+      action: 'toggle',
+      openingSeq: 0,
+      ackSeq: 0,
+      switchedSeq: 0,
+      activeConvId: 'conv-frozen'
+    });
+    writeFileSync(triggerPath, frozenTrigger);
+    writeFileSync(lockPath, ownerToken, { flag: 'wx' });
+
+    const s1Results = await Promise.all([finderModUrl, cvModUrl].map((modUrl, idx) =>
+      spawnWorker(`
+        import { writeAuxPaneTrigger, markAuxPaneOpening, ackAuxPaneTrigger, markAuxPaneSwitched, recordAuxActiveConversation } from ${JSON.stringify(modUrl)};
+        const openRes = markAuxPaneOpening({ seq: 41 });
+        const ackRes = ackAuxPaneTrigger({ seq: 41, plugin: ${JSON.stringify(idx === 0 ? 'agy-finder' : 'context-viewer')} });
+        const swRes = markAuxPaneSwitched({ seq: 41 });
+        const trigRes = writeAuxPaneTrigger({ targetPlugin: 'agy-finder', action: 'open', convId: 'conv-intruder' });
+        const helloRes = recordAuxActiveConversation({ convId: '11111111-1111-4111-8111-111111111111' });
+        console.log(JSON.stringify({ openRes, ackRes, swRes, trigRes, helloRes }));
+      `, { AGY_AUX_LOCK_TIMEOUT_MS: '120' }).then((raw) => JSON.parse(raw))
+    ));
+
+    for (const r of s1Results) {
+      assert.equal(r.openRes.ok, false, 'markAuxPaneOpening must return ok:false on lock timeout');
+      assert.equal(r.openRes.claimed, false, 'markAuxPaneOpening must return claimed:false on lock timeout');
+      assert.equal(r.ackRes.ok, false, 'ackAuxPaneTrigger must return ok:false on lock timeout');
+      assert.equal(r.ackRes.claimed, false, 'ackAuxPaneTrigger must return claimed:false on lock timeout');
+      assert.equal(r.swRes.ok, false, 'markAuxPaneSwitched must return ok:false on lock timeout');
+      assert.equal(r.swRes.claimed, false, 'markAuxPaneSwitched must return claimed:false on lock timeout');
+      assert.equal(r.trigRes.ok, false, 'writeAuxPaneTrigger must return ok:false on lock timeout');
+      assert.equal(r.trigRes.seq, 0, 'writeAuxPaneTrigger must return seq:0 on lock timeout');
+      assert.equal(r.helloRes.ok, false, 'recordAuxActiveConversation must return ok:false on lock timeout');
+    }
+    assert.equal(readFileSync(lockPath, 'utf-8'), ownerToken, 'Live-PID lock must never be stolen or removed by waiters');
+    assert.equal(readFileSync(triggerPath, 'utf-8'), frozenTrigger, 'Shared trigger JSON must stay untouched while locked');
+
+    // Release live lock and confirm subsequent claim succeeds cleanly
+    rmSync(lockPath, { force: true });
+    const postRelease = JSON.parse(await spawnWorker(`
+      import { markAuxPaneOpening } from ${JSON.stringify(finderModUrl)};
+      console.log(JSON.stringify(markAuxPaneOpening({ seq: 41 })));
+    `));
+    assert.equal(postRelease.ok, true);
+    assert.equal(postRelease.claimed, true);
+    assert.equal(JSON.parse(readFileSync(triggerPath, 'utf-8')).openingSeq, 41);
+
+    pass('R1/S1 cross-plugin 8-process Aux trigger lock integrity, stale recovery & fail-closed timeout');
   } finally {
     rmSync(auxDir, { recursive: true, force: true });
   }

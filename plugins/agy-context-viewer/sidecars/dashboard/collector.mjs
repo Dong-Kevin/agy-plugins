@@ -1230,7 +1230,7 @@ function isAuxLockPidAlive(pid) {
   }
 }
 
-function withAuxTriggerLock(fn) {
+function withAuxTriggerLock(fn, options = {}) {
   const filePath = getSharedAuxTriggerPath();
   const lockPath = `${filePath}.lock`;
   try {
@@ -1238,7 +1238,9 @@ function withAuxTriggerLock(fn) {
   } catch {}
 
   const token = `${process.pid}:${Date.now()}:${randomBytes(6).toString('hex')}`;
-  const deadline = Date.now() + 4000;
+  const rawTimeout = Number(options.timeoutMs ?? process.env.AGY_AUX_LOCK_TIMEOUT_MS ?? 1200);
+  const timeoutMs = Number.isFinite(rawTimeout) ? Math.max(20, Math.min(4000, rawTimeout)) : 1200;
+  const deadline = Date.now() + timeoutMs;
   let acquired = false;
   let attempt = 0;
 
@@ -1249,6 +1251,11 @@ function withAuxTriggerLock(fn) {
       writeSync(fd, token);
       acquired = true;
     } catch (err) {
+      if (fd !== null && !acquired) {
+        try { closeSync(fd); } catch {}
+        fd = null;
+        try { unlinkSync(lockPath); } catch {}
+      }
       if (err?.code === 'ENOENT') {
         try { mkdirSync(dirname(lockPath), { recursive: true }); } catch {}
         continue;
@@ -1258,24 +1265,28 @@ function withAuxTriggerLock(fn) {
       try {
         const st = statSync(lockPath);
         const ageMs = Date.now() - Number(st.mtimeMs || 0);
-        if (ageMs >= 5000) {
-          let raw = '';
-          try { raw = readFileSync(lockPath, 'utf8'); } catch {}
-          const ownerPid = Number(String(raw || '').split(':')[0]);
-          if (!isAuxLockPidAlive(ownerPid) || ageMs >= 15000) {
-            const stalePath = `${lockPath}.stale.${process.pid}.${Date.now()}`;
-            try {
-              renameSync(lockPath, stalePath);
-              try { unlinkSync(stalePath); } catch {}
-              continue;
-            } catch {}
-          }
+        let raw = '';
+        try { raw = readFileSync(lockPath, 'utf8'); } catch {}
+        const trimmed = String(raw || '').trim();
+        const hasPidSep = trimmed.includes(':');
+        const ownerPid = hasPidSep ? Number(trimmed.split(':')[0]) : 0;
+        const deadOwner = hasPidSep && Number.isInteger(ownerPid) && ownerPid > 0 && !isAuxLockPidAlive(ownerPid);
+        const orphanedBlank = !hasPidSep && ageMs >= 2000;
+        if (deadOwner || orphanedBlank) {
+          const stalePath = `${lockPath}.stale.${process.pid}.${Date.now()}.${attempt}`;
+          try {
+            renameSync(lockPath, stalePath);
+            try { unlinkSync(stalePath); } catch {}
+            continue;
+          } catch {}
         }
       } catch (statErr) {
         if (statErr?.code === 'ENOENT') continue;
       }
 
-      const waitMs = Math.min(16, 2 + attempt * 2);
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) break;
+      const waitMs = Math.min(remainingMs, Math.min(16, 2 + attempt * 2));
       attempt += 1;
       try {
         Atomics.wait(AUX_TRIGGER_WAIT_ARR, 0, 0, waitMs);
@@ -1287,16 +1298,18 @@ function withAuxTriggerLock(fn) {
     }
   }
 
+  if (!acquired) {
+    return typeof options.onFail === 'function' ? options.onFail(filePath) : null;
+  }
+
   try {
     return fn(filePath);
   } finally {
-    if (acquired) {
-      try {
-        if (readFileSync(lockPath, 'utf8') === token) {
-          unlinkSync(lockPath);
-        }
-      } catch {}
-    }
+    try {
+      if (readFileSync(lockPath, 'utf8') === token) {
+        unlinkSync(lockPath);
+      }
+    } catch {}
   }
 }
 
@@ -1326,6 +1339,8 @@ export function writeAuxPaneTrigger({ targetPlugin = 'context-viewer', uri = '',
     };
     writeJsonAtomic(filePath, next);
     return next;
+  }, {
+    onFail: () => ({ ...readAuxPaneTrigger(), ok: false, seq: 0, lockBusy: true })
   });
 }
 
@@ -1345,6 +1360,8 @@ export function markAuxPaneOpening({ seq } = {}) {
     };
     writeJsonAtomic(filePath, next);
     return { ok: true, claimed: true, trigger: next };
+  }, {
+    onFail: () => ({ ok: false, claimed: false, lockBusy: true, trigger: readAuxPaneTrigger() })
   });
 }
 
@@ -1366,6 +1383,8 @@ export function ackAuxPaneTrigger({ seq, plugin = 'context-viewer' } = {}) {
     };
     writeJsonAtomic(filePath, next);
     return { ok: true, claimed: true, trigger: next };
+  }, {
+    onFail: () => ({ ok: false, claimed: false, lockBusy: true, trigger: readAuxPaneTrigger() })
   });
 }
 
@@ -1385,6 +1404,8 @@ export function markAuxPaneSwitched({ seq } = {}) {
     };
     writeJsonAtomic(filePath, next);
     return { ok: true, claimed: true, trigger: next };
+  }, {
+    onFail: () => ({ ok: false, claimed: false, lockBusy: true, trigger: readAuxPaneTrigger() })
   });
 }
 
@@ -1406,6 +1427,8 @@ export function recordAuxActiveConversation({ convId = '' } = {}) {
       activeConvUpdatedAt: now
     });
     return { ok: true, activeConvId: cleanId };
+  }, {
+    onFail: () => ({ ok: false, activeConvId: '', lockBusy: true })
   });
 }
 

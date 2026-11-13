@@ -689,9 +689,34 @@ function verifyPathResolutionAndSymlinkSearch() {
       assert.equal(searchRes.truncated, false, 'Symlink loops must not exhaust maxVisited');
       const exactMatches = searchRes.results.filter((r) => r.name === 'real_target.txt');
       assert.equal(exactMatches.length, 1, 'Duplicate directory symlink alias must not yield duplicate child entries');
+
+      // S2: symlinked workspace root relative path reveal must stay inside symlink root namespace and pass listDirectoryEntries
+      const physicalWs = join(tempRoot, 'physical-ws');
+      const aliasWs = join(tempRoot, 'alias-ws');
+      mkdirSync(join(physicalWs, 'nested'), { recursive: true });
+      writeFileSync(join(physicalWs, 'README.md'), '# Physical README\n');
+      writeFileSync(join(physicalWs, 'nested', 'item.ts'), 'export const ok = true;\n');
+      symlinkSync(physicalWs, aliasWs, 'dir');
+
+      const expectedAliasRoot = resolve(aliasWs);
+      for (const relQuery of ['../physical-ws/README.md', '../physical-ws/nested/item.ts', join(physicalWs, 'nested', 'item.ts'), join(aliasWs, 'nested', 'item.ts')]) {
+        const res = resolveTargetPath(relQuery, [aliasWs]);
+        assert.equal(res.ok, true);
+        assert.equal(res.exists, true, `Target should exist: ${relQuery}`);
+        assert.equal(res.rootPath, expectedAliasRoot, `Root should stay aliasWs for ${relQuery}`);
+        assert.equal(res.isExternalRoot, false, `Symlinked workspace target must not be marked external: ${relQuery}`);
+        assert.ok(!res.relPath.startsWith('..') && !res.relPath.includes('/../'), `relPath must stay inside root: ${res.relPath}`);
+        for (const anc of res.ancestorRelDirs) {
+          assert.ok(!anc.startsWith('..'), `Ancestor relDir must not escape root: ${anc}`);
+          const listed = listDirectoryEntries(res.rootPath, anc);
+          assert.equal(listed.ok, true);
+        }
+      }
+      const rootListed = listDirectoryEntries(expectedAliasRoot, '');
+      assert.ok(rootListed.items.some((it) => it.name === 'README.md'));
     }
 
-    pass('R2 dotfile/parent relative path resolution & R5 symlink cycle/alias deduplication');
+    pass('R2/S2 dotfile, parent & symlink root relative path resolution + R5 symlink cycle/alias deduplication');
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
@@ -954,6 +979,64 @@ async function verifyFinderFrontendBehavior() {
   await syncInterval.fn();
   await new Promise((r) => setTimeout(r, 25));
   assert.ok(container.innerHTML.includes('gamma.js'), 'Visible auto-sync must render newly added gamma.js');
+
+  // S3 check: >25 expanded directories rotate across rounds and collapsed-ancestor dirs do not starve open ones
+  const clickDirRow = async (relPath) => {
+    const rowStub = { dataset: { relPath, isDir: '1', fileUri: `file://${wsRoot}/${relPath}` } };
+    container.dispatch('click', { target: { closest: (sel) => (sel === '.af-tree-row[data-rel-path]' ? rowStub : null) } });
+    await new Promise((r) => setTimeout(r, 15));
+  };
+  const rootItems = treeData.get('');
+  for (let i = 1; i <= 30; i++) {
+    const d = `dir${i}`;
+    rootItems.push({ name: d, relPath: d, absPath: `${wsRoot}/${d}`, fileUri: `file://${wsRoot}/${d}`, isDirectory: true });
+    treeData.set(d, [{ name: `f${i}.js`, relPath: `${d}/f${i}.js`, absPath: `${wsRoot}/${d}/f${i}.js`, fileUri: `file://${wsRoot}/${d}/f${i}.js`, isDirectory: false }]);
+    await clickDirRow(d);
+  }
+  treeData.get('dir1').push({ name: 'open_sub', relPath: 'dir1/open_sub', absPath: `${wsRoot}/dir1/open_sub`, fileUri: `file://${wsRoot}/dir1/open_sub`, isDirectory: true });
+  treeData.set('dir1/open_sub', []);
+  await clickDirRow('dir1/open_sub');
+
+  rootItems.push({ name: 'closed_parent', relPath: 'closed_parent', absPath: `${wsRoot}/closed_parent`, fileUri: `file://${wsRoot}/closed_parent`, isDirectory: true });
+  treeData.set('closed_parent', [{ name: 'hidden_sub', relPath: 'closed_parent/hidden_sub', absPath: `${wsRoot}/closed_parent/hidden_sub`, fileUri: `file://${wsRoot}/closed_parent/hidden_sub`, isDirectory: true }]);
+  treeData.set('closed_parent/hidden_sub', []);
+  await clickDirRow('closed_parent');
+  await clickDirRow('closed_parent/hidden_sub');
+  // Collapse closed_parent so closed_parent/hidden_sub stays in expanded set under a closed ancestor
+  await clickDirRow('closed_parent');
+
+  // Re-select src/beta.js and set scrollTop before rotated sync renders
+  const betaRowStub = { dataset: { relPath: 'src/beta.js', isDir: '0', fileUri: `file://${wsRoot}/src/beta.js` } };
+  container.dispatch('click', { target: { closest: (sel) => (sel === '.af-tree-row[data-rel-path]' ? betaRowStub : null) } });
+  const viewport = getEl('tree-viewport');
+  viewport.scrollTop = 120;
+  assert.equal(getEl('active-path-text').textContent, 'src/beta.js');
+
+  // Mutate tail dir30 externally before syncing
+  treeData.get('dir30').push({ name: 'late30.js', relPath: 'dir30/late30.js', absPath: `${wsRoot}/dir30/late30.js`, fileUri: `file://${wsRoot}/dir30/late30.js`, isDirectory: false });
+
+  const round1Start = treeFetches.length;
+  await syncInterval.fn();
+  await new Promise((r) => setTimeout(r, 25));
+  const round1Dirs = treeFetches.slice(round1Start);
+  assert.ok(round1Dirs.length <= 25, `Single sync round must stay bounded (<=25), got ${round1Dirs.length}`);
+  assert.ok(!round1Dirs.includes('closed_parent/hidden_sub'), 'Collapsed-ancestor dir must not consume sync quota');
+
+  const round2Start = treeFetches.length;
+  await syncInterval.fn();
+  await new Promise((r) => setTimeout(r, 25));
+  const round2Dirs = treeFetches.slice(round2Start);
+  assert.ok(round2Dirs.length <= 25, `Second sync round must stay bounded (<=25), got ${round2Dirs.length}`);
+
+  const twoRoundSet = new Set([...round1Dirs, ...round2Dirs]);
+  assert.ok(twoRoundSet.has(''), 'Root directory must be included in sync rotation');
+  assert.ok(twoRoundSet.has('dir1/open_sub'), 'Open child dir must be refreshed within two rounds');
+  for (let i = 1; i <= 30; i++) {
+    assert.ok(twoRoundSet.has(`dir${i}`), `Visible open dir${i} must be synced within two rounds without starvation`);
+  }
+  assert.ok(container.innerHTML.includes('late30.js'), 'Rotated sync must pick up newly added late30.js in dir30');
+  assert.equal(viewport.scrollTop, 120, 'Scroll position must be preserved after rotated auto-sync render');
+  assert.equal(getEl('active-path-text').textContent, 'src/beta.js', 'Selected path must be preserved after rotated auto-sync render');
 
   // UX #3 check: search loading / truncated banner / error banner
   const searchInput = getEl('search-input');

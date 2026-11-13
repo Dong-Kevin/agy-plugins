@@ -373,6 +373,15 @@ export async function controlFloatWindow(options = {}, deps = {}) {
       action: action === 'open-aux' ? 'open' : 'toggle',
       convId: typeof options.convId === 'string' ? options.convId : ''
     });
+    if (trig?.ok === false || !trig?.seq) {
+      return {
+        ok: false,
+        acked: false,
+        lockBusy: true,
+        trigger: trig,
+        message: '侧栏触发锁繁忙，请稍后重试'
+      };
+    }
     const deadline = Date.now() + 650;
     let latest = readAuxPaneTrigger();
     while (Date.now() < deadline && Number(latest.ackSeq || 0) < Number(trig.seq || 1)) {
@@ -1256,6 +1265,9 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
       convId: typeof data.convId === 'string' ? data.convId : '',
       revealPath: typeof data.revealPath === 'string' ? data.revealPath : ''
     });
+    if (trigger?.ok === false || !trigger?.seq) {
+      return { ok: false, lockBusy: true, error: '共享触发锁繁忙，请稍后重试', trigger };
+    }
     return { ok: true, trigger };
   }
   if (u.pathname === '/api/float-window') {
@@ -1954,6 +1966,9 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
         uri: 'sidecar://context-viewer/dashboard/',
         action: 'toggle'
       });
+      if (trig?.ok === false || !trig?.seq) {
+        return;
+      }
       setTimeout(() => {
         const latest = readAuxPaneTrigger();
         if (Number(latest.ackSeq || 0) >= Number(trig.seq || 1)) return;

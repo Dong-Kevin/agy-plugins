@@ -262,6 +262,9 @@ function createHandlers(getDefaultConvId, makeResponse, transformHtml = (html) =
         convId: String(data.convId || ''),
         revealPath: String(data.revealPath || '')
       });
+      if (trigger?.ok === false || !trigger?.seq) {
+        return { ok: false, lockBusy: true, error: '共享触发锁繁忙，请稍后重试', trigger };
+      }
       return { ok: true, trigger };
     }
   };

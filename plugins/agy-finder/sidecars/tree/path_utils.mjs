@@ -181,6 +181,35 @@ function pathRequiresHidden(relPosix) {
   return relPosix.split('/').some((seg) => seg && (seg.startsWith('.') || DEFAULT_IGNORED_NAMES.has(seg)));
 }
 
+function matchWorkspaceRoot(targetAbs, exists, validRoots) {
+  for (const r of validRoots) {
+    if (isSubpath(r, targetAbs)) {
+      return { matchedRoot: r, absPath: targetAbs };
+    }
+  }
+  if (exists) {
+    let realTarget = '';
+    try {
+      realTarget = realpathSync(targetAbs);
+    } catch {}
+    if (realTarget) {
+      for (const r of validRoots) {
+        try {
+          const realR = realpathSync(r);
+          if (isSubpath(realR, realTarget)) {
+            const relFromRealRoot = relative(realR, realTarget);
+            const mappedAbs = relFromRealRoot ? join(r, relFromRealRoot) : r;
+            if (existsSync(mappedAbs)) {
+              return { matchedRoot: r, absPath: mappedAbs };
+            }
+          }
+        } catch {}
+      }
+    }
+  }
+  return { matchedRoot: '', absPath: targetAbs };
+}
+
 /**
  * Resolve any relative path, absolute path, file:// URI, or path:line against active roots.
  * @param {string} rawInput
@@ -212,49 +241,18 @@ export function resolveTargetPath(rawInput, roots = []) {
   if (isAbs) {
     absPath = resolve(cleanedPath);
     exists = existsSync(absPath);
-    for (const r of validRoots) {
-      if (isSubpath(r, absPath)) {
-        matchedRoot = r;
-        break;
-      }
-      if (exists) {
-        try {
-          if (isSubpath(realpathSync(r), realpathSync(absPath))) {
-            matchedRoot = r;
-            absPath = join(r, relative(realpathSync(r), realpathSync(absPath)));
-            break;
-          }
-        } catch {}
-      }
-    }
+    const matched = matchWorkspaceRoot(absPath, exists, validRoots);
+    matchedRoot = matched.matchedRoot;
+    absPath = matched.absPath;
   } else {
     for (const r of validRoots) {
       const candidate = resolve(r, cleanedPath);
       if (existsSync(candidate)) {
-        absPath = candidate;
         exists = true;
-        if (isSubpath(r, candidate)) {
-          matchedRoot = r;
-        } else {
-          let realCand = '';
-          try {
-            realCand = realpathSync(candidate);
-          } catch {}
-          for (const vr of validRoots) {
-            if (isSubpath(vr, candidate)) {
-              matchedRoot = vr;
-              break;
-            }
-            if (realCand) {
-              try {
-                if (isSubpath(realpathSync(vr), realCand)) {
-                  matchedRoot = vr;
-                  break;
-                }
-              } catch {}
-            }
-          }
-        }
+        const orderedRoots = [r, ...validRoots.filter((vr) => vr !== r)];
+        const matched = matchWorkspaceRoot(candidate, true, orderedRoots);
+        matchedRoot = matched.matchedRoot;
+        absPath = matched.absPath;
         break;
       }
     }
@@ -262,15 +260,9 @@ export function resolveTargetPath(rawInput, roots = []) {
       const fallbackRoot = validRoots[0] || process.cwd();
       absPath = resolve(fallbackRoot, cleanedPath);
       exists = existsSync(absPath);
-      if (isSubpath(fallbackRoot, absPath)) {
-        matchedRoot = fallbackRoot;
-      } else if (exists) {
-        try {
-          if (isSubpath(realpathSync(fallbackRoot), realpathSync(absPath))) {
-            matchedRoot = fallbackRoot;
-          }
-        } catch {}
-      }
+      const matched = matchWorkspaceRoot(absPath, exists, [fallbackRoot]);
+      matchedRoot = matched.matchedRoot;
+      absPath = matched.absPath;
     }
   }
 

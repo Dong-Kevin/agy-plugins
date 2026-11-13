@@ -450,7 +450,18 @@
     }
     const dirsToLoad = Array.from(dirsSet);
 
-    await Promise.all(dirsToLoad.map((d) => fetchDir(state.activeRoot, d, true).catch(() => [])));
+    let dirLoadErr = null;
+    await Promise.all(
+      dirsToLoad.map((d) =>
+        fetchDir(state.activeRoot, d, true).catch((err) => {
+          if (!dirLoadErr) dirLoadErr = err;
+          return [];
+        })
+      )
+    );
+    if (dirLoadErr) {
+      showToast(`目录展开失败：${dirLoadErr.message || '无法读取目标祖先目录'}`);
+    }
 
     state.selectedRelPath = res.relPath || '';
     state.selectedAbsPath = res.absPath;
@@ -1054,6 +1065,7 @@
     $('btn-collapse-all')?.addEventListener('click', () => {
       if (!state.activeRoot) return;
       state.expandedByRoot.set(state.activeRoot, new Set(['']));
+      syncCursorByRoot.set(state.activeRoot, 0);
       renderTree();
     });
 
@@ -1546,13 +1558,13 @@
               trig.uri
             ) {
               const sw = await apiPost('/api/aux-pane-trigger', { action: 'switched', seq: trig.seq }).catch(() => null);
-              if (sw?.claimed !== false) {
+              if (sw?.claimed) {
                 const ackRes = await apiPost('/api/aux-pane-trigger', {
                   action: 'ack',
                   seq: trig.seq,
                   plugin: 'agy-finder'
                 }).catch(() => null);
-                if (ackRes?.claimed !== false) {
+                if (ackRes?.claimed) {
                   sessionStorage.setItem('agy_aux_last_ack_seq', String(trig.seq));
                 }
                 if (pendingOpenTrigger?.seq === trig.seq) {
@@ -1631,7 +1643,7 @@
               seq,
               plugin: 'agy-finder'
             }).catch(() => null);
-            if (ackRes?.claimed === false) return;
+            if (!ackRes?.claimed) return;
             await apiPost('/api/aux-pane-trigger', { action: 'switched', seq }).catch(() => null);
             sessionStorage.setItem('agy_aux_last_ack_seq', String(seq));
             window.sidecar.ui.toggleAuxPane({ tabType: 'sidecarView', uri: trigger.uri });
@@ -1645,7 +1657,7 @@
             seq,
             plugin: 'agy-finder'
           }).catch(() => null);
-          if (ackRes?.claimed === false) return;
+          if (!ackRes?.claimed) return;
           sessionStorage.setItem('agy_aux_last_ack_seq', String(seq));
           if (trigger.revealPath) {
             triggerRevealOnce(seq, trigger.revealPath);
@@ -1662,7 +1674,7 @@
           seq,
           plugin: 'agy-finder'
         }).catch(() => null);
-        if (ackRes?.claimed !== false) {
+        if (ackRes?.claimed) {
           sessionStorage.setItem('agy_aux_last_ack_seq', String(seq));
         }
         triggerRevealOnce(seq, trigger.revealPath);
@@ -1750,6 +1762,19 @@
   }
 
   let syncVisibleInFlight = false;
+  const syncCursorByRoot = new Map();
+  const MAX_SYNC_SUBDIRS = 24;
+
+  function isExpandedDirChainOpen(expanded, relDir) {
+    if (!relDir) return true;
+    const parts = relDir.split('/').filter(Boolean);
+    for (let i = 1; i < parts.length; i += 1) {
+      if (!expanded.has(parts.slice(0, i).join('/'))) {
+        return false;
+      }
+    }
+    return true;
+  }
 
   function dirEntriesSignature(entries) {
     if (!Array.isArray(entries)) return '';
@@ -1776,11 +1801,23 @@
     syncVisibleInFlight = true;
     try {
       const expanded = getExpandedSet(root);
-      const dirsToSync = [''];
+      const visibleSubdirs = [];
       for (const d of expanded) {
-        if (d && dirsToSync.length < 25) {
-          dirsToSync.push(d);
+        if (d && isExpandedDirChainOpen(expanded, d)) {
+          visibleSubdirs.push(d);
         }
+      }
+      const dirsToSync = [''];
+      if (visibleSubdirs.length <= MAX_SYNC_SUBDIRS) {
+        dirsToSync.push(...visibleSubdirs);
+        syncCursorByRoot.set(root, 0);
+      } else {
+        const total = visibleSubdirs.length;
+        const start = (syncCursorByRoot.get(root) || 0) % total;
+        for (let k = 0; k < MAX_SYNC_SUBDIRS; k += 1) {
+          dirsToSync.push(visibleSubdirs[(start + k) % total]);
+        }
+        syncCursorByRoot.set(root, (start + MAX_SYNC_SUBDIRS) % total);
       }
       let changed = false;
       for (let i = 0; i < dirsToSync.length; i += 4) {

@@ -2884,6 +2884,8 @@ async function verifyDashboardFrontendBehavior(appSource) {
     turns: []
   });
 
+  let resolveSlowA = null;
+  let holdNextA = false;
   let resolveSlowB = null;
   let holdNextB = false;
   const seenContextQueries = [];
@@ -2998,6 +3000,11 @@ async function verifyDashboardFrontendBehavior(appSource) {
         const qConv = u.searchParams.get('conversationId') || convA;
         const qEtag = u.searchParams.get('etag') || '';
         seenContextQueries.push({ convId: qConv, etag: qEtag, force: u.searchParams.get('force') === '1' });
+        if (qConv === convA && holdNextA) {
+          holdNextA = false;
+          const payload = await new Promise((r) => { resolveSlowA = r; });
+          return { ok: true, status: 200, json: async () => payload };
+        }
         if (qConv === convB && holdNextB) {
           holdNextB = false;
           const payload = await new Promise((r) => { resolveSlowB = r; });
@@ -3082,6 +3089,55 @@ async function verifyDashboardFrontendBehavior(appSource) {
   followBtn.dispatch('click', { target: followBtn });
   await new Promise((r) => setTimeout(r, 30));
   assert(takeaway.textContent.includes('Alpha'), `点击跟随当前后应回到宿主对话 Alpha，实际：${takeaway.textContent}`);
+
+  // Verify S4: auto-follow live window.sidecar.conversationId changes while an auto-follow request is in flight
+  resolveSlowA = null;
+  holdNextA = true;
+  const beforeHoldA = seenContextQueries.length;
+  pollInterval.fn();
+  await new Promise((r) => setTimeout(r, 10));
+  assert(typeof resolveSlowA === 'function', '自动跟随慢请求 A 应已发出并挂起');
+
+  // Same live host target while request is in flight must coalesce (no extra request)
+  const queriesDuringSameHost = seenContextQueries.length;
+  pollInterval.fn();
+  await new Promise((r) => setTimeout(r, 10));
+  assert(
+    seenContextQueries.length === queriesDuringSameHost,
+    `同一宿主会话 A 请求在途时轮询应合并跳过，实际多发 ${seenContextQueries.length - queriesDuringSameHost} 次请求`
+  );
+
+  // Host switches live sidecar.conversationId to convB while A is still in flight
+  sandbox.window.sidecar.conversationId = convB;
+  pollInterval.fn();
+  await new Promise((r) => setTimeout(r, 30));
+  const queriesAfterLiveSwitch = seenContextQueries.slice(beforeHoldA);
+  assert(
+    queriesAfterLiveSwitch.some((q) => q.convId === convB && q.etag === ''),
+    `宿主实时切到 convB 后轮询不得被旧 A 请求阻塞，且应清空 etag，实际：${JSON.stringify(queriesAfterLiveSwitch)}`
+  );
+  assert(takeaway.textContent.includes('Bravo'), `宿主切到 convB 后应渲染 Bravo，实际：${takeaway.textContent}`);
+
+  // Late A response resolving afterward must be rejected and never overwrite Bravo
+  resolveSlowA(mkSnap(convA, 'Alpha', 'etag-a', 1200, 0.12));
+  await new Promise((r) => setTimeout(r, 25));
+  assert(
+    takeaway.textContent.includes('Bravo') && !takeaway.textContent.includes('Alpha'),
+    `滞后返回的旧宿主会话 A 不得覆盖当前 Bravo，实际：${takeaway.textContent}`
+  );
+
+  // Also verify: if host switches mid-flight and old request resolves BEFORE any new poll fires, old response is still dropped
+  holdNextB = true;
+  pollInterval.fn();
+  await new Promise((r) => setTimeout(r, 10));
+  assert(typeof resolveSlowB === 'function', '挂起请求 B 应就绪');
+  sandbox.window.sidecar.conversationId = convC;
+  resolveSlowB(mkSnap(convB, 'BravoStale', 'etag-b-stale', 2400, 0.24));
+  await new Promise((r) => setTimeout(r, 25));
+  assert(
+    !takeaway.textContent.includes('BravoStale'),
+    `响应返回时检测到 live window.sidecar.conversationId 已变为 convC，旧 B 响应必须被丢弃，实际：${takeaway.textContent}`
+  );
 }
 
 main().catch((err) => {

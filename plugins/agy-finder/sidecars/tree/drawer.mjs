@@ -876,7 +876,7 @@ function isAuxLockPidAlive(pid) {
   }
 }
 
-function withAuxTriggerLock(fn) {
+function withAuxTriggerLock(fn, options = {}) {
   const filePath = getSharedAuxTriggerPath();
   const lockPath = `${filePath}.lock`;
   try {
@@ -884,7 +884,9 @@ function withAuxTriggerLock(fn) {
   } catch {}
 
   const token = `${process.pid}:${Date.now()}:${randomBytes(6).toString('hex')}`;
-  const deadline = Date.now() + 4000;
+  const rawTimeout = Number(options.timeoutMs ?? process.env.AGY_AUX_LOCK_TIMEOUT_MS ?? 1200);
+  const timeoutMs = Number.isFinite(rawTimeout) ? Math.max(20, Math.min(4000, rawTimeout)) : 1200;
+  const deadline = Date.now() + timeoutMs;
   let acquired = false;
   let attempt = 0;
 
@@ -895,6 +897,11 @@ function withAuxTriggerLock(fn) {
       writeSync(fd, token);
       acquired = true;
     } catch (err) {
+      if (fd !== null && !acquired) {
+        try { closeSync(fd); } catch {}
+        fd = null;
+        try { unlinkSync(lockPath); } catch {}
+      }
       if (err?.code === 'ENOENT') {
         try { mkdirSync(dirname(lockPath), { recursive: true }); } catch {}
         continue;
@@ -904,24 +911,28 @@ function withAuxTriggerLock(fn) {
       try {
         const st = statSync(lockPath);
         const ageMs = Date.now() - Number(st.mtimeMs || 0);
-        if (ageMs >= 5000) {
-          let raw = '';
-          try { raw = readFileSync(lockPath, 'utf8'); } catch {}
-          const ownerPid = Number(String(raw || '').split(':')[0]);
-          if (!isAuxLockPidAlive(ownerPid) || ageMs >= 15000) {
-            const stalePath = `${lockPath}.stale.${process.pid}.${Date.now()}`;
-            try {
-              renameSync(lockPath, stalePath);
-              try { unlinkSync(stalePath); } catch {}
-              continue;
-            } catch {}
-          }
+        let raw = '';
+        try { raw = readFileSync(lockPath, 'utf8'); } catch {}
+        const trimmed = String(raw || '').trim();
+        const hasPidSep = trimmed.includes(':');
+        const ownerPid = hasPidSep ? Number(trimmed.split(':')[0]) : 0;
+        const deadOwner = hasPidSep && Number.isInteger(ownerPid) && ownerPid > 0 && !isAuxLockPidAlive(ownerPid);
+        const orphanedBlank = !hasPidSep && ageMs >= 2000;
+        if (deadOwner || orphanedBlank) {
+          const stalePath = `${lockPath}.stale.${process.pid}.${Date.now()}.${attempt}`;
+          try {
+            renameSync(lockPath, stalePath);
+            try { unlinkSync(stalePath); } catch {}
+            continue;
+          } catch {}
         }
       } catch (statErr) {
         if (statErr?.code === 'ENOENT') continue;
       }
 
-      const waitMs = Math.min(16, 2 + attempt * 2);
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) break;
+      const waitMs = Math.min(remainingMs, Math.min(16, 2 + attempt * 2));
       attempt += 1;
       try {
         Atomics.wait(AUX_TRIGGER_WAIT_ARR, 0, 0, waitMs);
@@ -933,16 +944,18 @@ function withAuxTriggerLock(fn) {
     }
   }
 
+  if (!acquired) {
+    return typeof options.onFail === 'function' ? options.onFail(filePath) : null;
+  }
+
   try {
     return fn(filePath);
   } finally {
-    if (acquired) {
-      try {
-        if (readFileSync(lockPath, 'utf8') === token) {
-          unlinkSync(lockPath);
-        }
-      } catch {}
-    }
+    try {
+      if (readFileSync(lockPath, 'utf8') === token) {
+        unlinkSync(lockPath);
+      }
+    } catch {}
   }
 }
 
@@ -1003,6 +1016,8 @@ export function writeAuxPaneTrigger({ targetPlugin = 'agy-finder', uri = '', act
     };
     writeJsonFileAtomic(filePath, next);
     return next;
+  }, {
+    onFail: () => ({ ...readAuxPaneTrigger(), ok: false, seq: 0, lockBusy: true })
   });
 }
 
@@ -1022,6 +1037,8 @@ export function markAuxPaneOpening({ seq } = {}) {
     };
     writeJsonFileAtomic(filePath, next);
     return { ok: true, claimed: true, trigger: next };
+  }, {
+    onFail: () => ({ ok: false, claimed: false, lockBusy: true, trigger: readAuxPaneTrigger() })
   });
 }
 
@@ -1043,6 +1060,8 @@ export function ackAuxPaneTrigger({ seq, plugin = 'agy-finder' } = {}) {
     };
     writeJsonFileAtomic(filePath, next);
     return { ok: true, claimed: true, trigger: next };
+  }, {
+    onFail: () => ({ ok: false, claimed: false, lockBusy: true, trigger: readAuxPaneTrigger() })
   });
 }
 
@@ -1062,6 +1081,8 @@ export function markAuxPaneSwitched({ seq } = {}) {
     };
     writeJsonFileAtomic(filePath, next);
     return { ok: true, claimed: true, trigger: next };
+  }, {
+    onFail: () => ({ ok: false, claimed: false, lockBusy: true, trigger: readAuxPaneTrigger() })
   });
 }
 
@@ -1083,6 +1104,8 @@ export function recordAuxActiveConversation({ convId = '' } = {}) {
       activeConvUpdatedAt: now
     });
     return { ok: true, activeConvId: cleanId };
+  }, {
+    onFail: () => ({ ok: false, activeConvId: '', lockBusy: true })
   });
 }
 
@@ -1448,6 +1471,16 @@ export async function controlDrawer(options = {}, deps = {}) {
       convId: String(options.convId || ''),
       revealPath: String(options.revealPath || '')
     });
+    if (trigger?.ok === false || !trigger?.seq) {
+      return {
+        ...getDrawerStatus(platform),
+        ok: false,
+        acked: false,
+        lockBusy: true,
+        trigger,
+        message: '侧栏触发锁繁忙，请稍后重试'
+      };
+    }
     const deadline = Date.now() + 650;
     let latest = readAuxPaneTrigger();
     while (Date.now() < deadline && Number(latest.ackSeq || 0) < Number(trigger.seq || 1)) {
@@ -2081,6 +2114,9 @@ async function dispatchDrawerRpc(rawPath, method, rawBody, stateObj, hooks = {})
         convId: String(data.convId || ''),
         revealPath: String(data.revealPath || '')
       });
+      if (trigger?.ok === false || !trigger?.seq) {
+        return { ok: false, lockBusy: true, error: '共享触发锁繁忙，请稍后重试', trigger };
+      }
       return { ok: true, trigger };
     }
     if (act === 'set-pinned') {
@@ -2134,6 +2170,9 @@ async function dispatchDrawerRpc(rawPath, method, rawBody, stateObj, hooks = {})
         convId: String(data.convId || ''),
         revealPath: String(data.revealPath || '')
       });
+      if (trigger?.ok === false || !trigger?.seq) {
+        return { ok: false, lockBusy: true, error: '共享触发锁繁忙，请稍后重试', trigger };
+      }
       return { ok: true, trigger };
     }
   }
@@ -2295,6 +2334,9 @@ async function startMacNativeDaemon({
         uri: 'sidecar://agy-finder/tree/',
         action: 'toggle'
       });
+      if (trigger?.ok === false || !trigger?.seq) {
+        return;
+      }
       const checkTimer = setTimeout(() => {
         const cur = readAuxPaneTrigger();
         if (Number(cur.ackSeq || 0) >= Number(trigger.seq || 1)) return;

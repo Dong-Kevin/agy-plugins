@@ -18,8 +18,8 @@ Every plugin is built strictly on Antigravity's official `plugin.json` and `side
 
 | Directory | Plugin `name` | Version | Default Shortcuts & Quick Commands | Purpose | Docs |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| [`plugins/agy-finder`](./plugins/agy-finder) | `agy-finder` | `v0.2.2` | `⌘⇧E` (drawer) · `⌥⌘E` (Aux Pane) · `/agy-finder` · `[📂]` · `agy-finder aux` | Right-side Project File Tree & Instant Path Reveal | [README](./plugins/agy-finder/README_EN.md) |
-| [`plugins/agy-context-viewer`](./plugins/agy-context-viewer) | `context-viewer` | `v1.7.2` | `⌥⌘K` (window) · `⌃⌥K` (Aux Pane) · `/context-viewer` · `agy-context aux` | Context Window, Speed, `5h + Weekly` Quotas & Token Analytics | [README](./plugins/agy-context-viewer/README_EN.md) |
+| [`plugins/agy-finder`](./plugins/agy-finder) | `agy-finder` | `v0.2.3` | `⌘⇧E` (drawer) · `⌥⌘E` (Aux Pane) · `/agy-finder` · `[📂]` · `agy-finder aux` | Right-side Project File Tree & Instant Path Reveal | [README](./plugins/agy-finder/README_EN.md) |
+| [`plugins/agy-context-viewer`](./plugins/agy-context-viewer) | `context-viewer` | `v1.7.3` | `⌥⌘K` (window) · `⌃⌥K` (Aux Pane) · `/context-viewer` · `agy-context aux` | Context Window, Speed, `5h + Weekly` Quotas & Token Analytics | [README](./plugins/agy-context-viewer/README_EN.md) |
 
 ---
 
@@ -184,8 +184,8 @@ agy-plugins/
 ├── install.sh                         # Unified installer / lister / uninstaller (macOS / Linux)
 ├── install.ps1                        # Unified installer / lister / uninstaller (Windows PowerShell)
 ├── plugins/
-│   ├── agy-finder/                    # Project file tree plugin (v0.2.2)
-│   └── agy-context-viewer/            # Context & token analytics plugin (context-viewer v1.7.2)
+│   ├── agy-finder/                    # Project file tree plugin (v0.2.3)
+│   └── agy-context-viewer/            # Context & token analytics plugin (context-viewer v1.7.3)
 └── scripts/
     ├── verify.mjs                     # Repo-wide schema, privacy, PNG metadata, plugin & installer suite
     ├── package-all.mjs                # Zero-dependency Release ZIP + SHA-256 packager

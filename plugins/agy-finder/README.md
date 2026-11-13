@@ -2,7 +2,7 @@
 
 # AGY Finder 项目目录树 (`agy-finder`)
 
-[![Version](https://img.shields.io/badge/version-v0.2.2-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
+[![Version](https://img.shields.io/badge/version-v0.2.3-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-818cf8)](#安装与启用)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D%2018-22c55e)](#安装与启用)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-a855f7)](#核心特性)
