@@ -35,9 +35,9 @@ const PLUGIN_ROOT = resolve(__dirname, '..', '..');
 const PLUGIN_DIR_ID = basename(PLUGIN_ROOT);
 const PLUGIN_VERSION = (() => {
   try {
-    return JSON.parse(readFileSync(join(PLUGIN_ROOT, 'plugin.json'), 'utf-8')).version || '1.7.4';
+    return JSON.parse(readFileSync(join(PLUGIN_ROOT, 'plugin.json'), 'utf-8')).version || '1.7.5';
   } catch {
-    return '1.7.4';
+    return '1.7.5';
   }
 })();
 

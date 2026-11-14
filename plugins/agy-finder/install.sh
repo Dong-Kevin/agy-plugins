@@ -92,6 +92,10 @@ for f in package.json main.mjs path_utils.mjs mentions.mjs drawer.mjs cli.mjs na
   cp "$SCRIPT_DIR/sidecars/tree/$f" "$STAGE_DIR/sidecars/tree/$f"
 done
 
+if [[ -z "$ORIG_PLUGINS_DIR" ]] && [[ -f "$TARGET_DIR/sidecars/tree/cli.mjs" ]]; then
+  node "$TARGET_DIR/sidecars/tree/cli.mjs" quit >/dev/null 2>&1 || true
+fi
+
 mkdir -p "$TARGET_DIR/assets" "$TARGET_DIR/rules" "$TARGET_DIR/skills/agy-finder" "$TARGET_DIR/sidecars/tree"
 
 cp -f "$STAGE_DIR/plugin.json" "$TARGET_DIR/plugin.json"
@@ -127,3 +131,26 @@ fi
 
 echo "[agy-finder] 安装完成：$TARGET_DIR"
 echo "插件已自动加载并启用（可在 Customizations -> Installed 管理）：按 ⌘⇧E 开关独立抽屉，按 ⌥⌘E 直达 AGY 右侧辅助栏目录树，或运行 agy-finder aux / agy-finder --help。"
+
+OUTDATED_PEER_VER="$(node -e '
+  const fs = require("node:fs");
+  const [manifestPath, minVer, batchRaw, ...batchMatches] = process.argv.slice(1);
+  const batch = new Set(String(batchRaw || "").split(",").map((s) => s.trim()).filter(Boolean));
+  if (batchMatches.some((k) => batch.has(k)) || !fs.existsSync(manifestPath)) process.exit(0);
+  try {
+    const ver = String(JSON.parse(fs.readFileSync(manifestPath, "utf8")).version || "").trim();
+    const parse = (v) => {
+      const m = v.replace(/^v/i, "").split("+")[0].split("-")[0].split(".");
+      if (m.length < 3) return null;
+      const nums = m.slice(0, 3).map((x) => Number(x));
+      return nums.every((n) => Number.isInteger(n) && n >= 0) ? nums : null;
+    };
+    const a = parse(ver), b = parse(minVer);
+    if (!a || !b) process.exit(0);
+    const lt = a[0] !== b[0] ? a[0] < b[0] : (a[1] !== b[1] ? a[1] < b[1] : a[2] < b[2]);
+    if (lt) process.stdout.write(ver.replace(/^v/i, ""));
+  } catch {}
+' "$PLUGINS_DIR/context-viewer/plugin.json" "1.7.4" "${AGY_INSTALL_BATCH:-}" "agy-context-viewer" "context-viewer")" || true
+if [[ -n "$OUTDATED_PEER_VER" ]]; then
+  echo "[WARN] [agy-finder] 检测到同机已安装的 context-viewer 版本为 v${OUTDATED_PEER_VER}（低于共享触发锁协议所需的 v1.7.4）。请同步升级 context-viewer（例如在总仓运行 ./install.sh）并重载宿主或重启旧后台实例，以避免旧版锁回收竞争。"
+fi

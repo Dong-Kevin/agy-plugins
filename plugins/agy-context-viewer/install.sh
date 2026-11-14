@@ -185,3 +185,26 @@ printf "    2) 在终端运行 \033[36magy-context\033[0m 查看彩色进度条�
 if [[ ":${PATH}:" != *":${BIN_DIR}:"* ]]; then
   warn "提示：${BIN_DIR} 当前不在 PATH 中，也可直接运行：node ${TARGET_DIR}/sidecars/dashboard/cli.mjs"
 fi
+
+OUTDATED_PEER_VER="$(node -e '
+  const fs = require("node:fs");
+  const [manifestPath, minVer, batchRaw, ...batchMatches] = process.argv.slice(1);
+  const batch = new Set(String(batchRaw || "").split(",").map((s) => s.trim()).filter(Boolean));
+  if (batchMatches.some((k) => batch.has(k)) || !fs.existsSync(manifestPath)) process.exit(0);
+  try {
+    const ver = String(JSON.parse(fs.readFileSync(manifestPath, "utf8")).version || "").trim();
+    const parse = (v) => {
+      const m = v.replace(/^v/i, "").split("+")[0].split("-")[0].split(".");
+      if (m.length < 3) return null;
+      const nums = m.slice(0, 3).map((x) => Number(x));
+      return nums.every((n) => Number.isInteger(n) && n >= 0) ? nums : null;
+    };
+    const a = parse(ver), b = parse(minVer);
+    if (!a || !b) process.exit(0);
+    const lt = a[0] !== b[0] ? a[0] < b[0] : (a[1] !== b[1] ? a[1] < b[1] : a[2] < b[2]);
+    if (lt) process.stdout.write(ver.replace(/^v/i, ""));
+  } catch {}
+' "${PLUGINS_ROOT}/agy-finder/plugin.json" "0.2.4" "${AGY_INSTALL_BATCH:-}" "agy-finder")" || true
+if [[ -n "${OUTDATED_PEER_VER}" ]]; then
+  warn "[WARN] 检测到同机已安装的 agy-finder 版本为 v${OUTDATED_PEER_VER}（低于共享触发锁协议所需的 v0.2.4）。请同步升级 agy-finder（例如在总仓运行 ./install.sh）并重载宿主或重启旧后台实例，以避免旧版锁回收竞争。"
+fi

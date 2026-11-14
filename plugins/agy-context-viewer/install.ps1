@@ -171,6 +171,23 @@ try {
   Write-Host "[context-viewer] 安装完成！版本：$Ver" -ForegroundColor Green
   Write-Host "  • Antigravity 桌面端：在 Customizations -> Plugins 中开启「上下文与 Token 看板」，可用右侧辅助栏打开，或运行 agy-context float / agy-context aux。"
   Write-Host "  • agy CLI / 终端：在对话中输入 /context-viewer，或在终端运行 `"$CliWrapper`"（支持 aux / float / shortcut / aux-shortcut / web）。"
+
+  $BatchList = @()
+  if ($env:AGY_INSTALL_BATCH) {
+    $BatchList = $env:AGY_INSTALL_BATCH.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+  }
+  $PeerManifest = Join-Path $PluginsRoot "agy-finder\plugin.json"
+  if ((-not ($BatchList -contains "agy-finder")) -and (Test-Path $PeerManifest)) {
+    try {
+      $PeerVerRaw = [string]((Get-Content $PeerManifest -Raw -Encoding UTF8 | ConvertFrom-Json).version)
+      if ($PeerVerRaw -match '^v?(\d+)\.(\d+)\.(\d+)') {
+        $PV = [version]::new([int]$Matches[1], [int]$Matches[2], [int]$Matches[3])
+        if ($PV -lt [version]::new(0, 2, 4)) {
+          Write-Host "[WARN] [context-viewer] 检测到同机已安装的 agy-finder 版本为 v$($PeerVerRaw.TrimStart('v'))（低于共享触发锁协议所需的 v0.2.4）。请同步升级 agy-finder（例如在总仓运行 .\install.ps1）并重载宿主或重启旧后台实例，以避免旧版锁回收竞争。" -ForegroundColor Yellow
+        }
+      }
+    } catch {}
+  }
 } finally {
   if ($TempDir -and (Test-Path $TempDir)) {
     Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue

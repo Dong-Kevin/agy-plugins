@@ -1262,6 +1262,8 @@ function compareAuxTickets(aTicket, aPid, aNonce, bTicket, bPid, bNonce) {
   return aNonce < bNonce ? -1 : 1;
 }
 
+// Two-layer Lamport Bakery (.lock.d) + .lock protocol (requires agy-finder >= 0.2.4 and context-viewer >= 1.7.4).
+// All .lock.d filenames carry unique immutable (pid, nonce) suffixes so dead-PID reaping unlinks can never delete a newer contender's entry.
 function withAuxTriggerLock(fn, options = {}) {
   const filePath = getSharedAuxTriggerPath();
   const lockPath = `${filePath}.lock`;
@@ -1301,6 +1303,7 @@ function withAuxTriggerLock(fn, options = {}) {
       try { unlinkSync(enteringPath); } catch {}
       enteringPath = '';
 
+      // A single entering snapshot taken after creating ticketPath suffices: any later entrant will observe ticketPath and draw a ticket > myTicket.
       let snapshot = readdirSync(lockDir);
       const pendingEntering = new Map();
       for (const name of snapshot) {
@@ -1460,6 +1463,7 @@ function withAuxTriggerLock(fn, options = {}) {
       try { unlinkSync(candPath); } catch {}
     }
     if (lockAcquired) {
+      // Must unlink .lock before ticketPath so waiting contenders only enter the .lock phase after .lock is released.
       try {
         if (readFileSync(lockPath, 'utf8') === token) {
           unlinkSync(lockPath);

@@ -100,6 +100,11 @@ try {
     }
   }
 
+  $ExistingCli = Join-Path $TargetDir "sidecars\tree\cli.mjs"
+  if ((-not $OrigPluginsDir) -and (Test-Path $ExistingCli)) {
+    try { & node $ExistingCli quit 2>&1 | Out-Null } catch {}
+  }
+
   $Dirs = @(
     $TargetDir,
     (Join-Path $TargetDir "assets"),
@@ -149,6 +154,23 @@ try {
 
   Write-Host "[agy-finder] 安装完成：$TargetDir"
   Write-Host "插件已自动加载并启用（可在 Customizations -> Installed 管理）：可运行 agy-finder（独立抽屉）或 agy-finder aux（AGY 侧栏目录树），也可绑定 Ctrl+Shift+E / Ctrl+Alt+E。"
+
+  $BatchList = @()
+  if ($env:AGY_INSTALL_BATCH) {
+    $BatchList = $env:AGY_INSTALL_BATCH.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+  }
+  $PeerManifest = Join-Path $PluginsDir "context-viewer\plugin.json"
+  if ((-not ($BatchList -contains "agy-context-viewer")) -and (-not ($BatchList -contains "context-viewer")) -and (Test-Path $PeerManifest)) {
+    try {
+      $PeerVerRaw = [string]((Get-Content $PeerManifest -Raw -Encoding UTF8 | ConvertFrom-Json).version)
+      if ($PeerVerRaw -match '^v?(\d+)\.(\d+)\.(\d+)') {
+        $PV = [version]::new([int]$Matches[1], [int]$Matches[2], [int]$Matches[3])
+        if ($PV -lt [version]::new(1, 7, 4)) {
+          Write-Host "[WARN] [agy-finder] 检测到同机已安装的 context-viewer 版本为 v$($PeerVerRaw.TrimStart('v'))（低于共享触发锁协议所需的 v1.7.4）。请同步升级 context-viewer（例如在总仓运行 .\install.ps1）并重载宿主或重启旧后台实例，以避免旧版锁回收竞争。" -ForegroundColor Yellow
+        }
+      }
+    } catch {}
+  }
 } finally {
   if ($TempDir -and (Test-Path $TempDir)) {
     Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue

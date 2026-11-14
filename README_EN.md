@@ -18,8 +18,8 @@ Every plugin is built strictly on Antigravity's official `plugin.json` and `side
 
 | Directory | Plugin `name` | Version | Default Shortcuts & Quick Commands | Purpose | Docs |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| [`plugins/agy-finder`](./plugins/agy-finder) | `agy-finder` | `v0.2.4` | `⌘⇧E` (drawer) · `⌥⌘E` (Aux Pane) · `/agy-finder` · `[📂]` · `agy-finder aux` | Right-side Project File Tree & Instant Path Reveal | [README](./plugins/agy-finder/README_EN.md) |
-| [`plugins/agy-context-viewer`](./plugins/agy-context-viewer) | `context-viewer` | `v1.7.4` | `⌥⌘K` (window) · `⌃⌥K` (Aux Pane) · `/context-viewer` · `agy-context aux` | Context Window, Speed, `5h + Weekly` Quotas & Token Analytics | [README](./plugins/agy-context-viewer/README_EN.md) |
+| [`plugins/agy-finder`](./plugins/agy-finder) | `agy-finder` | `v0.2.5` | `⌘⇧E` (drawer) · `⌥⌘E` (Aux Pane) · `/agy-finder` · `[📂]` · `agy-finder aux` | Right-side Project File Tree & Instant Path Reveal | [README](./plugins/agy-finder/README_EN.md) |
+| [`plugins/agy-context-viewer`](./plugins/agy-context-viewer) | `context-viewer` | `v1.7.5` | `⌥⌘K` (window) · `⌃⌥K` (Aux Pane) · `/context-viewer` · `agy-context aux` | Context Window, Speed, `5h + Weekly` Quotas & Token Analytics | [README](./plugins/agy-context-viewer/README_EN.md) |
 
 ---
 
@@ -114,6 +114,8 @@ Please install all plugins from https://github.com/Dong-Kevin/agy-plugins (on ma
 Please install only the agy-finder plugin from https://github.com/Dong-Kevin/agy-plugins (on macOS/Linux run `curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh | bash -s -- agy-finder`, on Windows PowerShell run `$env:AGY_PLUGIN="agy-finder"; irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.ps1 | iex`), verify it is active, and list its shortcuts and CLI commands.
 ```
 
+> **Coexisting-Plugin Upgrade Note**: When both `agy-finder` and `context-viewer` are installed on the same machine, they share the `~/.gemini/antigravity/agy_aux_pane_trigger.json` lock protocol. Please upgrade both together (via the full install command) to `agy-finder >= 0.2.4` and `context-viewer >= 1.7.4`, and ensure any previously running background daemons (`agy-finder quit` / `agy-context float quit`) and host-loaded Sidecar instances have exited or reloaded so older builds cannot bypass the new Bakery lock; single-plugin installations are unaffected.
+
 ### Option 2: macOS / Linux One-Liner (All or Single Plugin)
 
 ```bash
@@ -184,8 +186,8 @@ agy-plugins/
 ├── install.sh                         # Unified installer / lister / uninstaller (macOS / Linux)
 ├── install.ps1                        # Unified installer / lister / uninstaller (Windows PowerShell)
 ├── plugins/
-│   ├── agy-finder/                    # Project file tree plugin (v0.2.4)
-│   └── agy-context-viewer/            # Context & token analytics plugin (context-viewer v1.7.4)
+│   ├── agy-finder/                    # Project file tree plugin (v0.2.5)
+│   └── agy-context-viewer/            # Context & token analytics plugin (context-viewer v1.7.5)
 └── scripts/
     ├── verify.mjs                     # Repo-wide schema, privacy, PNG metadata, plugin & installer suite
     ├── package-all.mjs                # Zero-dependency Release ZIP + SHA-256 packager

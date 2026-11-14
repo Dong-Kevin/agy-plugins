@@ -171,6 +171,11 @@ else
   done
 fi
 
+BATCH_SELECTED_CSV=""
+if [[ "$UNINSTALL" -eq 0 ]]; then
+  BATCH_SELECTED_CSV="$(IFS=,; echo "${SELECTED_DIRS[*]}")"
+fi
+
 for dir_name in "${SELECTED_DIRS[@]}"; do
   installer="${SCRIPT_ROOT}/plugins/${dir_name}/install.sh"
   echo ""
@@ -178,6 +183,6 @@ for dir_name in "${SELECTED_DIRS[@]}"; do
   if [[ "$UNINSTALL" -eq 1 ]]; then
     bash "$installer" --uninstall
   else
-    bash "$installer"
+    AGY_INSTALL_BATCH="${BATCH_SELECTED_CSV}" bash "$installer"
   fi
 done

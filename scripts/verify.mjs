@@ -289,6 +289,32 @@ function verifyRootInstaller() {
     assert.ok(!existsSync(join(tempBin, 'agy-finder')));
     assert.ok(!existsSync(join(tempBin, 'agy-context')));
 
+    // U1: Coexisting outdated-peer [WARN] on single-plugin install (strictly read-only), silent when batch-upgrading or up-to-date
+    const expectedFinderVer = JSON.parse(readFileSync(join(ROOT, 'plugins', 'agy-finder', 'plugin.json'), 'utf-8')).version;
+    const expectedCvVer = JSON.parse(readFileSync(join(ROOT, 'plugins', 'agy-context-viewer', 'plugin.json'), 'utf-8')).version;
+
+    mkdirSync(join(tempPlugins, 'context-viewer'), { recursive: true });
+    writeFileSync(join(tempPlugins, 'context-viewer', 'plugin.json'), JSON.stringify({ name: 'context-viewer', version: '1.7.3' }));
+    const finderWarnOut = execFileSync('bash', [join(ROOT, 'install.sh'), 'agy-finder'], { cwd: ROOT, env, encoding: 'utf-8' });
+    assert.ok(finderWarnOut.includes('[WARN]') && finderWarnOut.includes('v1.7.3') && finderWarnOut.includes('v1.7.4'), 'Installing agy-finder alone with v1.7.3 peer must warn');
+    assert.equal(JSON.parse(readFileSync(join(tempPlugins, 'context-viewer', 'plugin.json'), 'utf-8')).version, '1.7.3', 'Single-plugin install must never modify peer plugin');
+
+    writeFileSync(join(tempPlugins, 'agy-finder', 'plugin.json'), JSON.stringify({ name: 'agy-finder', version: '0.2.3' }));
+    const cvWarnOut = execFileSync('bash', [join(ROOT, 'install.sh'), 'context-viewer'], { cwd: ROOT, env, encoding: 'utf-8' });
+    assert.ok(cvWarnOut.includes('[WARN]') && cvWarnOut.includes('v0.2.3') && cvWarnOut.includes('v0.2.4'), 'Installing context-viewer alone with v0.2.3 peer must warn');
+    assert.equal(JSON.parse(readFileSync(join(tempPlugins, 'agy-finder', 'plugin.json'), 'utf-8')).version, '0.2.3', 'Single-plugin install must never modify agy-finder peer');
+
+    writeFileSync(join(tempPlugins, 'context-viewer', 'plugin.json'), JSON.stringify({ name: 'context-viewer', version: '1.7.3' }));
+    const batchUpgradeOut = execFileSync('bash', [join(ROOT, 'install.sh')], { cwd: ROOT, env, encoding: 'utf-8' });
+    assert.ok(!batchUpgradeOut.includes('[WARN]'), `Full batch upgrade must not emit stale-peer [WARN]:\n${batchUpgradeOut}`);
+    assert.equal(JSON.parse(readFileSync(join(tempPlugins, 'agy-finder', 'plugin.json'), 'utf-8')).version, expectedFinderVer);
+    assert.equal(JSON.parse(readFileSync(join(tempPlugins, 'context-viewer', 'plugin.json'), 'utf-8')).version, expectedCvVer);
+
+    const upToDateSingleOut = execFileSync('bash', [join(ROOT, 'install.sh'), 'agy-finder'], { cwd: ROOT, env, encoding: 'utf-8' });
+    assert.ok(!upToDateSingleOut.includes('[WARN]'), 'Single-plugin install with >=1.7.4 peer must not warn');
+
+    execFileSync('bash', [join(ROOT, 'install.sh'), '--uninstall'], { cwd: ROOT, env, stdio: 'pipe' });
+
     // R6: isolated AGY_PLUGINS_DIR install & uninstall WITHOUT AGY_BIN_DIR must preserve existing $HOME/.local/bin CLI tools
     const fakeHome = mkdtempSync(join(tmpdir(), 'agy-plugins-fakehome-'));
     const isolatedPlugins = mkdtempSync(join(tmpdir(), 'agy-plugins-iso-'));
@@ -323,7 +349,7 @@ function verifyRootInstaller() {
       rmSync(isolatedPlugins, { recursive: true, force: true });
     }
 
-    pass('Unified root install.sh (--list, selective install, R6 isolated HOME bin safety & --uninstall)');
+    pass('Unified root install.sh (--list, selective install, U1 peer warning, R6 isolated HOME bin safety & --uninstall)');
   } finally {
     rmSync(tempPlugins, { recursive: true, force: true });
     rmSync(tempBin, { recursive: true, force: true });
@@ -464,19 +490,22 @@ async function verifyCrossPluginAuxTriggerLock() {
     const deadPid = spawnSync(process.execPath, ['-e', '']).pid;
     assert.throws(() => process.kill(deadPid, 0), 'Dead helper PID must have exited');
 
-    const waitForMarker = async (markerPath, label) => {
+    const waitForMarker = async (markerPath, label, childProc = null) => {
       const deadline = Date.now() + 5000;
       while (!existsSync(markerPath)) {
+        if (childProc && childProc.exitCode !== null) {
+          throw new Error(`Worker exited (${childProc.exitCode}) before reaching barrier: ${label}`);
+        }
         if (Date.now() > deadline) throw new Error(`Timed out waiting for barrier marker: ${label}`);
         await new Promise((r) => setTimeout(r, 5));
       }
     };
 
-    const spawnBarrierWorker = ({ modUrl, seq, trigger, timeoutMs, hookScript }) => {
+    const spawnBarrierWorker = ({ modUrl, seq, trigger, timeoutMs, hookScript, allowSignal = '' }) => {
       const workerScript = `
         import fs from 'node:fs';
         import { syncBuiltinESMExports } from 'node:module';
-        import { join } from 'node:path';
+        import { basename, join } from 'node:path';
         const triggerPath = process.env.AGY_AUX_TRIGGER_PATH;
         const lockPath = triggerPath + '.lock';
         const lockDir = lockPath + '.d';
@@ -507,9 +536,14 @@ async function verifyCrossPluginAuxTriggerLock() {
       child.stderr.on('data', (d) => { err += d.toString('utf8'); });
       const done = new Promise((resolvePromise, rejectPromise) => {
         child.on('error', rejectPromise);
-        child.on('exit', (code) => {
-          if (code !== 0) rejectPromise(new Error(`Barrier worker exited ${code}: ${err || out}`));
-          else resolvePromise(JSON.parse(out.trim()));
+        child.on('exit', (code, signal) => {
+          if (allowSignal && signal === allowSignal) {
+            resolvePromise({ killed: true, signal });
+          } else if (code !== 0) {
+            rejectPromise(new Error(`Barrier worker exited ${code} (${signal || 'none'}): ${err || out}`));
+          } else {
+            resolvePromise(JSON.parse(out.trim()));
+          }
         });
       });
       return { pid: child.pid, child, done };
@@ -679,7 +713,88 @@ async function verifyCrossPluginAuxTriggerLock() {
       }
     }
 
-    pass('R1/S1/T1 cross-plugin 8-process Aux trigger lock integrity, stale recovery, bidirectional reclamation race & fail-closed timeout');
+    // 6. U1: 6-stage SIGKILL crash-recovery matrix (entering / ticket / critical x bidirectional finder <-> context)
+    for (let idx = 0; idx < modPairs.length; idx += 1) {
+      const [holderName, holderUrl, successorName, successorUrl] = modPairs[idx];
+      for (const phase of ['entering', 'ticket', 'critical']) {
+        const crashDir = join(auxDir, `u1-crash-${idx}-${phase}`);
+        const crashBarriers = join(crashDir, 'barriers');
+        mkdirSync(crashBarriers, { recursive: true });
+        const crashTrigger = join(crashDir, 'trigger.json');
+        const crashSeq = 70 + idx * 10 + ['entering', 'ticket', 'critical'].indexOf(phase);
+        writeFileSync(crashTrigger, JSON.stringify({ seq: crashSeq, openingSeq: 0 }));
+
+        const readyCrash = join(crashBarriers, `ready-${phase}`);
+        const resumeCrash = join(crashBarriers, `resume-${phase}`);
+        const hookScript = phase === 'critical'
+          ? `
+            const origRead = fs.readFileSync;
+            let paused = false;
+            fs.readFileSync = function(targetPath, ...args) {
+              const bytes = origRead.call(fs, targetPath, ...args);
+              if (!paused && targetPath === triggerPath) {
+                paused = true;
+                fs.writeFileSync(${JSON.stringify(readyCrash)}, 'ready');
+                waitForResume(${JSON.stringify(resumeCrash)});
+              }
+              return bytes;
+            };
+          `
+          : `
+            const origOpen = fs.openSync;
+            let paused = false;
+            fs.openSync = function(targetPath, ...args) {
+              const fd = origOpen.call(fs, targetPath, ...args);
+              if (!paused && typeof targetPath === 'string' && basename(targetPath).startsWith(${JSON.stringify(`${phase}-`)})) {
+                paused = true;
+                fs.writeFileSync(${JSON.stringify(readyCrash)}, 'ready');
+                waitForResume(${JSON.stringify(resumeCrash)});
+              }
+              return fd;
+            };
+          `;
+
+        const holder = spawnBarrierWorker({
+          modUrl: holderUrl,
+          seq: crashSeq,
+          trigger: crashTrigger,
+          timeoutMs: 4000,
+          allowSignal: 'SIGKILL',
+          hookScript
+        });
+        try {
+          await waitForMarker(readyCrash, `${holderName} ${phase} crash barrier`, holder.child);
+          const blocked = JSON.parse(await spawnWorker(`
+            import { markAuxPaneOpening } from ${JSON.stringify(successorUrl)};
+            console.log(JSON.stringify(markAuxPaneOpening({ seq: ${crashSeq} })));
+          `, { AGY_AUX_TRIGGER_PATH: crashTrigger, AGY_AUX_LOCK_TIMEOUT_MS: '80' }));
+          assert.equal(blocked.ok, false, `${successorName} must fail closed while ${holderName} is live at ${phase}`);
+          assert.equal(blocked.lockBusy, true, `${successorName} must report lockBusy while ${holderName} is live at ${phase}`);
+          assert.equal(blocked.claimed, false, `${successorName} must not claim seq ${crashSeq} while ${holderName} is live at ${phase}`);
+
+          holder.child.kill('SIGKILL');
+          const crashExit = await holder.done;
+          assert.equal(crashExit.killed, true, `${holderName} at ${phase} must exit via SIGKILL`);
+
+          const recovered = JSON.parse(await spawnWorker(`
+            import { markAuxPaneOpening } from ${JSON.stringify(successorUrl)};
+            console.log(JSON.stringify(markAuxPaneOpening({ seq: ${crashSeq} })));
+          `, { AGY_AUX_TRIGGER_PATH: crashTrigger }));
+          assert.equal(recovered.ok, true, `${successorName} must recover cleanly after ${holderName} SIGKILL at ${phase}`);
+          assert.equal(recovered.claimed, true, `${successorName} must claim seq ${crashSeq} after ${holderName} SIGKILL at ${phase}`);
+          assert.equal(JSON.parse(readFileSync(crashTrigger, 'utf-8')).openingSeq, crashSeq);
+          assert.ok(!existsSync(`${crashTrigger}.lock`), `Crash recovery (${holderName} -> ${successorName} @ ${phase}) must release .lock`);
+          assert.equal(readdirSync(`${crashTrigger}.lock.d`).length, 0, `Crash recovery (${holderName} -> ${successorName} @ ${phase}) must leave .lock.d empty`);
+        } finally {
+          if (holder.child.exitCode === null && holder.child.signalCode === null) {
+            holder.child.kill('SIGKILL');
+            await holder.done.catch(() => {});
+          }
+        }
+      }
+    }
+
+    pass('R1/S1/T1/U1 cross-plugin 8-process Aux trigger lock integrity, stale recovery, bidirectional reclamation race, 6-stage crash recovery & fail-closed timeout');
   } finally {
     rmSync(auxDir, { recursive: true, force: true });
   }

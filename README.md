@@ -18,8 +18,8 @@
 
 | 插件目录 | 插件标识 (`name`) | 版本 | 默认快捷键与快捷命令 | 核心定位 | 详细文档 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| [`plugins/agy-finder`](./plugins/agy-finder) | `agy-finder` | `v0.2.4` | `⌘⇧E`（抽屉） · `⌥⌘E`（AGY 侧栏） · `/agy-finder` · `[📂]` · `agy-finder aux` | 右侧项目目录树与对话路径直达定位 | [查看 README](./plugins/agy-finder/README.md) |
-| [`plugins/agy-context-viewer`](./plugins/agy-context-viewer) | `context-viewer` | `v1.7.4` | `⌥⌘K`（小窗） · `⌃⌥K`（AGY 侧栏） · `/context-viewer` · `agy-context aux` | 上下文窗口、速度、`5h + Week` 配额与 Token 看板 | [查看 README](./plugins/agy-context-viewer/README.md) |
+| [`plugins/agy-finder`](./plugins/agy-finder) | `agy-finder` | `v0.2.5` | `⌘⇧E`（抽屉） · `⌥⌘E`（AGY 侧栏） · `/agy-finder` · `[📂]` · `agy-finder aux` | 右侧项目目录树与对话路径直达定位 | [查看 README](./plugins/agy-finder/README.md) |
+| [`plugins/agy-context-viewer`](./plugins/agy-context-viewer) | `context-viewer` | `v1.7.5` | `⌥⌘K`（小窗） · `⌃⌥K`（AGY 侧栏） · `/context-viewer` · `agy-context aux` | 上下文窗口、速度、`5h + Week` 配额与 Token 看板 | [查看 README](./plugins/agy-context-viewer/README.md) |
 
 ---
 
@@ -114,6 +114,8 @@
 请帮我从 https://github.com/Dong-Kevin/agy-plugins 仅安装 agy-finder 插件（macOS / Linux 运行 `curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh | bash -s -- agy-finder`，Windows PowerShell 运行 `$env:AGY_PLUGIN="agy-finder"; irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.ps1 | iex`），完成后检查可用状态并说明快捷键。
 ```
 
+> **双插件共存升级说明**：若本机同时安装了 `agy-finder` 与 `context-viewer`，两者共享 `~/.gemini/antigravity/agy_aux_pane_trigger.json` 触发锁协议。升级时请执行全量安装命令将两者同步升级至 `agy-finder >= 0.2.4` 与 `context-viewer >= 1.7.4`，并确认旧版后台守护进程（`agy-finder quit` / `agy-context float quit`）及宿主已加载的旧 Sidecar 实例均已退出或重载，避免旧版进程绕过新 Bakery 锁协议并发认领同一事件；仅安装单个插件的用户不受影响。
+
 ### 方式 2：macOS / Linux 一键安装（支持全部或单插件）
 
 ```bash
@@ -188,8 +190,8 @@ agy-plugins/
 ├── install.sh                         # 统一安装 / 列表 / 卸载脚本（macOS / Linux）
 ├── install.ps1                        # 统一安装 / 列表 / 卸载脚本（Windows PowerShell）
 ├── plugins/
-│   ├── agy-finder/                    # 项目目录树插件（v0.2.4）
-│   └── agy-context-viewer/            # 上下文与 Token 看板插件（context-viewer v1.7.4）
+│   ├── agy-finder/                    # 项目目录树插件（v0.2.5）
+│   └── agy-context-viewer/            # 上下文与 Token 看板插件（context-viewer v1.7.5）
 └── scripts/
     ├── verify.mjs                     # 全仓规范、隐私、PNG 元数据、子插件与安装器门禁
     ├── package-all.mjs                # 零依赖构建各插件独立 Release ZIP 与 SHA-256

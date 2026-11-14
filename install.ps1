@@ -36,6 +36,7 @@ if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "plugins"))) {
 }
 
 $TempDir = $null
+$PrevBatch = $env:AGY_INSTALL_BATCH
 try {
   if (-not $ScriptRoot) {
     $TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("agy-plugins-" + [guid]::NewGuid().ToString("N"))
@@ -96,16 +97,23 @@ try {
     }
   }
 
+  $BatchSelectedCsv = ($Selected | ForEach-Object { $_.DirName }) -join ","
   foreach ($Item in $Selected) {
     Write-Host ""
     Write-Host "=== [agy-plugins] 处理插件：$($Item.DirName) ===" -ForegroundColor Cyan
     if ($Uninstall) {
       & $Item.Installer -Uninstall
     } else {
+      $env:AGY_INSTALL_BATCH = $BatchSelectedCsv
       & $Item.Installer
     }
   }
 } finally {
+  if ($null -eq $PrevBatch) {
+    Remove-Item Env:AGY_INSTALL_BATCH -ErrorAction SilentlyContinue
+  } else {
+    $env:AGY_INSTALL_BATCH = $PrevBatch
+  }
   if ($TempDir -and (Test-Path $TempDir)) {
     Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue
   }

@@ -2,7 +2,7 @@
 
 # Antigravity Context & Token Viewer (`agy-context-viewer`)
 
-[![Version](https://img.shields.io/badge/version-v1.7.4-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
+[![Version](https://img.shields.io/badge/version-v1.7.5-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-818cf8)](#一键安装)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D%2018-22c55e)](#一键安装)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-a855f7)](#隐私与安全机制)
@@ -112,6 +112,7 @@
 > - 本机需已安装 `Node.js >= 18`。
 > - **macOS 原生菜单栏与置顶小窗**：首次编译需本机具备 Swift 编译工具链（Xcode Command Line Tools，未安装时运行 `xcode-select --install`）；**Windows / Linux** 下宿主内嵌辅助栏、`agy-context` 终端看板与 `web` 模式完整可用，`float` 命令则回退为独立浏览器小窗（无系统菜单栏常驻图标与原生置顶层级）。
 > - **脱离宿主独立运行**：在未由 Antigravity 宿主注入本地语言服务地址与凭据的纯外部终端中，实时订阅档位与 `5h / Week` 配额查询会自动降级，本地会话归档与历史统计不受影响。
+> - **双插件共存升级说明**：若本机同时安装了 `agy-finder`，两者共享 `~/.gemini/antigravity/agy_aux_pane_trigger.json` 触发锁协议。升级 `context-viewer` 时请同步将 `agy-finder` 升级至 `>= v0.2.4`（建议运行总仓全量安装），并确认旧版后台守护进程与宿主 Sidecar 实例均已退出或重载，避免旧版进程绕过新 Bakery 锁协议并发认领同一事件；仅安装单个插件的用户不受影响。
 
 ### 方式 1：让 Antigravity Agent 协助安装（推荐首选）
 
@@ -153,7 +154,7 @@ cd agy-plugins
 ./install.sh agy-context-viewer   # Windows PowerShell 执行：.\install.ps1 -Plugin agy-context-viewer
 ```
 
-也可在 [Releases](https://github.com/Dong-Kevin/agy-plugins/releases) 页面下载 `context-viewer-v1.7.0.zip` 与对应的 `.sha256` 校验文件，通过 `shasum -a 256 -c context-viewer-v1.7.0.zip.sha256` 核验完整性后解压执行 `./context-viewer/install.sh`（或 `agy plugin install ./context-viewer`）。
+也可在 [Releases](https://github.com/Dong-Kevin/agy-plugins/releases) 页面下载 `context-viewer-v1.7.5.zip` 与对应的 `.sha256` 校验文件，通过 `shasum -a 256 -c context-viewer-v1.7.5.zip.sha256` 核验完整性后解压执行 `./context-viewer/install.sh`（或 `agy plugin install ./context-viewer`）。
 
 ---
 
@@ -274,7 +275,7 @@ agy-context-viewer/
 
 ```bash
 node scripts/verify.mjs           # 运行清单规范、JS 语法、常见敏感模式与 PNG 元数据块检查、CSS 隔离及行为回归测试
-node scripts/package-release.mjs  # 生成轻量发布包 dist/context-viewer-v1.7.0.zip 与 .sha256
+node scripts/package-release.mjs  # 生成轻量发布包 dist/context-viewer-v1.7.5.zip 与 .sha256
 ```
 
 ---

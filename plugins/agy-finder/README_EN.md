@@ -2,7 +2,7 @@
 
 # AGY Finder (`agy-finder`)
 
-[![Version](https://img.shields.io/badge/version-v0.2.4-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
+[![Version](https://img.shields.io/badge/version-v0.2.5-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-818cf8)](#installation)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D%2018-22c55e)](#installation)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-a855f7)](#key-features)
@@ -80,6 +80,8 @@ agy-finder quit                         # Stop the background drawer daemon
 ---
 
 ## Installation
+
+> **Coexisting-Plugin Upgrade Note**: When `context-viewer` is also installed on the same machine, both plugins share the `~/.gemini/antigravity/agy_aux_pane_trigger.json` lock protocol. Please ensure `context-viewer` is upgraded to `>= v1.7.4` alongside `agy-finder` (e.g., via the monorepo full installer), and make sure any previously running daemons and host-loaded Sidecar instances have exited or reloaded so older builds cannot bypass the new Bakery lock; standalone `agy-finder` installations are unaffected.
 
 ### Option 1: Ask Your Antigravity Agent to Install (Recommended)
 
