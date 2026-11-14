@@ -2,7 +2,7 @@
 
 # Antigravity Context & Token Viewer (`agy-context-viewer`)
 
-[![Version](https://img.shields.io/badge/version-v1.7.7-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
+[![Version](https://img.shields.io/badge/version-v1.7.8-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-818cf8)](#一键安装)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D%2018-22c55e)](#一键安装)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-a855f7)](#隐私与安全机制)
@@ -154,7 +154,7 @@ cd agy-plugins
 ./install.sh agy-context-viewer   # Windows PowerShell 执行：.\install.ps1 -Plugin agy-context-viewer
 ```
 
-也可在 [Releases](https://github.com/Dong-Kevin/agy-plugins/releases) 页面下载 `context-viewer-v1.7.7.zip` 与对应的 `.sha256` 校验文件，通过 `shasum -a 256 -c context-viewer-v1.7.7.zip.sha256` 核验完整性后解压执行 `./context-viewer/install.sh`（或 `agy plugin install ./context-viewer`）。
+也可在 [Releases](https://github.com/Dong-Kevin/agy-plugins/releases) 页面下载 `context-viewer-v1.7.8.zip` 与对应的 `.sha256` 校验文件，通过 `shasum -a 256 -c context-viewer-v1.7.8.zip.sha256` 核验完整性后解压执行 `./context-viewer/install.sh`（或 `agy plugin install ./context-viewer`）。
 
 ---
 
@@ -215,7 +215,7 @@ agy-context web              # 在 127.0.0.1:18970 启动本地只读 Web 服务
 | :--- | :--- |
 | **当前会话** | 预算占比圆环、输入框待发送 Token 实时预估、窗口上限快切（`自动 / 200K / 256K / 1M`）、单轮与累计缓存读取命中率、三段上下文构成条（`系统提示词 / 工具定义与调用 / 对话与思考历史`，支持展开工具 Schema 字节明细）、四维累计吞吐、服务端精确 `tok/s`（综合 / 流式峰值 / 会话均值）与首字延迟 `TTFT`、当前模型 `5h + Week` 配额条、近 24 轮增长曲线、**近 40 轮消耗涨跌 `±Delta` 与工具调用筛选列表** 及多媒体附件审计。 |
 | **用量趋势** | 支持 **全部来源 / 桌面端 / CLI** 一键过滤；提供累计、今日、本月、年度 4 张核心汇总卡片（含活跃天数、请求数与参考折算）；内置 **每天（53 周 GitHub 风格日历热力图） / 每周 / 每月 / 今年（12 月气泡矩阵） / 累计曲线** 5 种交互图表。 |
-| **费用与订阅** | 自动识别 `Google AI Pro` / `Google AI Ultra` 等档位（登录邮箱自动脱敏）、`Prompt / Flow Credits` 与分模型组 **`5h` 滚动限额 + `Week` 周度共享池余量**；支持 **家庭组共享（免额外付费）/ 家庭组 AA 拼车 / 赠送 / 多地区币种** 自定义设置，并提供 **本期自然月 / 全量历史** API 零售等值折算与分模型消耗排行。 |
+| **费用与订阅** | 自动识别 `Google AI Pro` / `Google AI Ultra` 等档位（登录邮箱自动脱敏）与 `Gemini / 非 Gemini` 分模型组 **`5h` 滚动限额 + `Week` 周度共享池余量**；支持 **家庭组共享（免额外付费）/ 家庭组 AA 拼车 / 赠送 / 多地区币种** 自定义设置，并提供 **本期自然月 / 全量历史** API 零售等值折算与分模型消耗排行。 |
 
 ---
 
@@ -275,7 +275,7 @@ agy-context-viewer/
 
 ```bash
 node scripts/verify.mjs           # 运行清单规范、JS 语法、常见敏感模式与 PNG 元数据块检查、CSS 隔离及行为回归测试
-node scripts/package-release.mjs  # 生成轻量发布包 dist/context-viewer-v1.7.7.zip 与 .sha256
+node scripts/package-release.mjs  # 生成轻量发布包 dist/context-viewer-v1.7.8.zip 与 .sha256
 ```
 
 ---

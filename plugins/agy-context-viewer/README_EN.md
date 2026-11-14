@@ -2,7 +2,7 @@
 
 # Antigravity Context & Token Viewer (`agy-context-viewer`)
 
-[![Version](https://img.shields.io/badge/version-v1.7.7-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
+[![Version](https://img.shields.io/badge/version-v1.7.8-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-818cf8)](#quick-install)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D%2018-22c55e)](#quick-install)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-a855f7)](#privacy--security)
@@ -154,7 +154,7 @@ cd agy-plugins
 ./install.sh agy-context-viewer   # On Windows PowerShell: .\install.ps1 -Plugin agy-context-viewer
 ```
 
-Or download `context-viewer-v1.7.7.zip` and `context-viewer-v1.7.7.zip.sha256` from [Releases](https://github.com/Dong-Kevin/agy-plugins/releases), verify the checksum via `shasum -a 256 -c context-viewer-v1.7.7.zip.sha256`, extract it, and run `./context-viewer/install.sh` (or `agy plugin install ./context-viewer`).
+Or download `context-viewer-v1.7.8.zip` and `context-viewer-v1.7.8.zip.sha256` from [Releases](https://github.com/Dong-Kevin/agy-plugins/releases), verify the checksum via `shasum -a 256 -c context-viewer-v1.7.8.zip.sha256`, extract it, and run `./context-viewer/install.sh` (or `agy plugin install ./context-viewer`).
 
 ---
 
@@ -215,7 +215,7 @@ agy-context web              # Start standalone local web UI on 127.0.0.1:18970 
 | :--- | :--- |
 | **Current Session** | Context budget ring gauge, live unsent input token estimator, budget ceiling switcher (`Auto / 200K / 256K / 1M`), per-turn & cumulative prompt cache hit rate, 3-segment context composition bar (`System Prompt / Tools / Chat & Thinking`, expandable per-tool schema byte breakdown), 4D cumulative token throughput, server-timed `tok/s` (overall, streaming peak, session mean) & `TTFT`, active model `5h + Weekly` quota bar, 24-turn growth sparkline, **filterable 40-turn `±Delta` & tool-call timeline**, and attachment audit. |
 | **Usage Trends** | Filter across **All Sources / Desktop / CLI**; 4 headline summary cards (All-Time, Today, Month, Year with active days, request counts, and API cost equivalent); 5 interactive chart modes: **Daily (53-week GitHub-style calendar heatmap), Weekly, Monthly, Yearly (12-month bubble matrix), and Cumulative**. |
-| **Cost & Subscription** | Automatic plan tier detection (`Google AI Pro` / `Google AI Ultra`, masked account email), `Prompt / Flow Credits`, and grouped **`5h` burst + `Weekly` shared quota pools**; customizable **Family Group Sharing (`$0` extra) / Split-Billing / Gifted / 22 regional presets / 40+ currencies**, plus **Current Month vs. All-Time** retail API valuation and per-model breakdown. |
+| **Cost & Subscription** | Automatic plan tier detection (`Google AI Pro` / `Google AI Ultra`, masked account email) and `Gemini / Non-Gemini` grouped **`5h` burst + `Weekly` shared quota pools**; customizable **Family Group Sharing (`$0` extra) / Split-Billing / Gifted / 22 regional presets / 40+ currencies**, plus **Current Month vs. All-Time** retail API valuation and per-model breakdown. |
 
 ---
 
@@ -275,7 +275,7 @@ agy-context-viewer/
 
 ```bash
 node scripts/verify.mjs           # Manifest spec, JS syntax, pattern + PNG metadata check, CSS isolation & behavioral tests
-node scripts/package-release.mjs  # Build lightweight dist/context-viewer-v1.7.7.zip + .sha256
+node scripts/package-release.mjs  # Build lightweight dist/context-viewer-v1.7.8.zip + .sha256
 ```
 
 ---

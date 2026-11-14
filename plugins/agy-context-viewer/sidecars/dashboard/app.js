@@ -1862,12 +1862,6 @@
       setText('plan-price-cny', plan.priceRangeNote || '--');
     }
 
-    const fmtCredit = (c) => {
-      if (!c || (c.available === null && c.monthly === null)) return '--';
-      if (c.available !== null && c.monthly !== null) return `${fmtInt(c.available)} / ${fmtInt(c.monthly)}`;
-      return fmtInt(c.available ?? c.monthly);
-    };
-
     const planRows = [
       ['当前账号（脱敏）', plan.maskedEmail || '本机已登录会话'],
       [
@@ -1879,9 +1873,7 @@
       [
         '权益获取渠道',
         plan.isCustomized ? (plan.acquisitionLabel || '--') : '未指定（支持设为家庭组共享 / AA 拼车 / 赠送）'
-      ],
-      ['Prompt Credits（可用 / 月度）', fmtCredit(plan.promptCredits)],
-      ['Flow Credits（可用 / 月度）', fmtCredit(plan.flowCredits)]
+      ]
     ];
     if (plan.accountCountry && plan.accountCountry !== '自动 / 未设置') {
       planRows.push(['账号归属地备注', plan.accountCountry]);
@@ -1957,12 +1949,15 @@
             .filter(Boolean);
           const families = Array.isArray(pool.families) && pool.families.length
             ? pool.families
-            : [...new Set(modelLabels.map((n) => n.replace(/\s*\((Low|Medium|High)\)\s*$/i, '').trim()))];
-          const label = families.length <= 3
+            : [...new Set(modelLabels.map((n) => n.replace(/\s*\((?:XHigh|Low|Medium|High|Minimal|Thinking|Fast)\)\s*$/i, '').trim()))];
+          const familySummary = families.length <= 3
             ? families.join(' / ')
             : `${families.slice(0, 3).join(' / ')} 等 ${families.length} 组`;
+          const label = pool.displayTitle || familySummary;
           const variantCount = pool.modelsCount || modelLabels.length;
-          const hoverDetail = modelLabels.length ? `包含档位：${modelLabels.join('、')}` : label;
+          const hoverDetail = modelLabels.length
+            ? `${familySummary}（包含档位：${modelLabels.join('、')}）`
+            : familySummary;
 
           const { pBase, rBase } = extractQuotaParts(pool);
           if (pool.fiveHour || pool.weekly) {

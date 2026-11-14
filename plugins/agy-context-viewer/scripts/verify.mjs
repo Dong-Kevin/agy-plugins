@@ -524,6 +524,19 @@ async function main() {
       s4Summary.byModel.some((m) => m.displayName === 'Claude 3.5 Sonnet' && m.unpriced && !m.missingModel),
     'S4 未收录代际模型在 summarizeApiCost 中未正确归入 unsupportedModel / 保留真实显示名'
   );
+  assert(normalizeModelId('MODEL_PLACEHOLDER_M322') === 'gemini-3.8-flash', 'S4 M322 placeholder 应映射 gemini-3.8-flash');
+  assert(normalizeModelId('Gemini 4 Hydrogen (XHigh)') === null, 'S4 Gemini 4 Hydrogen (XHigh) 应保持未收录单价 (null)');
+  const hydrogenMerged = summarizeApiCost([
+    { model: 'Gemini 4 Hydrogen (XHigh)', inputTokens: 2000, outputTokens: 200 },
+    { model: 'Gemini 4 Hydrogen (High)', inputTokens: 1000, outputTokens: 100 }
+  ]);
+  assert(
+    hydrogenMerged.byModel.length === 1 &&
+      hydrogenMerged.byModel[0].displayName === 'Gemini 4 Hydrogen' &&
+      hydrogenMerged.byModel[0].requests === 2 &&
+      hydrogenMerged.byModel[0].tokens === 3300,
+    `同模型不同推理强度后缀未合并：${JSON.stringify(hydrogenMerged.byModel)}`
+  );
   const ultraParsed = parseUserPlanStatus({
     userStatus: {
       userTier: { id: 'g1-ultra-tier', name: 'Google AI Ultra' },
@@ -646,6 +659,48 @@ async function main() {
     'F1 歧义同分候选组不应按字母序猜测覆盖原始 quotaInfo'
   );
 
+  // Q1: Hydrogen + XHigh + Orchestrator must merge into single Gemini umbrella pool despite descriptive group copy,
+  // producing semantic brand titles ("Gemini 模型" / "非 Gemini 模型（Claude / GPT）")
+  const q1Pools = groupModelQuotas([
+    { label: 'Gemini 4 Carbon (High)', modelId: 'MODEL_PLACEHOLDER_M427', quotaInfo: { remainingFraction: 0.965, resetTime: '2026-11-14T16:07:19Z' } },
+    { label: 'Gemini 4 Hydrogen (Low)', modelId: 'MODEL_PLACEHOLDER_M525', quotaInfo: { remainingFraction: 0.965, resetTime: '2026-11-14T16:07:19Z' } },
+    { label: 'Gemini 4 Hydrogen (High)', modelId: 'MODEL_PLACEHOLDER_M527', quotaInfo: { remainingFraction: 0.965, resetTime: '2026-11-14T16:07:19Z' } },
+    { label: 'Gemini 4 Hydrogen (XHigh)', modelId: 'MODEL_PLACEHOLDER_M528', quotaInfo: { remainingFraction: 0.965, resetTime: '2026-11-14T16:07:19Z' } },
+    { label: 'Orchestrator (Carbon)', modelId: 'MODEL_PLACEHOLDER_M667', quotaInfo: { remainingFraction: 0.965, resetTime: '2026-11-14T16:07:19Z' } },
+    { label: 'Claude Opus 5.5 (Thinking)', modelId: 'MODEL_PLACEHOLDER_M400', quotaInfo: { remainingFraction: 0.88, resetTime: '2026-11-14T16:38:00Z' } },
+    { label: 'GPT-OSS 120B (Medium)', modelId: 'MODEL_OPENAI_GPT_OSS_120B_MEDIUM', quotaInfo: { remainingFraction: 0.88, resetTime: '2026-11-14T16:38:00Z' } }
+  ], [
+    {
+      displayName: 'Gemini Models',
+      description: 'Includes Carbon, Argon, and Flash variants',
+      buckets: [
+        { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.965, resetTime: '2026-11-14T16:07:19Z' },
+        { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.924, resetTime: '2026-11-21T01:07:00Z' }
+      ]
+    },
+    {
+      displayName: 'Claude and GPT Models',
+      description: 'Third-party partner models including Claude and GPT-OSS',
+      buckets: [
+        { bucketId: '3p-5h', window: '5h', remainingFraction: 1, resetTime: '2026-11-14T16:38:00Z' },
+        { bucketId: '3p-weekly', window: 'weekly', remainingFraction: 0.266, resetTime: '2026-11-19T02:03:00Z' }
+      ]
+    }
+  ]);
+  const q1GemPool = q1Pools.find((p) => p.families.includes('Gemini 4 Hydrogen'));
+  const q1NonGemPool = q1Pools.find((p) => p.families.includes('Claude Opus 5.5'));
+  assert(
+    q1Pools.length === 2 &&
+      q1GemPool?.displayTitle === 'Gemini 模型' &&
+      q1GemPool?.shortLabel === 'Gemini' &&
+      q1GemPool?.modelsCount === 5 &&
+      q1GemPool.families.filter((f) => f === 'Gemini 4 Hydrogen').length === 1 &&
+      q1NonGemPool?.displayTitle === '非 Gemini 模型（Claude / GPT）' &&
+      q1NonGemPool?.shortLabel === '非 Gemini' &&
+      q1NonGemPool?.modelsCount === 2,
+    `Q1 Hydrogen / XHigh 并池或语义标题异常：${JSON.stringify(q1Pools)}`
+  );
+
   // Build reusable VM harness executing actual app.js renderers (Tab 1 Context/Quota + Tab 3 Quota Pools)
   const usdConstIdx = appJsSrc.indexOf('  const USD_TO_CNY =');
   const presetsIdx = appJsSrc.indexOf('  const HEAT_PRESETS =');
@@ -717,6 +772,30 @@ async function main() {
     runInNewContext(combinedSrc, vmCtx);
     return { vmCtx, getEl };
   };
+
+  // Q1 UI check: renderCostPanel must hide inaccurate Prompt/Flow Credits and render semantic Gemini / Non-Gemini labels
+  const q1Harness = createAppRenderHarness();
+  q1Harness.vmCtx.renderCostPanel({
+    planStatus: {
+      status: 'identified',
+      tierName: 'Google AI Ultra',
+      promptCredits: { available: 500, monthly: 50000 },
+      flowCredits: { available: 100, monthly: 150000 }
+    },
+    modelQuotas: q1Pools
+  });
+  const q1PlanHtml = q1Harness.getEl('plan-kv').innerHTML;
+  const q1PoolsHtml = q1Harness.getEl('quota-pools-list').innerHTML;
+  assert(
+    !q1PlanHtml.includes('Prompt Credits') && !q1PlanHtml.includes('Flow Credits'),
+    `Q1 Tab3 plan-kv 不应再显示失真的 Prompt/Flow Credits：${q1PlanHtml}`
+  );
+  assert(
+    q1PoolsHtml.includes('Gemini 模型') &&
+      q1PoolsHtml.includes('非 Gemini 模型（Claude / GPT）') &&
+      q1PoolsHtml.includes('Gemini 4 Hydrogen (XHigh)'),
+    `Q1 Tab3 配额池语义标题或悬浮档位明细异常：${q1PoolsHtml}`
+  );
 
   // T1: Exhaustive quota semantics matrix (5h+weekly, 5h-only, weekly-only, resetTime-only, all-missing, genuine 0%)
   const t1Configs = [
@@ -1733,6 +1812,108 @@ async function main() {
       );
     } finally {
       rmSync(join(isolatedAgDir, 'brain', privConvId), { recursive: true, force: true });
+    }
+
+    // H1: Unvisited historical conversation without inline transcript model must be enriched via
+    // GetCascadeTrajectoryGeneratorMetadata during collectTokenHistory and survive offline via persisted cache
+    const h1ConvId = '00000000-0000-4000-8000-000000000098';
+    const h1LogDir = join(isolatedAgDir, 'brain', h1ConvId, '.system_generated', 'logs');
+    mkdirSync(h1LogDir, { recursive: true });
+    const h1Server = http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      if (req.url?.includes('GetCascadeTrajectoryGeneratorMetadata')) {
+        let bodyRaw = '';
+        req.on('data', (c) => { bodyRaw += c; });
+        req.on('end', () => {
+          let cascadeId = '';
+          try { cascadeId = JSON.parse(bodyRaw || '{}').cascadeId || ''; } catch {}
+          if (cascadeId === h1ConvId) {
+            res.end(JSON.stringify({
+              generatorMetadata: [
+                {
+                  stepIndices: [1],
+                  chatModel: {
+                    modelDisplayName: 'Gemini 4 Carbon (High)',
+                    responseModel: 'gemini-4-carbon',
+                    model: 'MODEL_PLACEHOLDER_M427'
+                  }
+                },
+                {
+                  stepIndices: [2],
+                  chatModel: {
+                    modelDisplayName: 'Gemini 4 Hydrogen (XHigh)',
+                    responseModel: 'gemini-4-hydrogen',
+                    model: 'MODEL_PLACEHOLDER_M528'
+                  }
+                },
+                {
+                  stepIndices: [3],
+                  chatModel: {
+                    modelDisplayName: 'Gemini 4 Hydrogen (High)',
+                    responseModel: 'gemini-4-hydrogen',
+                    model: 'MODEL_PLACEHOLDER_M525'
+                  }
+                }
+              ]
+            }));
+            return;
+          }
+          res.end('{}');
+        });
+        return;
+      }
+      if (req.url?.includes('GetUserStatus')) {
+        res.end(JSON.stringify({ userStatus: { userTier: { id: 'g1-pro-tier', name: 'Google AI Pro' } } }));
+        return;
+      }
+      res.end('{}');
+    });
+    await new Promise((r) => h1Server.listen(0, '127.0.0.1', r));
+    try {
+      const h1TodayIso = new Date().toISOString();
+      writeFileSync(
+        join(h1LogDir, 'transcript.jsonl'),
+        [
+          { step_index: 0, type: 'USER_INPUT', status: 'DONE', created_at: h1TodayIso, content: 'audit historical steps' },
+          { step_index: 1, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: h1TodayIso, input_tokens: 1200, cache_read_tokens: 800, output_tokens: 150 },
+          { step_index: 2, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: h1TodayIso, input_tokens: 1500, cache_read_tokens: 900, output_tokens: 200 },
+          { step_index: 3, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: h1TodayIso, input_tokens: 900, cache_read_tokens: 600, output_tokens: 100 }
+        ].map((s) => JSON.stringify(s)).join('\n') + '\n',
+        'utf-8'
+      );
+
+      process.env.ANTIGRAVITY_LS_ADDRESS = `127.0.0.1:${h1Server.address().port}`;
+      process.env.ANTIGRAVITY_CSRF_TOKEN = 'h1-ls-csrf';
+
+      // Call collectTokenHistory directly without opening scanConversation(h1ConvId) first
+      const h1Online = await collectTokenHistory({ force: true });
+      const h1IdentOnline = h1Online.analyticsBySource?.all?.costs?.allTime?.identified;
+      assert(
+        h1IdentOnline?.unpricedReasons?.missingModel === 0 &&
+          h1IdentOnline?.byModel?.some((m) => m.displayName === 'Gemini 4 Carbon' && m.requests >= 1) &&
+          h1IdentOnline?.byModel?.some((m) => m.displayName === 'Gemini 4 Hydrogen' && m.requests === 2 && !m.missingModel),
+        `H1 collectTokenHistory 未自动回溯 GeneratorMetadata 或 Hydrogen 档位未合并：${JSON.stringify(h1IdentOnline)}`
+      );
+
+      const stepCachePath = join(isolatedStateDir, 'gen_step_models_v1.json');
+      assert(existsSync(stepCachePath), 'H1 未写入 gen_step_models_v1.json 持久化步骤模型缓存');
+
+      // Simulate offline CLI run (LS down) and ensure zero unattributed fallback returns
+      delete process.env.ANTIGRAVITY_LS_ADDRESS;
+      delete process.env.ANTIGRAVITY_CSRF_TOKEN;
+      const h1Offline = await collectTokenHistory({ force: true });
+      const h1IdentOffline = h1Offline.analyticsBySource?.all?.costs?.allTime?.identified;
+      assert(
+        h1IdentOffline?.unpricedReasons?.missingModel === 0 &&
+          h1IdentOffline?.byModel?.some((m) => m.displayName === 'Gemini 4 Hydrogen' && m.requests === 2),
+        `H1 离线模式下未命中持久化步骤模型缓存：${JSON.stringify(h1IdentOffline)}`
+      );
+    } finally {
+      delete process.env.ANTIGRAVITY_LS_ADDRESS;
+      delete process.env.ANTIGRAVITY_CSRF_TOKEN;
+      await new Promise((r) => h1Server.close(r));
+      rmSync(join(isolatedAgDir, 'brain', h1ConvId), { recursive: true, force: true });
+      rmSync(join(isolatedStateDir, 'gen_step_models_v1.json'), { force: true });
     }
 
     // R8: Windows PowerShell Unicode-safe Base64 loader shim in non-ASCII + space directory

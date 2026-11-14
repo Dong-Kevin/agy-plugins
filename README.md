@@ -19,7 +19,7 @@
 | 插件目录 | 插件标识 (`name`) | 版本 | 默认快捷键与快捷命令 | 核心定位 | 详细文档 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | [`plugins/agy-finder`](./plugins/agy-finder) | `agy-finder` | `v0.2.7` | `⌘⇧E`（抽屉） · `⌥⌘E`（AGY 侧栏） · `/agy-finder` · `[📂]` · `agy-finder aux` | 右侧项目目录树与对话路径直达定位 | [查看 README](./plugins/agy-finder/README.md) |
-| [`plugins/agy-context-viewer`](./plugins/agy-context-viewer) | `context-viewer` | `v1.7.7` | `⌥⌘K`（小窗） · `⌃⌥K`（AGY 侧栏） · `/context-viewer` · `agy-context aux` | 上下文窗口、速度、`5h + Week` 配额与 Token 看板 | [查看 README](./plugins/agy-context-viewer/README.md) |
+| [`plugins/agy-context-viewer`](./plugins/agy-context-viewer) | `context-viewer` | `v1.7.8` | `⌥⌘K`（小窗） · `⌃⌥K`（AGY 侧栏） · `/context-viewer` · `agy-context aux` | 上下文窗口、速度、`5h + Week` 配额与 Token 看板 | [查看 README](./plugins/agy-context-viewer/README.md) |
 
 ---
 
@@ -191,7 +191,7 @@ agy-plugins/
 ├── install.ps1                        # 统一安装 / 列表 / 卸载脚本（Windows PowerShell）
 ├── plugins/
 │   ├── agy-finder/                    # 项目目录树插件（v0.2.7）
-│   └── agy-context-viewer/            # 上下文与 Token 看板插件（context-viewer v1.7.7）
+│   └── agy-context-viewer/            # 上下文与 Token 看板插件（context-viewer v1.7.8）
 └── scripts/
     ├── verify.mjs                     # 全仓规范、隐私、PNG 元数据、子插件与安装器门禁
     ├── package-all.mjs                # 零依赖构建各插件独立 Release ZIP 与 SHA-256

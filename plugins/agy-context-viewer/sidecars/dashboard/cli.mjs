@@ -35,9 +35,9 @@ const PLUGIN_ROOT = resolve(__dirname, '..', '..');
 const PLUGIN_DIR_ID = basename(PLUGIN_ROOT);
 const PLUGIN_VERSION = (() => {
   try {
-    return JSON.parse(readFileSync(join(PLUGIN_ROOT, 'plugin.json'), 'utf-8')).version || '1.7.7';
+    return JSON.parse(readFileSync(join(PLUGIN_ROOT, 'plugin.json'), 'utf-8')).version || '1.7.8';
   } catch {
-    return '1.7.7';
+    return '1.7.8';
   }
 })();
 
@@ -461,7 +461,7 @@ function buildCompactSummary(ctx, hist) {
       const pW = typeof q.weekly?.remainingPercent === 'number' ? q.weekly.remainingPercent : null;
       const eff5 = p5 ?? pBase;
       return {
-        label: q.title || q.groupLabel || q.label || '模型配额池',
+        label: q.displayTitle || q.title || q.groupLabel || q.label || '模型配额池',
         remainingPercent: eff5 !== null && pW !== null ? Math.min(eff5, pW) : (eff5 ?? pW ?? null),
         fiveHourPercent: p5,
         basePercent: pBase,

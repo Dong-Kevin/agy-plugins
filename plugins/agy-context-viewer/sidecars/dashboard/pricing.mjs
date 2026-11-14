@@ -130,6 +130,7 @@ const PLACEHOLDER_MODEL_MAP = {
   model_placeholder_m318: 'gemini-3.8-flash',
   model_placeholder_m319: 'gemini-3.8-flash',
   model_placeholder_m320: 'gemini-3.8-flash',
+  model_placeholder_m322: 'gemini-3.8-flash',
   model_placeholder_m400: 'claude-opus-5-5',
   model_placeholder_m401: 'claude-opus-5-5',
   model_placeholder_m402: 'claude-opus-5-5',
@@ -213,11 +214,14 @@ function getSummaryGroupKey(g, fallbackIdx = 0) {
   return `group-${fallbackIdx}`;
 }
 
+const EFFORT_SUFFIX_RE = /\s*\((?:XHigh|Low|Medium|High|Minimal|Thinking|Fast)\)\s*$/i;
+
 function extractSubfamilyTags(str) {
   const s = String(str || '').toLowerCase();
   const tags = [];
   if (/\bcarbon\b/.test(s)) tags.push('carbon');
   if (/\bargon\b/.test(s)) tags.push('argon');
+  if (/\bhydrogen\b/.test(s)) tags.push('hydrogen');
   if (/flash[-_\s]?lite/.test(s)) tags.push('flash-lite');
   else if (/\bflash\b/.test(s)) tags.push('flash');
   if (/\bopus\b/.test(s)) tags.push('opus');
@@ -229,11 +233,31 @@ function extractSubfamilyTags(str) {
   return tags;
 }
 
+function classifySummaryUmbrellaBrand(summaryGroup) {
+  if (!summaryGroup || typeof summaryGroup !== 'object') return null;
+  if (Array.isArray(summaryGroup.models) && summaryGroup.models.length) return null;
+  if (Array.isArray(summaryGroup.modelIds) && summaryGroup.modelIds.length) return null;
+  const bucketText = Array.isArray(summaryGroup.buckets)
+    ? summaryGroup.buckets.map((b) => String(b?.bucketId || '')).join(' ')
+    : '';
+  const sgIdentity = `${summaryGroup.displayName || ''} ${bucketText}`.toLowerCase();
+  if (!sgIdentity.trim() || extractSubfamilyTags(sgIdentity).length > 0) return null;
+
+  const hasGemini = /\bgemini\b/.test(sgIdentity);
+  const hasClaude = /\b(?:claude|anthropic)\b/.test(sgIdentity);
+  const hasGpt = /\b(?:gpt|openai)\b/.test(sgIdentity);
+  const hasThirdParty = /\b(?:3p|third[-_\s]?party|partner)\b/.test(sgIdentity);
+
+  if (hasGemini && !hasClaude && !hasGpt && !hasThirdParty) return 'gemini';
+  if (!hasGemini && (hasThirdParty || (hasClaude && hasGpt))) return 'non-gemini';
+  return null;
+}
+
 function resolveConfigSummaryGroup(cfg, quotaSummaryGroups = []) {
   if (!cfg || !Array.isArray(quotaSummaryGroups) || !quotaSummaryGroups.length) return null;
   const label = String(cfg.label || '').trim();
   const modelId = String(cfg.modelOrAlias?.model || cfg.modelId || '').trim();
-  const strippedLabel = label.replace(/\s*\((Low|Medium|High|Thinking|Fast)\)\s*$/i, '').trim();
+  const strippedLabel = label.replace(EFFORT_SUFFIX_RE, '').trim();
   const normKey = normalizeModelId(label) || normalizeModelId(modelId);
   const familyDisplay = (normKey && MODEL_DISPLAY_NAMES[normKey]) || strippedLabel || modelId || '';
   const qi = cfg.quotaInfo || {};
@@ -246,7 +270,7 @@ function resolveConfigSummaryGroup(cfg, quotaSummaryGroups = []) {
   );
   const s = `${label} ${familyDisplay} ${normKey || ''} ${modelId}`.toLowerCase();
   const cfgSubfamilies = extractSubfamilyTags(s);
-  const isGemini = /\b(?:gemini|carbon|argon|flash)\b/.test(s);
+  const isGemini = /\b(?:gemini|carbon|argon|hydrogen|flash)\b/.test(s);
   const isClaude = /\b(?:claude|opus|sonnet|haiku|anthropic)\b/.test(s);
   const isGpt = /\b(?:gpt|openai|o1|o3|o4)\b/.test(s);
 
@@ -263,8 +287,11 @@ function resolveConfigSummaryGroup(cfg, quotaSummaryGroups = []) {
     const bucketText = Array.isArray(g.buckets)
       ? g.buckets.map((b) => String(b?.bucketId || '')).join(' ')
       : '';
-    const gText = `${g.displayName || ''} ${g.description || ''} ${bucketText}`.toLowerCase();
-    const gSubfamilies = extractSubfamilyTags(gText);
+    // Derive subfamily restrictions only from identity fields (`displayName` + `bucketId`),
+    // never from descriptive `description` copy listing example models inside an umbrella pool.
+    const gIdentityText = `${g.displayName || ''} ${bucketText}`.toLowerCase();
+    const gFullText = `${gIdentityText} ${g.description || ''}`.toLowerCase();
+    const gSubfamilies = extractSubfamilyTags(gIdentityText);
 
     let score = 0;
     if (explicitPoolId && gPoolIds.length) {
@@ -279,13 +306,13 @@ function resolveConfigSummaryGroup(cfg, quotaSummaryGroups = []) {
       if (cfgSubfamilies.length && cfgSubfamilies.some((t) => gSubfamilies.includes(t))) {
         score = 90;
       }
-    } else if (isGemini && /\bgemini\b/.test(gText)) {
+    } else if (isGemini && /\bgemini\b/.test(gFullText)) {
       score = 70;
-    } else if (isClaude && /\b(?:claude|anthropic)\b/.test(gText)) {
+    } else if (isClaude && /\b(?:claude|anthropic)\b/.test(gFullText)) {
       score = 70;
-    } else if (isGpt && /\b(?:gpt|openai)\b/.test(gText)) {
+    } else if (isGpt && /\b(?:gpt|openai)\b/.test(gFullText)) {
       score = 70;
-    } else if ((isClaude || isGpt) && /\b(?:3p|third[-_\s]?party|partner)\b/.test(gText)) {
+    } else if ((isClaude || isGpt) && /\b(?:3p|third[-_\s]?party|partner)\b/.test(gFullText)) {
       score = 50;
     }
 
@@ -333,7 +360,7 @@ function buildQuotaPools(clientModelConfigs = [], quotaSummaryGroups = []) {
     const cfg = clientModelConfigs[idx];
     const label = cfg.label || '';
     const modelId = cfg.modelOrAlias?.model || cfg.modelId || '';
-    const strippedLabel = label.replace(/\s*\((Low|Medium|High|Thinking|Fast)\)\s*$/i, '').trim();
+    const strippedLabel = label.replace(EFFORT_SUFFIX_RE, '').trim();
     const normKey = normalizeModelId(label) || normalizeModelId(modelId);
     const familyKey = normKey || strippedLabel.toLowerCase() || modelId.toLowerCase() || 'unknown';
     const familyDisplay = (normKey && MODEL_DISPLAY_NAMES[normKey]) || strippedLabel || modelId || '未知模型';
@@ -381,15 +408,38 @@ function buildQuotaPools(clientModelConfigs = [], quotaSummaryGroups = []) {
     entry.models.push({ label, modelId, familyKey: normKey || familyKey });
   }
 
+  const rawPoolValues = [...rawPools.values()];
+  let geminiUmbrellaCount = 0;
+  let nonGeminiUmbrellaCount = 0;
+  for (const p of rawPoolValues) {
+    const brand = (!p.id.startsWith('pool:') && p.summaryGroup && !p.summaryConflict)
+      ? classifySummaryUmbrellaBrand(p.summaryGroup)
+      : null;
+    p._umbrellaBrand = brand;
+    if (brand === 'gemini') geminiUmbrellaCount++;
+    else if (brand === 'non-gemini') nonGeminiUmbrellaCount++;
+  }
+
   const resolvedBySig = new Map();
-  const pools = [...rawPools.values()].map((p) => {
+  const pools = rawPoolValues.map((p) => {
     const fams = [...p.families];
     const poolTitle = fams.length <= 3 ? fams.join(' / ') : `${fams.slice(0, 2).join(' / ')} 等 ${fams.length} 组`;
+    let displayTitle = null;
+    let shortLabel = null;
+    if (p._umbrellaBrand === 'gemini' && geminiUmbrellaCount === 1) {
+      displayTitle = 'Gemini 模型';
+      shortLabel = 'Gemini';
+    } else if (p._umbrellaBrand === 'non-gemini' && nonGeminiUmbrellaCount === 1) {
+      displayTitle = '非 Gemini 模型（Claude / GPT）';
+      shortLabel = '非 Gemini';
+    }
     const { fiveHour, weekly } = extractSummaryBuckets(p.summaryGroup);
     const has5hFrac = typeof fiveHour?.remainingFraction === 'number';
     const poolObj = {
       id: p.id,
-      title: `${poolTitle} 配额池`,
+      title: displayTitle ? `${displayTitle}配额池` : `${poolTitle} 配额池`,
+      displayTitle,
+      shortLabel,
       families: fams,
       modelsCount: p.models.length,
       baseRemainingFraction: p.remainingFraction,
@@ -436,10 +486,10 @@ export function resolveModelQuota(modelNameOrKey, clientModelConfigs = [], quota
     });
   }
   if (matchedIdx < 0) {
-    const strippedTarget = targetLower.replace(/\s*\((low|medium|high|thinking|fast)\)\s*$/i, '').trim();
+    const strippedTarget = targetLower.replace(EFFORT_SUFFIX_RE, '').trim();
     if (strippedTarget) {
       matchedIdx = clientModelConfigs.findIndex((c) => {
-        const strippedLbl = String(c.label || '').replace(/\s*\((low|medium|high|thinking|fast)\)\s*$/i, '').trim().toLowerCase();
+        const strippedLbl = String(c.label || '').replace(EFFORT_SUFFIX_RE, '').trim().toLowerCase();
         return strippedLbl && strippedLbl === strippedTarget;
       });
     }
@@ -842,7 +892,9 @@ export function summarizeApiCost(requests = [], dynamicModelMap = null) {
       unpricedOutputTokens += outp;
       if (!calc.rawModel) unpricedReasons.missingModel++;
       else unpricedReasons.unsupportedModel++;
-      const cleanRawDisp = calc.rawModel ? formatModelDisplayName(calc.rawModel, calc.modelKey) : '';
+      const cleanRawDisp = calc.rawModel
+        ? formatModelDisplayName(calc.rawModel, calc.modelKey).replace(EFFORT_SUFFIX_RE, '').trim()
+        : '';
       const unknownKey = calc.modelKey
         || (cleanRawDisp ? `unpriced:${cleanRawDisp.toLowerCase()}` : 'unidentified');
       if (!byModel[unknownKey]) {

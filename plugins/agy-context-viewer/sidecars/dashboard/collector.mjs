@@ -70,7 +70,9 @@ const TEXT_EXTENSIONS = new Set([
 const fileAuditCache = new Map();       // "realPath|size|mtimeMs" -> attachment result
 const transcriptHistCache = new Map();  // filePath -> { size, mtimeMs, records, firstDate, stepCount }
 const convGenMetaCache = new Map();     // convId -> { at, callsByStep, latestMeta }
+const lsGenMissCache = new Map();       // convId -> { lsKey, size, mtimeMs, at }
 const recentConvMetaCache = new Map();  // logPath -> { key, title, lastContextTokens, turnsCount }
+let genStepModelsCache = { path: '', data: null };
 let cachedHostStatus = {
   at: 0,
   lsKey: '',
@@ -318,6 +320,69 @@ function writeJsonAtomic(filePath, data) {
     } catch {}
   }
   renameSync(tmp, filePath);
+}
+
+function getGenStepModelsPath() {
+  return join(getPluginStateDir(), 'gen_step_models_v1.json');
+}
+
+function loadPersistedStepModels() {
+  const p = getGenStepModelsPath();
+  if (genStepModelsCache.path === p && genStepModelsCache.data) {
+    return genStepModelsCache.data;
+  }
+  const raw = readJsonSafe(p, null);
+  const data = raw && typeof raw === 'object' && raw.convs && typeof raw.convs === 'object'
+    ? { version: 1, convs: { ...raw.convs } }
+    : { version: 1, convs: {} };
+  genStepModelsCache = { path: p, data };
+  return data;
+}
+
+function savePersistedStepModels(data) {
+  const p = getGenStepModelsPath();
+  const entries = Object.entries(data?.convs || {});
+  if (entries.length > 1500) {
+    entries.sort((a, b) => Number(b[1]?.mtimeMs || 0) - Number(a[1]?.mtimeMs || 0));
+    data.convs = Object.fromEntries(entries.slice(0, 1500));
+  }
+  genStepModelsCache = { path: p, data };
+  try {
+    writeJsonAtomic(p, data);
+  } catch {}
+}
+
+function buildStepModelsRecord(generatorList = []) {
+  const steps = {};
+  for (const entry of generatorList) {
+    const modelStr = extractStepModel(null, entry, '');
+    if (!modelStr) continue;
+    const indices = entry.stepIndices || (entry.stepIndex != null ? [entry.stepIndex] : []);
+    for (const idx of indices) {
+      const n = Number(idx);
+      if (Number.isFinite(n)) steps[String(n)] = modelStr;
+    }
+  }
+  return steps;
+}
+
+function maybePersistConvStepModels(convId, logPathForStat, generatorList) {
+  if (!convId || !logPathForStat || !Array.isArray(generatorList) || !generatorList.length) return;
+  try {
+    if (!existsSync(logPathForStat)) return;
+    const st = statSync(logPathForStat);
+    const data = loadPersistedStepModels();
+    const prev = data.convs[convId];
+    const nextSteps = buildStepModelsRecord(generatorList);
+    const nextCount = Object.keys(nextSteps).length;
+    if (!nextCount) return;
+    const prevCount = prev?.steps ? Object.keys(prev.steps).length : 0;
+    if (prev && prev.size === st.size && prev.mtimeMs === st.mtimeMs && prevCount === nextCount) {
+      return;
+    }
+    data.convs[convId] = { size: st.size, mtimeMs: st.mtimeMs, steps: nextSteps };
+    savePersistedStepModels(data);
+  } catch {}
 }
 
 export function formatLocalDateKey(dateObj) {
@@ -2427,6 +2492,13 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   }
 
   const genMetaBundle = await fetchGeneratorMetadataForConv(convId, force);
+  if (genMetaBundle?.generatorList?.length) {
+    maybePersistConvStepModels(
+      convId,
+      existsSync(compactPath) ? compactPath : targetLogPath,
+      genMetaBundle.generatorList
+    );
+  }
 
   // Parse transcript steps
   const groups = {
@@ -3039,6 +3111,7 @@ export async function collectTokenHistory(options = {}) {
   const force = Boolean(options.force);
   if (force) {
     transcriptHistCache.clear();
+    genStepModelsCache = { path: '', data: null };
   }
   const host = await getHostUserStatus(force);
   if (
@@ -3089,17 +3162,109 @@ export async function collectTokenHistory(options = {}) {
     b.refCostUSD = Number((b.refCostUSD + refCost).toFixed(6));
   };
 
+  const persistedModels = loadPersistedStepModels();
+  const persistedConvs = persistedModels.convs;
+  const lsAddr = process.env.ANTIGRAVITY_LS_ADDRESS || '';
+  const lsCsrf = process.env.ANTIGRAVITY_CSRF_TOKEN || '';
+  const hasLsConfig = Boolean(lsAddr && lsCsrf);
+  const lsKey = hasLsConfig ? `${lsAddr}|${lsCsrf}` : '';
+
+  const jobStats = new Array(allJobs.length).fill(null);
+  const jobsNeedingGenFetch = [];
+  const nowMs = Date.now();
+  for (let idx = 0; idx < allJobs.length; idx++) {
+    const job = allJobs[idx];
+    try {
+      const st = statSync(job.path);
+      jobStats[idx] = st;
+      if (!hasLsConfig) continue;
+      const cached = transcriptHistCache.get(job.path);
+      if (cached && cached.size === st.size && cached.mtimeMs === st.mtimeMs && cached.enrichedWithGen) {
+        continue;
+      }
+      const persistedEntry = persistedConvs[job.convId];
+      if (
+        persistedEntry &&
+        persistedEntry.size === st.size &&
+        persistedEntry.mtimeMs === st.mtimeMs &&
+        persistedEntry.steps &&
+        typeof persistedEntry.steps === 'object'
+      ) {
+        continue;
+      }
+      const miss = lsGenMissCache.get(job.convId);
+      if (
+        !force &&
+        miss &&
+        miss.lsKey === lsKey &&
+        miss.size === st.size &&
+        miss.mtimeMs === st.mtimeMs &&
+        (nowMs - miss.at) < 60_000
+      ) {
+        continue;
+      }
+      jobsNeedingGenFetch.push({ job, st });
+    } catch {}
+  }
+
+  if (hasLsConfig && jobsNeedingGenFetch.length) {
+    let persistedDirty = false;
+    let cursor = 0;
+    const workerCount = Math.min(6, jobsNeedingGenFetch.length);
+    await Promise.all(
+      Array.from({ length: workerCount }, async () => {
+        while (cursor < jobsNeedingGenFetch.length) {
+          const item = jobsNeedingGenFetch[cursor++];
+          if (!item) break;
+          const { job, st } = item;
+          const existingGen = convGenMetaCache.get(job.convId);
+          const genFetchForce = force || Boolean(existingGen && existingGen.at < st.mtimeMs);
+          const gm = await fetchGeneratorMetadataForConv(job.convId, genFetchForce);
+          if (gm && Array.isArray(gm.generatorList)) {
+            persistedConvs[job.convId] = {
+              size: st.size,
+              mtimeMs: st.mtimeMs,
+              steps: buildStepModelsRecord(gm.generatorList)
+            };
+            lsGenMissCache.delete(job.convId);
+            persistedDirty = true;
+          } else {
+            lsGenMissCache.set(job.convId, {
+              lsKey,
+              size: st.size,
+              mtimeMs: st.mtimeMs,
+              at: Date.now()
+            });
+          }
+        }
+      })
+    );
+    if (persistedDirty) {
+      savePersistedStepModels(persistedModels);
+    }
+  }
+
   for (let idx = 0; idx < allJobs.length; idx++) {
     const job = allJobs[idx];
     if (idx > 0 && idx % 20 === 0) {
       await new Promise((r) => setImmediate(r));
     }
     try {
-      const st = statSync(job.path);
+      const st = jobStats[idx] || statSync(job.path);
       let cached = transcriptHistCache.get(job.path);
       const genCached = convGenMetaCache.get(job.convId);
+      const rawPersisted = persistedConvs[job.convId];
+      const persistedEntry = (
+        rawPersisted &&
+        rawPersisted.size === st.size &&
+        rawPersisted.mtimeMs === st.mtimeMs &&
+        rawPersisted.steps
+      )
+        ? rawPersisted
+        : null;
+      const hasGenSource = Boolean(genCached || persistedEntry);
 
-      if (!cached || cached.size !== st.size || cached.mtimeMs !== st.mtimeMs || (genCached && !cached.enrichedWithGen)) {
+      if (!cached || cached.size !== st.size || cached.mtimeMs !== st.mtimeMs || (hasGenSource && !cached.enrichedWithGen)) {
         const records = [];
         let activeModel = '';
         const lines = readFileSync(job.path, 'utf-8').split(/\r?\n/);
@@ -3128,7 +3293,10 @@ export async function collectTokenHistory(options = {}) {
           if (tot <= 0 || !dateKey) continue;
 
           const stepNum = Number(ev.step_index ?? lineIdx);
-          const gmEntry = genCached?.callsByStep?.get(stepNum);
+          const gmEntry = genCached?.callsByStep?.get(stepNum)
+            || (persistedEntry?.steps?.[String(stepNum)]
+              ? { chatModel: { modelDisplayName: persistedEntry.steps[String(stepNum)] } }
+              : null);
           const rawModel = extractStepModel(ev, gmEntry, activeModel);
           const eventId = String(ev.callId || ev.responseId || `${job.convId}#${stepNum}`);
 
@@ -3150,7 +3318,7 @@ export async function collectTokenHistory(options = {}) {
         cached = {
           size: st.size,
           mtimeMs: st.mtimeMs,
-          enrichedWithGen: Boolean(genCached),
+          enrichedWithGen: hasGenSource,
           records
         };
         if (transcriptHistCache.size > 1200) {

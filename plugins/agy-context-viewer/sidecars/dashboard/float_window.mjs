@@ -1354,6 +1354,9 @@ function cleanTooltipModel(rawModel) {
 }
 
 function summarizePoolShortLabel(pool) {
+  if (pool?.shortLabel) {
+    return truncateDisplayCols(String(pool.shortLabel), 14);
+  }
   const fams = Array.isArray(pool?.families) ? pool.families.filter(Boolean) : [];
   if (fams.length === 1 && fams[0].length <= 15) {
     return fams[0];
