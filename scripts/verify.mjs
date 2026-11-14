@@ -22,6 +22,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { Script } from 'node:vm';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -72,6 +73,18 @@ function verifyRootStructureAndSyntax(allFiles) {
       execFileSync('bash', ['-n', f], { stdio: 'pipe' });
     } else if (ext === '.js' || ext === '.mjs') {
       execFileSync(process.execPath, ['--check', f], { stdio: 'pipe' });
+    } else if (ext === '.ps1') {
+      const psSrc = readFileSync(f, 'utf-8');
+      const re = /\$VerifyJs\s*=\s*@'\r?\n([\s\S]*?)\r?\n'@/g;
+      let match;
+      let count = 0;
+      while ((match = re.exec(psSrc)) !== null) {
+        count++;
+        new Script(match[1], { filename: `${rel}#VerifyJs#${count}` });
+      }
+      if (rel.startsWith('plugins/') && rel.endsWith('/install.ps1')) {
+        assert.ok(count >= 1, `${rel} 缺少可解析的 $VerifyJs JS 校验块`);
+      }
     }
   }
   pass('Repository structure, executable bits, bash (-n) & Node.js (--check) syntax');
@@ -834,6 +847,41 @@ async function verifyDaemonQuitAndUpgradePidSafety() {
       child.stdin.end();
     });
 
+  const spawnWaitReady = (cmd, args, { env } = {}) =>
+    new Promise((resolvePromise, rejectPromise) => {
+      const child = trackProc(spawn(cmd, args, { env, stdio: ['ignore', 'pipe', 'pipe'] }));
+      let done = false;
+      let errBuf = '';
+      const timer = setTimeout(() => {
+        if (!done) {
+          done = true;
+          rejectPromise(new Error(`Helper did not emit ready in time: ${cmd} ${args.join(' ')} (${errBuf})`));
+        }
+      }, 5000);
+      child.stdout.on('data', () => {
+        if (!done) {
+          done = true;
+          clearTimeout(timer);
+          resolvePromise(child);
+        }
+      });
+      child.stderr.on('data', (d) => { errBuf += d.toString('utf8'); });
+      child.on('error', (err) => {
+        if (!done) {
+          done = true;
+          clearTimeout(timer);
+          rejectPromise(err);
+        }
+      });
+      child.on('exit', (code) => {
+        if (!done) {
+          done = true;
+          clearTimeout(timer);
+          rejectPromise(new Error(`Helper exited prematurely (${code}): ${errBuf}`));
+        }
+      });
+    });
+
   const baseIsoEnv = (fakeHome, extraEnv = {}) => {
     const env = {
       ...process.env,
@@ -985,9 +1033,165 @@ async function verifyDaemonQuitAndUpgradePidSafety() {
       assert.ok(upgUnknown.stderr.includes('[WARN]'), `${spec.name} install.sh must surface pre-upgrade [WARN] when identity is unknown`);
       assert.ok(isChildAlive(sentinel), `${spec.name} install.sh on unknown identity must leave sentinel alive`);
       assert.ok(existsSync(statePath), `${spec.name} install.sh on unknown identity must preserve state file`);
+
+      // W1 Cases: distinguish actual argv[1] entry + argv[2]==--daemon from ordinary data/positional arguments
+      const srcDaemonPath = join(ROOT, 'plugins', spec.name === 'agy-finder' ? 'agy-finder' : 'agy-context-viewer', spec.daemonRel);
+      const daemonMod = await import(pathToFileURL(srcDaemonPath).href);
+      const expectedRelNorm = spec.daemonRel.replace(/\\/g, '/');
+      const ordinaryHelper = join(workDir, 'ordinary-helper.mjs');
+      writeFileSync(ordinaryHelper, 'console.log("ready"); setInterval(() => {}, 10000);\n');
+
+      // W1-1: Real process carrying `--input <daemonPath> --daemon` must NOT be recognized or killed across quit / upgrade / uninstall
+      const helperInput = await spawnWaitReady(process.execPath, [ordinaryHelper, '--input', srcDaemonPath, '--daemon']);
+      assert.equal(daemonMod.verifyDaemonProcessIdentity({ pid: helperInput.pid }).status, 'mismatch', `${spec.name} must reject --input daemon path as mismatch`);
+
+      writeFileSync(statePath, JSON.stringify({ pid: helperInput.pid, daemonVersion: 1, cmdSeq: 1 }));
+      const w1Quit = await runAsync(process.execPath, [srcCli, ...spec.quitArgs, '--json'], { env });
+      assert.equal(w1Quit.status, 0);
+      const w1QuitJson = JSON.parse(w1Quit.stdout);
+      assert.equal(w1QuitJson.terminated, false, `${spec.name} W1-1 quit must not kill ordinary helper`);
+      assert.equal(w1QuitJson.staleStateCleaned, true, `${spec.name} W1-1 quit must clean stale state`);
+      assert.ok(isChildAlive(helperInput), `${spec.name} W1-1 helper must remain alive after quit`);
+      assert.ok(!existsSync(statePath), `${spec.name} W1-1 state file must be cleaned after quit`);
+
+      const w1UpgMarker = join(fakeHome, 'w1-old-cli-upgrade.marker');
+      seedPoisonTargetCli(w1UpgMarker);
+      writeFileSync(statePath, JSON.stringify({ pid: helperInput.pid, daemonVersion: 1, cmdSeq: 1 }));
+      const w1UpgRes = await runAsync('bash', [spec.installerPath], { env });
+      assert.equal(w1UpgRes.status, 0, `${spec.name} W1-1 upgrade failed: ${w1UpgRes.stderr}`);
+      assert.ok(!existsSync(w1UpgMarker), `${spec.name} W1-1 upgrade must not invoke old TARGET_DIR cli.mjs`);
+      assert.ok(isChildAlive(helperInput), `${spec.name} W1-1 upgrade must leave helper alive`);
+      assert.ok(!existsSync(statePath), `${spec.name} W1-1 upgrade must clean mismatched state`);
+
+      const w1UninstMarker = join(fakeHome, 'w1-old-cli-uninstall.marker');
+      seedPoisonTargetCli(w1UninstMarker);
+      writeFileSync(statePath, JSON.stringify({ pid: helperInput.pid, daemonVersion: 1, cmdSeq: 1 }));
+      const w1UninstRes = await runAsync('bash', ['-s', '--', '--uninstall'], { env, stdinText: installerSrc });
+      assert.equal(w1UninstRes.status, 0, `${spec.name} W1-1 standalone --uninstall failed: ${w1UninstRes.stderr}`);
+      assert.ok(!existsSync(w1UninstMarker), `${spec.name} W1-1 standalone --uninstall must block poison CLI`);
+      assert.ok(isChildAlive(helperInput), `${spec.name} W1-1 standalone --uninstall must leave helper alive`);
+      assert.ok(!existsSync(statePath), `${spec.name} W1-1 standalone --uninstall must clean mismatched state`);
+
+      // W1-2: Positional argument confusion, `.mjs.bak` suffix confusion, and non-Node `/bin/sh` process
+      const helperPositional = await spawnWaitReady(process.execPath, [ordinaryHelper, srcDaemonPath, '--daemon']);
+      assert.equal(daemonMod.verifyDaemonProcessIdentity({ pid: helperPositional.pid }).status, 'mismatch', `${spec.name} positional daemon arg must be mismatch`);
+      writeFileSync(statePath, JSON.stringify({ pid: helperPositional.pid, daemonVersion: 1, cmdSeq: 1 }));
+      const posQuit = JSON.parse((await runAsync(process.execPath, [srcCli, ...spec.quitArgs, '--json'], { env })).stdout);
+      assert.equal(posQuit.terminated, false);
+      assert.ok(isChildAlive(helperPositional), `${spec.name} positional helper must stay alive`);
+
+      const bakEntry = join(fakeHome, 'bak-runtime', `${spec.daemonRel}.bak`);
+      mkdirSync(dirname(bakEntry), { recursive: true });
+      writeFileSync(bakEntry, 'console.log("ready"); setInterval(() => {}, 10000);\n');
+      const bakProc = await spawnWaitReady(process.execPath, [bakEntry, '--daemon']);
+      assert.equal(daemonMod.verifyDaemonProcessIdentity({ pid: bakProc.pid }).status, 'mismatch', `${spec.name} .bak suffix must be mismatch`);
+      writeFileSync(statePath, JSON.stringify({ pid: bakProc.pid, daemonVersion: 1, cmdSeq: 1 }));
+      const bakQuit = JSON.parse((await runAsync(process.execPath, [srcCli, ...spec.quitArgs, '--json'], { env })).stdout);
+      assert.equal(bakQuit.terminated, false);
+      assert.ok(isChildAlive(bakProc), `${spec.name} .bak helper must stay alive`);
+
+      const shProc = await spawnWaitReady('/bin/sh', ['-c', 'echo ready; sleep 30', 'sh', srcDaemonPath, '--daemon']);
+      assert.equal(daemonMod.verifyDaemonProcessIdentity({ pid: shProc.pid }).status, 'mismatch', `${spec.name} /bin/sh process must be mismatch`);
+      writeFileSync(statePath, JSON.stringify({ pid: shProc.pid, daemonVersion: 1, cmdSeq: 1 }));
+      const shQuit = JSON.parse((await runAsync(process.execPath, [srcCli, ...spec.quitArgs, '--json'], { env })).stdout);
+      assert.equal(shQuit.terminated, false);
+      assert.ok(isChildAlive(shProc), `${spec.name} /bin/sh process must stay alive`);
+
+      // W1-3: Legitimate spaced-path daemon IS verified/terminated, and importing module under `--daemon` does NOT auto-start
+      const spacedDaemonEntry = join(fakeHome, 'dir with space', spec.daemonRel);
+      mkdirSync(dirname(spacedDaemonEntry), { recursive: true });
+      writeFileSync(spacedDaemonEntry, 'console.log("ready"); setInterval(() => {}, 10000);\n');
+      const spacedDaemon = await spawnWaitReady(process.execPath, [spacedDaemonEntry, '--daemon']);
+      assert.equal(daemonMod.verifyDaemonProcessIdentity({ pid: spacedDaemon.pid }).status, 'verified', `${spec.name} spaced-path real daemon must verify`);
+      writeFileSync(statePath, JSON.stringify({ pid: spacedDaemon.pid, daemonVersion: 1, cmdSeq: 1 }));
+      const spacedQuit = await runAsync(process.execPath, [srcCli, ...spec.quitArgs, '--json'], { env });
+      assert.equal(spacedQuit.status, 0);
+      assert.equal(JSON.parse(spacedQuit.stdout).terminated, true, `${spec.name} spaced-path real daemon must terminate on quit`);
+      assert.ok(!isChildAlive(spacedDaemon), `${spec.name} spaced-path daemon must stop`);
+      assert.ok(!existsSync(statePath), `${spec.name} spaced-path state file must be cleared`);
+
+      const importGuardScript = join(workDir, `import-guard-${spec.name}.mjs`);
+      writeFileSync(importGuardScript, `await import(${JSON.stringify(pathToFileURL(srcDaemonPath).href)}); console.log('imported-ok');\n`);
+      const importGuardRes = spawnSync(process.execPath, [importGuardScript, '--daemon'], { env, encoding: 'utf8', timeout: 2000 });
+      assert.equal(importGuardRes.status, 0, `${spec.name} importing module under --daemon must exit cleanly: ${importGuardRes.stderr}`);
+      assert.ok(importGuardRes.stdout.includes('imported-ok'), `${spec.name} import guard must finish without starting daemon`);
+
+      // W1-4: Cross-platform pure parser unit assertions (Windows quotes, Linux argv, POSIX ps whitespace ambiguity)
+      assert.equal(
+        daemonMod.evaluateStructuredDaemonArgv(
+          daemonMod.tokenizeWindowsCommandLine(`"C:\\Program Files\\nodejs\\node.exe" "C:\\Projects\\My App\\${spec.daemonRel.replace(/\//g, '\\')}" --daemon --mode speed`),
+          expectedRelNorm
+        ).status,
+        'verified',
+        `${spec.name} Win32 spaced quoted daemon path must verify`
+      );
+      assert.equal(
+        daemonMod.evaluateStructuredDaemonArgv(
+          daemonMod.tokenizeWindowsCommandLine(`"C:\\Program Files\\nodejs\\node.exe" C:\\tmp\\helper.mjs --input "C:\\repo\\${spec.daemonRel.replace(/\//g, '\\')}" --daemon`),
+          expectedRelNorm
+        ).status,
+        'mismatch',
+        `${spec.name} Win32 helper --input daemon path must mismatch`
+      );
+      assert.equal(
+        daemonMod.evaluateStructuredDaemonArgv(['/usr/bin/node', `/opt/agy/${expectedRelNorm}`, '--daemon'], expectedRelNorm).status,
+        'verified'
+      );
+      assert.equal(
+        daemonMod.evaluateStructuredDaemonArgv(['/usr/bin/node', '/tmp/helper.mjs', `/opt/agy/${expectedRelNorm}`, '--daemon'], expectedRelNorm).status,
+        'mismatch'
+      );
+      assert.equal(
+        daemonMod.evaluateStructuredDaemonArgv(['/usr/bin/node', `/opt/my-${expectedRelNorm}`, '--daemon'], expectedRelNorm).status,
+        'mismatch'
+      );
+      assert.equal(
+        daemonMod.evaluateStructuredDaemonArgv(['/usr/bin/node', `/opt/agy/${expectedRelNorm}`, 'status', '--daemon'], expectedRelNorm).status,
+        'mismatch'
+      );
+      assert.equal(
+        daemonMod.evaluateStructuredDaemonArgv(['/usr/bin/python3', `/opt/agy/${expectedRelNorm}`, '--daemon'], expectedRelNorm).status,
+        'mismatch'
+      );
+      assert.equal(
+        daemonMod.evaluatePsDaemonCommand(
+          '/usr/local/bin/node',
+          `/usr/local/bin/node /nonexistent/dir with space/${expectedRelNorm} --daemon`,
+          expectedRelNorm,
+          () => false
+        ).status,
+        'unknown'
+      );
+      assert.equal(
+        daemonMod.evaluatePsDaemonCommand(
+          '/usr/local/bin/node',
+          `/usr/local/bin/node /real/dir with space/${expectedRelNorm} --daemon`,
+          expectedRelNorm,
+          (p) => p.endsWith(expectedRelNorm)
+        ).status,
+        'verified'
+      );
+      assert.equal(
+        daemonMod.evaluatePsDaemonCommand(
+          '/usr/local/bin/node',
+          `/usr/local/bin/node /tmp/helper.mjs /real/dir with space/${expectedRelNorm} --daemon`,
+          expectedRelNorm,
+          (p) => p === '/tmp/helper.mjs' || p === `/real/dir with space/${expectedRelNorm}`
+        ).status,
+        'mismatch'
+      );
+      assert.equal(
+        daemonMod.evaluatePsDaemonCommand(
+          '/usr/local/bin/node',
+          `/usr/local/bin/node /tmp/helper.mjs /real/dir with space/${expectedRelNorm} --daemon`,
+          expectedRelNorm,
+          (p) => p.endsWith('helper.mjs') || p.endsWith(expectedRelNorm)
+        ).status,
+        'unknown'
+      );
     }
 
-    pass('V1 daemon PID identity verification, reused-PID non-termination, STAGE_DIR upgrade boundary, standalone uninstall guard & unknown [WARN]');
+    pass('V1 daemon PID identity verification, entry boundary W1, reused-PID non-termination, STAGE_DIR upgrade boundary, standalone uninstall guard & unknown [WARN]');
   } finally {
     for (const c of spawnedChildren) {
       try { c.kill('SIGKILL'); } catch {}

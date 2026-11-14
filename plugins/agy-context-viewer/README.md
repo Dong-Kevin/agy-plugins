@@ -2,7 +2,7 @@
 
 # Antigravity Context & Token Viewer (`agy-context-viewer`)
 
-[![Version](https://img.shields.io/badge/version-v1.7.6-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
+[![Version](https://img.shields.io/badge/version-v1.7.7-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-818cf8)](#一键安装)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D%2018-22c55e)](#一键安装)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-a855f7)](#隐私与安全机制)
@@ -102,7 +102,7 @@
   - 同时读取宿主 `GetUserStatus` 与 `RetrieveUserQuotaSummary` 只读本地接口，同屏呈现 Gemini 系列与 Claude / GPT 系列的 **5 小时滚动突发限额** 与 **Week 周度档位共享池余量** 及精确重置时间。
   - 准确识别 `Google AI Pro` / `Google AI Ultra` 等订阅档位；针对家庭组共享免付费、多人 AA 拼车、教育优惠及跨区订阅场景，内置 **10 种获取渠道**、**22 个国家或地区定价** 与 **40+ 币种汇率** 自定义折算，并与按量 API 零售估值直观对比。
 - **桌面端 IDE + 终端 `agy` CLI 双端全覆盖，零第三方依赖**
-  - 纯 `Node.js >= 18` 标准库与系统原生 Web / Cocoa 组件编写，`0` 外部 `npm` 依赖，跨 **macOS / Linux / Windows** 开箱即用；终端提供 `agy-context` 彩色进度条看板、`turns` 逐轮涨跌审计、`json` 脚本导出与 `web` 独立浏览器看板。
+  - 纯 `Node.js >= 18` 标准库与系统原生 Web / Cocoa 组件编写，`0` 外部 `npm` 依赖（**macOS** 已完成实机全量验证；**Windows / Linux** 基于跨平台标准库支持内嵌辅助栏、`agy-context` CLI、`web` 模式与浏览器 `--app` 小窗回退）；终端提供 `agy-context` 彩色进度条看板、`turns` 逐轮涨跌审计、`json` 脚本导出与 `web` 独立浏览器看板。
 
 ---
 
@@ -110,7 +110,7 @@
 
 > **前置要求与平台能力说明**：
 > - 本机需已安装 `Node.js >= 18`。
-> - **macOS 原生菜单栏与置顶小窗**：首次编译需本机具备 Swift 编译工具链（Xcode Command Line Tools，未安装时运行 `xcode-select --install`）；**Windows / Linux** 下宿主内嵌辅助栏、`agy-context` 终端看板与 `web` 模式完整可用，`float` 命令则回退为独立浏览器小窗（无系统菜单栏常驻图标与原生置顶层级）。
+> - **macOS 原生菜单栏与置顶小窗**：首次编译需本机具备 Swift 编译工具链（Xcode Command Line Tools，未安装时运行 `xcode-select --install`）；**Windows / Linux** 基于跨平台标准库支持宿主内嵌辅助栏、`agy-context` 终端看板、`web` 模式与浏览器 `--app` 小窗回退（无系统菜单栏常驻图标与原生置顶层级；PowerShell 安装器、Linux 桌面端与 `Node.js 18` 最低版本尚未在对应宿主机逐一实机验收）。
 > - **脱离宿主独立运行**：在未由 Antigravity 宿主注入本地语言服务地址与凭据的纯外部终端中，实时订阅档位与 `5h / Week` 配额查询会自动降级，本地会话归档与历史统计不受影响。
 > - **双插件共存升级说明**：若本机同时安装了 `agy-finder`，两者共享 `~/.gemini/antigravity/agy_aux_pane_trigger.json` 触发锁协议。升级 `context-viewer` 时请同步将 `agy-finder` 升级至 `>= v0.2.4`（建议运行总仓全量安装），并确认旧版后台守护进程与宿主 Sidecar 实例均已退出或重载，避免旧版进程绕过新 Bakery 锁协议并发认领同一事件；仅安装单个插件的用户不受影响。
 
@@ -154,7 +154,7 @@ cd agy-plugins
 ./install.sh agy-context-viewer   # Windows PowerShell 执行：.\install.ps1 -Plugin agy-context-viewer
 ```
 
-也可在 [Releases](https://github.com/Dong-Kevin/agy-plugins/releases) 页面下载 `context-viewer-v1.7.6.zip` 与对应的 `.sha256` 校验文件，通过 `shasum -a 256 -c context-viewer-v1.7.6.zip.sha256` 核验完整性后解压执行 `./context-viewer/install.sh`（或 `agy plugin install ./context-viewer`）。
+也可在 [Releases](https://github.com/Dong-Kevin/agy-plugins/releases) 页面下载 `context-viewer-v1.7.7.zip` 与对应的 `.sha256` 校验文件，通过 `shasum -a 256 -c context-viewer-v1.7.7.zip.sha256` 核验完整性后解压执行 `./context-viewer/install.sh`（或 `agy plugin install ./context-viewer`）。
 
 ---
 
@@ -275,7 +275,7 @@ agy-context-viewer/
 
 ```bash
 node scripts/verify.mjs           # 运行清单规范、JS 语法、常见敏感模式与 PNG 元数据块检查、CSS 隔离及行为回归测试
-node scripts/package-release.mjs  # 生成轻量发布包 dist/context-viewer-v1.7.6.zip 与 .sha256
+node scripts/package-release.mjs  # 生成轻量发布包 dist/context-viewer-v1.7.7.zip 与 .sha256
 ```
 
 ---

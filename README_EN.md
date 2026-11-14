@@ -10,7 +10,7 @@
 
 An open-source plugin collection for **Google Antigravity Desktop (`agy` App / IDE)** and the **`agy` CLI**.
 
-Every plugin is built strictly on Antigravity's official `plugin.json` and `sidecar_sdk` specifications — **zero `app.asar` patching, zero CDP injection, zero external `npm` runtime dependencies, and 100% local read-only telemetry**, keeping client signatures and updates intact across **macOS, Linux, and Windows**.
+Every plugin is built strictly on Antigravity's official `plugin.json` and `sidecar_sdk` specifications — **zero `app.asar` patching, zero CDP injection, zero external `npm` runtime dependencies, and 100% local read-only telemetry**, keeping client signatures and updates intact with a cross-platform standard-library design (**macOS** verified end-to-end on hardware; **Windows / Linux** supported via embedded Aux Pane, CLI, and browser `--app` fallbacks).
 
 ---
 
@@ -18,8 +18,8 @@ Every plugin is built strictly on Antigravity's official `plugin.json` and `side
 
 | Directory | Plugin `name` | Version | Default Shortcuts & Quick Commands | Purpose | Docs |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| [`plugins/agy-finder`](./plugins/agy-finder) | `agy-finder` | `v0.2.6` | `⌘⇧E` (drawer) · `⌥⌘E` (Aux Pane) · `/agy-finder` · `[📂]` · `agy-finder aux` | Right-side Project File Tree & Instant Path Reveal | [README](./plugins/agy-finder/README_EN.md) |
-| [`plugins/agy-context-viewer`](./plugins/agy-context-viewer) | `context-viewer` | `v1.7.6` | `⌥⌘K` (window) · `⌃⌥K` (Aux Pane) · `/context-viewer` · `agy-context aux` | Context Window, Speed, `5h + Weekly` Quotas & Token Analytics | [README](./plugins/agy-context-viewer/README_EN.md) |
+| [`plugins/agy-finder`](./plugins/agy-finder) | `agy-finder` | `v0.2.7` | `⌘⇧E` (drawer) · `⌥⌘E` (Aux Pane) · `/agy-finder` · `[📂]` · `agy-finder aux` | Right-side Project File Tree & Instant Path Reveal | [README](./plugins/agy-finder/README_EN.md) |
+| [`plugins/agy-context-viewer`](./plugins/agy-context-viewer) | `context-viewer` | `v1.7.7` | `⌥⌘K` (window) · `⌃⌥K` (Aux Pane) · `/context-viewer` · `agy-context aux` | Context Window, Speed, `5h + Weekly` Quotas & Token Analytics | [README](./plugins/agy-context-viewer/README_EN.md) |
 
 ---
 
@@ -96,7 +96,7 @@ Every plugin is built strictly on Antigravity's official `plugin.json` and `side
 
 ## Quick Install
 
-> **Prerequisites**: `Node.js >= 18`. On macOS, native Menu Bar / floating window / drawer compilation requires Xcode Command Line Tools (`xcode-select --install`). On Windows / Linux, the embedded Aux Pane Sidecar and terminal CLIs work out of the box.
+> **Prerequisites & Validation Scope**: `Node.js >= 18`. End-to-end hardware validation currently covers **macOS** (including Swift native Menu Bar, floating window, and drawer; requires Xcode Command Line Tools via `xcode-select --install`). **Windows / Linux** are supported via cross-platform standard-library implementations for the embedded Aux Pane Sidecar, terminal CLIs, and browser `--app` window fallbacks (PowerShell installers, Linux desktop environments, and minimum `Node.js 18` have not yet been hardware-tested on dedicated hosts; feedback is welcome).
 
 ### Option 1: Ask Your Antigravity Agent to Install (Recommended)
 
@@ -186,8 +186,8 @@ agy-plugins/
 ├── install.sh                         # Unified installer / lister / uninstaller (macOS / Linux)
 ├── install.ps1                        # Unified installer / lister / uninstaller (Windows PowerShell)
 ├── plugins/
-│   ├── agy-finder/                    # Project file tree plugin (v0.2.6)
-│   └── agy-context-viewer/            # Context & token analytics plugin (context-viewer v1.7.6)
+│   ├── agy-finder/                    # Project file tree plugin (v0.2.7)
+│   └── agy-context-viewer/            # Context & token analytics plugin (context-viewer v1.7.7)
 └── scripts/
     ├── verify.mjs                     # Repo-wide schema, privacy, PNG metadata, plugin & installer suite
     ├── package-all.mjs                # Zero-dependency Release ZIP + SHA-256 packager

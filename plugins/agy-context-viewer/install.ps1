@@ -45,44 +45,118 @@ if ($Uninstall) {
       if ($LocalCli -and (Test-Path $LocalCli)) {
         & node $LocalCli float quit 1>$null
       } elseif (Test-Path $InstalledCli) {
-        $AgDir = if ($env:AG_DIR) { $env:AG_DIR } else { Join-Path $HOME ".gemini\antigravity" }
-        $StateDir = if ($env:ANTIGRAVITY_EXECUTABLE_DATA_DIR) { $env:ANTIGRAVITY_EXECUTABLE_DATA_DIR } else { Join-Path $AgDir "sidecar_data\context-viewer\dashboard\data" }
-        $StatePath = Join-Path $StateDir "float_window_state.json"
-        if (Test-Path $StatePath) {
-          $StateObj = $null
-          try { $StateObj = Get-Content $StatePath -Raw -Encoding UTF8 | ConvertFrom-Json } catch {}
-          $DaemonPid = if ($StateObj -and $StateObj.pid) { [int]$StateObj.pid } else { 0 }
-          if ($DaemonPid -gt 1) {
-            $LiveProc = Get-Process -Id $DaemonPid -ErrorAction SilentlyContinue
-            if (-not $LiveProc) {
-              Remove-Item -Force $StatePath -ErrorAction SilentlyContinue
-            } elseif ($env:AGY_TEST_PID_IDENTITY_MODE -eq "unknown") {
-              Write-Host "[WARN] [context-viewer] 无法核实后台进程身份（PID $DaemonPid），已跳过发送退出信号；请手动确认进程状态。" -ForegroundColor Yellow
-            } else {
-              $ProcInfo = $null
-              try { $ProcInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $DaemonPid" -ErrorAction Stop } catch {}
-              if ($null -eq $ProcInfo) {
-                if (-not (Get-Process -Id $DaemonPid -ErrorAction SilentlyContinue)) {
-                  Remove-Item -Force $StatePath -ErrorAction SilentlyContinue
-                } else {
-                  Write-Host "[WARN] [context-viewer] 无法核实后台进程身份（PID $DaemonPid），已跳过发送退出信号；请手动确认进程状态。" -ForegroundColor Yellow
-                }
-              } else {
-                $CmdNorm = ([string]$ProcInfo.CommandLine).Replace('\', '/')
-                $ProcName = [string]$ProcInfo.Name
-                $NameOk = (-not $ProcName) -or ($ProcName -match '^(node|electron|antigravity)(\.exe)?$')
-                $IsDaemon = $NameOk -and $CmdNorm.Contains("sidecars/dashboard/float_window.mjs") -and ($CmdNorm -match '(?:^|\s)--daemon(?:\s|$)') -and ($CmdNorm -notmatch '(?:^|\s)(?:-e|--eval|--print|-p)(?:=|\s|$)')
-                if ($IsDaemon) {
-                  & node $InstalledCli float quit 1>$null
-                } else {
-                  Remove-Item -Force $StatePath -ErrorAction SilentlyContinue
-                }
-              }
-            }
-          } else {
-            Remove-Item -Force $StatePath -ErrorAction SilentlyContinue
-          }
-        }
+        $VerifyJs = @'
+const fs = require("node:fs");
+const path = require("node:path");
+const os = require("node:os");
+const { execFileSync } = require("node:child_process");
+const cliPath = process.argv[1];
+const expectedRel = "sidecars/dashboard/float_window.mjs";
+const agDir = process.env.AG_DIR || path.join(os.homedir(), ".gemini", "antigravity");
+const stateDir = process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR || path.join(agDir, "sidecar_data", "context-viewer", "dashboard", "data");
+const statePath = path.join(stateDir, "float_window_state.json");
+if (!fs.existsSync(statePath)) process.exit(0);
+let obj = null;
+try { obj = JSON.parse(fs.readFileSync(statePath, "utf8")); } catch {}
+const pid = Number(obj && obj.pid);
+if (!Number.isInteger(pid) || pid <= 1) {
+  try { fs.rmSync(statePath, { force: true }); } catch {}
+  process.exit(0);
+}
+const alive = (p) => { try { process.kill(p, 0); return true; } catch (e) { return e && e.code === "EPERM"; } };
+try { process.kill(pid, 0); } catch {
+  try { fs.rmSync(statePath, { force: true }); } catch {}
+  process.exit(0);
+}
+if (process.env.AGY_TEST_PID_IDENTITY_MODE === "unknown") {
+  console.error(`[WARN] [context-viewer] 无法核实后台进程身份（PID ${pid}），已跳过发送退出信号；请手动确认进程状态。`);
+  process.exit(0);
+}
+const isExec = (tok) => {
+  const raw = String(tok || "").trim().replace(/^["']|["']$/g, "").replace(/\\/g, "/");
+  if (!raw) return false;
+  const base = raw.split("/").pop() || "";
+  return /^(?:node(?:\d+(?:\.\d+)*)?|electron|antigravity|Antigravity(?:\s+Helper(?:\s+\([^)]+\))?)?)(?:\.exe)?$/i.test(base);
+};
+const isEntry = (cand) => {
+  const norm = String(cand || "").trim().replace(/\\/g, "/");
+  if (!norm || norm.startsWith("-")) return false;
+  return norm === expectedRel || norm.endsWith("/" + expectedRel);
+};
+const tokenizeWin = (cmdLine) => {
+  const s = String(cmdLine || "").trim();
+  if (!s) return [];
+  const args = [];
+  let cur = "", inQuotes = false, i = 0;
+  while (i < s.length) {
+    const ch = s[i];
+    if (ch === "\\") {
+      let bs = 0;
+      while (i < s.length && s[i] === "\\") { bs++; i++; }
+      if (i < s.length && s[i] === '"') {
+        cur += "\\".repeat(Math.floor(bs / 2));
+        if (bs % 2 === 0) inQuotes = !inQuotes;
+        else cur += '"';
+        i++;
+      } else {
+        cur += "\\".repeat(bs);
+      }
+      continue;
+    }
+    if (ch === '"') {
+      if (inQuotes && i + 1 < s.length && s[i + 1] === '"') {
+        cur += '"';
+        i += 2;
+      } else {
+        inQuotes = !inQuotes;
+        i++;
+      }
+      continue;
+    }
+    if (!inQuotes && /\s/.test(ch)) {
+      args.push(cur);
+      cur = "";
+      while (i < s.length && /\s/.test(s[i])) i++;
+      continue;
+    }
+    cur += ch;
+    i++;
+  }
+  args.push(cur);
+  return args;
+};
+const evalStructured = (argv) => {
+  if (!Array.isArray(argv) || argv.length === 0) return "unknown";
+  if (!isExec(argv[0]) || argv.length < 3 || !isEntry(argv[1]) || argv[2] !== "--daemon") return "mismatch";
+  return "verified";
+};
+let status = "unknown";
+try {
+  const psCmd = `$ErrorActionPreference='Stop'; $p = Get-CimInstance Win32_Process -Filter ('ProcessId = ' + ${pid}); if ($null -eq $p) { [Console]::Out.Write('{"dead":true}') } else { [Console]::Out.Write((@{ dead = $false; name = [string]$p.Name; cmd = [string]$p.CommandLine } | ConvertTo-Json -Compress)) }`;
+  const raw = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", psCmd], {
+    encoding: "utf8", timeout: 3000, stdio: ["ignore", "pipe", "ignore"]
+  }).trim();
+  if (!raw) {
+    status = alive(pid) ? "unknown" : "dead";
+  } else {
+    const parsed = JSON.parse(raw);
+    if (parsed.dead || !alive(pid)) status = "dead";
+    else if (parsed.name && !isExec(parsed.name)) status = "mismatch";
+    else if (!String(parsed.cmd || "").trim()) status = "unknown";
+    else status = evalStructured(tokenizeWin(parsed.cmd));
+  }
+} catch {
+  status = alive(pid) ? "unknown" : "dead";
+}
+if (status === "verified") {
+  try { execFileSync(process.execPath, [cliPath, "float", "quit"], { stdio: ["ignore", "ignore", "inherit"] }); } catch {}
+} else if (status === "dead" || status === "mismatch") {
+  try { fs.rmSync(statePath, { force: true }); } catch {}
+} else {
+  console.error(`[WARN] [context-viewer] 无法核实后台进程身份（PID ${pid}），已跳过发送退出信号；请手动确认进程状态。`);
+}
+'@
+        & node -e $VerifyJs $InstalledCli
       }
     } finally {
       $ErrorActionPreference = $PrevEap

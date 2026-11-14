@@ -19,12 +19,13 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
   writeFileSync
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
@@ -126,6 +127,172 @@ function isPidAlive(pid) {
   }
 }
 
+const EXPECTED_DAEMON_ENTRY_REL = 'sidecars/dashboard/float_window.mjs';
+
+function isRegularFileSafe(p) {
+  try { return statSync(p).isFile(); } catch { return false; }
+}
+
+function isDaemonRuntimeExecutable(execToken) {
+  const raw = String(execToken || '').trim().replace(/^["']|["']$/g, '').replace(/\\/g, '/');
+  if (!raw) return false;
+  const base = raw.split('/').pop() || '';
+  return /^(?:node(?:\d+(?:\.\d+)*)?|electron|antigravity|Antigravity(?:\s+Helper(?:\s+\([^)]+\))?)?)(?:\.exe)?$/i.test(base);
+}
+
+function isExactDaemonEntryPath(candidatePath, expectedRel = EXPECTED_DAEMON_ENTRY_REL) {
+  const norm = String(candidatePath || '').trim().replace(/\\/g, '/');
+  if (!norm || norm.startsWith('-')) return false;
+  return norm === expectedRel || norm.endsWith('/' + expectedRel);
+}
+
+export function tokenizeWindowsCommandLine(cmdLine) {
+  const s = String(cmdLine || '').trim();
+  if (!s) return [];
+  const args = [];
+  let cur = '';
+  let inQuotes = false;
+  let i = 0;
+  while (i < s.length) {
+    const ch = s[i];
+    if (ch === '\\') {
+      let bs = 0;
+      while (i < s.length && s[i] === '\\') { bs++; i++; }
+      if (i < s.length && s[i] === '"') {
+        cur += '\\'.repeat(Math.floor(bs / 2));
+        if (bs % 2 === 0) inQuotes = !inQuotes;
+        else cur += '"';
+        i++;
+      } else {
+        cur += '\\'.repeat(bs);
+      }
+      continue;
+    }
+    if (ch === '"') {
+      if (inQuotes && i + 1 < s.length && s[i + 1] === '"') {
+        cur += '"';
+        i += 2;
+      } else {
+        inQuotes = !inQuotes;
+        i++;
+      }
+      continue;
+    }
+    if (!inQuotes && /\s/.test(ch)) {
+      args.push(cur);
+      cur = '';
+      while (i < s.length && /\s/.test(s[i])) i++;
+      continue;
+    }
+    cur += ch;
+    i++;
+  }
+  args.push(cur);
+  return args;
+}
+
+export function evaluateStructuredDaemonArgv(argv, expectedRel = EXPECTED_DAEMON_ENTRY_REL) {
+  if (!Array.isArray(argv) || argv.length === 0) {
+    return { status: 'unknown', reason: 'empty-argv' };
+  }
+  if (!isDaemonRuntimeExecutable(argv[0])) {
+    return { status: 'mismatch', reason: 'exec-mismatch' };
+  }
+  if (argv.length < 3) {
+    return { status: 'mismatch', reason: 'argv-too-short' };
+  }
+  if (!isExactDaemonEntryPath(argv[1], expectedRel)) {
+    return { status: 'mismatch', reason: 'entry-mismatch' };
+  }
+  if (argv[2] !== '--daemon') {
+    return { status: 'mismatch', reason: 'daemon-flag-not-argv2' };
+  }
+  return { status: 'verified' };
+}
+
+export function evaluatePsDaemonCommand(commRaw, argsRaw, expectedRel = EXPECTED_DAEMON_ENTRY_REL, isFileFn = isRegularFileSafe) {
+  const comm = String(commRaw || '').replace(/[\r\n]+$/, '').trim();
+  const args = String(argsRaw || '').replace(/[\r\n]+$/, '').trim();
+  if (!args) return { status: 'unknown', reason: 'ps-empty-args' };
+
+  let execToken = '';
+  let rest = '';
+  if (comm && args === comm) {
+    if (!isDaemonRuntimeExecutable(comm)) return { status: 'mismatch', reason: 'exec-mismatch' };
+    return { status: 'mismatch', reason: 'no-entry-args' };
+  }
+  if (comm && args.startsWith(comm + ' ')) {
+    execToken = comm;
+    rest = args.slice(comm.length + 1).trimStart();
+  } else {
+    const m = args.match(/^(\S+)(?:\s+([\s\S]*))?$/);
+    if (!m) return { status: 'unknown', reason: 'ps-unparseable' };
+    const firstTok = m[1];
+    if (comm) {
+      const commBase = comm.replace(/\\/g, '/').split('/').pop() || '';
+      const firstBase = firstTok.replace(/\\/g, '/').split('/').pop() || '';
+      if (commBase && firstBase && !firstBase.startsWith(commBase) && !commBase.startsWith(firstBase)) {
+        if (!isDaemonRuntimeExecutable(comm) && !isDaemonRuntimeExecutable(firstTok)) {
+          return { status: 'mismatch', reason: 'exec-mismatch' };
+        }
+        return { status: 'unknown', reason: 'ps-comm-args-diverged' };
+      }
+    }
+    execToken = comm && isDaemonRuntimeExecutable(comm) ? comm : firstTok;
+    rest = String(m[2] || '').trimStart();
+  }
+
+  if (!isDaemonRuntimeExecutable(execToken)) {
+    return { status: 'mismatch', reason: 'exec-mismatch' };
+  }
+  if (!rest || rest.startsWith('-')) {
+    return { status: 'mismatch', reason: 'missing-or-flag-argv1' };
+  }
+
+  const normRest = rest.replace(/\\/g, '/');
+  const escapedRel = expectedRel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const entryMatch = new RegExp(`^([\\s\\S]*?${escapedRel})\\s+--daemon(?:\\s|$)`).exec(normRest);
+  if (!entryMatch) {
+    return { status: 'mismatch', reason: 'entry-or-daemon-mismatch' };
+  }
+
+  const rawCandidate = rest.slice(0, entryMatch[1].length);
+  if (!isExactDaemonEntryPath(rawCandidate, expectedRel)) {
+    return { status: 'mismatch', reason: 'entry-boundary-mismatch' };
+  }
+
+  // Zero internal whitespace => guaranteed single argv[1] token followed immediately by argv[2] === '--daemon'
+  if (!/\s/.test(rawCandidate)) {
+    return { status: 'verified' };
+  }
+
+  // Contains whitespace: distinguish genuine spaced directory path from `helper [args...] <entry>`
+  const candidateExists = isFileFn(rawCandidate);
+  const wsRe = /\s+/g;
+  let ws;
+  while ((ws = wsRe.exec(rawCandidate)) !== null) {
+    const prefix = rawCandidate.slice(0, ws.index);
+    const after = rawCandidate.slice(ws.index + ws[0].length);
+    if (!candidateExists) {
+      if (
+        after.startsWith('-') ||
+        /^(?:\.{0,2}\/|~\/|[A-Za-z]:[\\/])/.test(after) ||
+        /\.(?:m?js|cjs|ts|py|sh|pl|rb)$/i.test(prefix) ||
+        isFileFn(prefix)
+      ) {
+        return { status: 'mismatch', reason: 'multi-arg-before-entry' };
+      }
+    } else if (isFileFn(prefix)) {
+      return { status: 'unknown', reason: 'ambiguous-spaced-file-prefix' };
+    }
+  }
+
+  if (candidateExists) {
+    return { status: 'verified' };
+  }
+  return { status: 'unknown', reason: 'unverified-spaced-entry' };
+}
+
 function queryProcessIdentity(pid) {
   const n = Number(pid);
   if (process.platform === 'win32') {
@@ -142,47 +309,65 @@ function queryProcessIdentity(pid) {
       const parsed = JSON.parse(raw);
       if (parsed.dead || !isPidAlive(n)) return { status: 'dead' };
       const procName = String(parsed.name || '').trim();
-      if (procName && !/^(node|electron|antigravity)(\.exe)?$/i.test(procName)) {
+      if (procName && !isDaemonRuntimeExecutable(procName)) {
         return { status: 'mismatch', reason: 'win32-name-mismatch', cmdLine: String(parsed.cmd || '') };
       }
       const cmdLine = String(parsed.cmd || '').trim();
       if (!cmdLine) return { status: 'unknown', reason: 'win32-empty-cmdline' };
-      return { status: 'inspected', cmdLine };
+      return { status: 'structured', argv: tokenizeWindowsCommandLine(cmdLine), cmdLine };
     } catch {
       return isPidAlive(n) ? { status: 'unknown', reason: 'win32-probe-failed' } : { status: 'dead' };
     }
   }
 
-  let cmdLine = '';
   if (process.platform === 'linux') {
     try {
-      cmdLine = readFileSync(`/proc/${n}/cmdline`).toString('utf8').replace(/\0+/g, ' ').trim();
+      const raw = readFileSync(`/proc/${n}/cmdline`, 'utf8');
+      const trimmed = raw.replace(/\0+$/, '');
+      if (trimmed) {
+        const argv = trimmed.split('\0');
+        return { status: 'structured', argv, cmdLine: argv.join(' ') };
+      }
     } catch {}
   }
-  if (!cmdLine) {
+
+  let lastPsError = false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (!isPidAlive(n)) return { status: 'dead' };
+    lastPsError = false;
+    let comm = '';
+    let args = '';
     try {
+      comm = execFileSync(
+        'ps',
+        ['-ww', '-p', String(n), '-o', 'comm='],
+        { env: { ...process.env, LC_ALL: 'C' }, encoding: 'utf8', timeout: 4000, stdio: ['ignore', 'pipe', 'ignore'] }
+      ).replace(/[\r\n]+$/, '');
       // -ww prevents macOS `ps` from truncating long paths at 80 columns
-      cmdLine = execFileSync(
+      args = execFileSync(
         'ps',
         ['-ww', '-p', String(n), '-o', 'args='],
-        { env: { ...process.env, LC_ALL: 'C' }, encoding: 'utf8', timeout: 1500, stdio: ['ignore', 'pipe', 'ignore'] }
-      ).trim();
+        { env: { ...process.env, LC_ALL: 'C' }, encoding: 'utf8', timeout: 4000, stdio: ['ignore', 'pipe', 'ignore'] }
+      ).replace(/[\r\n]+$/, '');
     } catch {
-      return isPidAlive(n) ? { status: 'unknown', reason: 'ps-unavailable' } : { status: 'dead' };
+      lastPsError = true;
+    }
+    if (!lastPsError && args.trim()) {
+      return { status: 'ps', comm, args, cmdLine: args };
+    }
+    if (!isPidAlive(n)) return { status: 'dead' };
+    if (attempt < 2) {
+      try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50); } catch {}
     }
   }
-  if (!cmdLine) {
-    return isPidAlive(n) ? { status: 'unknown', reason: 'ps-empty-output' } : { status: 'dead' };
-  }
-  return { status: 'inspected', cmdLine };
+  return isPidAlive(n)
+    ? { status: 'unknown', reason: lastPsError ? 'ps-unavailable' : 'ps-empty-output' }
+    : { status: 'dead' };
 }
 
 export function verifyDaemonProcessIdentity(stateObj) {
   const n = Number(stateObj?.pid);
   if (!Number.isInteger(n) || n <= 1) return { status: 'dead' };
-  if (n === process.pid && !process.argv.includes('--daemon')) {
-    return { status: 'mismatch', reason: 'self-non-daemon' };
-  }
   try {
     process.kill(n, 0);
   } catch (err) {
@@ -192,18 +377,18 @@ export function verifyDaemonProcessIdentity(stateObj) {
   if (process.env.AGY_TEST_PID_IDENTITY_MODE === 'unknown') {
     return { status: 'unknown', reason: 'test-forced-unknown' };
   }
+  if (n === process.pid) {
+    return evaluateStructuredDaemonArgv(process.argv, EXPECTED_DAEMON_ENTRY_REL);
+  }
 
   const probe = queryProcessIdentity(n);
-  if (probe.status !== 'inspected') return probe;
-
-  const norm = probe.cmdLine.replace(/\\/g, '/').trim();
-  const hasEntry = norm.includes('sidecars/dashboard/float_window.mjs');
-  const hasDaemonFlag = /(?:^|\s)--daemon(?:\s|$)/.test(norm);
-  const isInlineEval = /(?:^|\s)(?:-e|--eval|--print|-p)(?:=|\s|$)/.test(norm);
-  if (hasEntry && hasDaemonFlag && !isInlineEval) {
-    return { status: 'verified', cmdLine: probe.cmdLine };
+  if (probe.status === 'structured') {
+    return { ...evaluateStructuredDaemonArgv(probe.argv, EXPECTED_DAEMON_ENTRY_REL), cmdLine: probe.cmdLine };
   }
-  return { status: 'mismatch', reason: 'cmdline-mismatch', cmdLine: probe.cmdLine };
+  if (probe.status === 'ps') {
+    return { ...evaluatePsDaemonCommand(probe.comm, probe.args, EXPECTED_DAEMON_ENTRY_REL), cmdLine: probe.cmdLine };
+  }
+  return probe;
 }
 
 function writeJsonFileAtomic(filePath, data) {
@@ -2408,7 +2593,13 @@ async function startFallbackAppWindowDaemon() {
   });
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1] && process.argv.includes('--daemon')) {
+const isDirectDaemonEntry = (() => {
+  if (!process.argv[1] || process.argv[2] !== '--daemon') return false;
+  const selfPath = fileURLToPath(import.meta.url);
+  if (resolve(process.argv[1]) === selfPath) return true;
+  try { return realpathSync(process.argv[1]) === realpathSync(selfPath); } catch { return false; }
+})();
+if (isDirectDaemonEntry) {
   const initialPinned = !process.argv.includes('--unpinned');
   const initialMenubar = !process.argv.includes('--no-menubar');
   const initialVisible = !process.argv.includes('--hidden-window');

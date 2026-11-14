@@ -2,7 +2,7 @@
 
 # Antigravity Context & Token Viewer (`agy-context-viewer`)
 
-[![Version](https://img.shields.io/badge/version-v1.7.6-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
+[![Version](https://img.shields.io/badge/version-v1.7.7-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-818cf8)](#quick-install)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D%2018-22c55e)](#quick-install)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-a855f7)](#privacy--security)
@@ -102,7 +102,7 @@ Zero client binary patching, zero external runtime dependencies, and 100% local 
   - Queries both read-only `GetUserStatus` and `RetrieveUserQuotaSummary` local language-server RPCs to display **5-hour rolling burst limits** alongside **Weekly shared tier pools** and exact reset timestamps for Gemini and Claude / GPT families.
   - Accurately identifies `Google AI Pro` and `Google AI Ultra` tiers, and includes built-in customization for **Family Group Sharing (`$0` extra cost)**, **Family Split-Billing (AA)**, **22 regional pricing presets**, and **40+ currencies**, side-by-side with retail API pay-as-you-go equivalence.
 - **Unified Desktop IDE + `agy` CLI Experience with Zero Dependencies**
-  - Powered purely by the `Node.js >= 18` standard library and native OS components (`0` external `npm` packages), working out of the box across **macOS, Linux, and Windows** — complete with `agy-context` ANSI terminal bars, `turns` delta tables, `json` export, and standalone `web` mode.
+  - Powered purely by the `Node.js >= 18` standard library and native OS components (`0` external `npm` packages; hardware-verified end-to-end on **macOS**, with cross-platform standard-library support on **Windows / Linux** for embedded Aux Pane, CLI, `web`, and browser `--app` fallbacks) — complete with `agy-context` ANSI terminal bars, `turns` delta tables, `json` export, and standalone `web` mode.
 
 ---
 
@@ -110,7 +110,7 @@ Zero client binary patching, zero external runtime dependencies, and 100% local 
 
 > **Prerequisites & Platform Capabilities**:
 > - `Node.js >= 18` installed locally.
-> - **macOS Native Menu Bar & Pinned Window**: Initial compilation requires the local Swift toolchain (Xcode Command Line Tools: `xcode-select --install`). On **Windows / Linux**, the embedded Aux Pane Sidecar, `agy-context` CLI, and `web` dashboard work identically, while `float` falls back to a standalone browser `--app` window (without a native OS menu bar icon or always-on-top window level).
+> - **macOS Native Menu Bar & Pinned Window**: Initial compilation requires the local Swift toolchain (Xcode Command Line Tools: `xcode-select --install`). On **Windows / Linux**, cross-platform standard-library implementations support the embedded Aux Pane Sidecar, `agy-context` CLI, `web` dashboard, and standalone browser `--app` window fallback for `float` (without a native OS menu bar icon or always-on-top window level; PowerShell installers, Linux desktops, and minimum `Node.js 18` have not yet been hardware-tested on dedicated hosts).
 > - **Standalone Terminal Mode**: Outside an Antigravity host session (where local language-server address & credentials are not injected), live plan/quota RPCs degrade gracefully while local session & multi-source token analytics remain fully available.
 > - **Coexisting-Plugin Upgrade Note**: When `agy-finder` is also installed on the same machine, both plugins share the `~/.gemini/antigravity/agy_aux_pane_trigger.json` lock protocol. Please ensure `agy-finder` is upgraded to `>= v0.2.4` alongside `context-viewer` (e.g., via the monorepo full installer), and confirm previously running daemons and host Sidecar instances have exited or reloaded so older builds cannot bypass the new Bakery lock; standalone installations are unaffected.
 
@@ -154,7 +154,7 @@ cd agy-plugins
 ./install.sh agy-context-viewer   # On Windows PowerShell: .\install.ps1 -Plugin agy-context-viewer
 ```
 
-Or download `context-viewer-v1.7.6.zip` and `context-viewer-v1.7.6.zip.sha256` from [Releases](https://github.com/Dong-Kevin/agy-plugins/releases), verify the checksum via `shasum -a 256 -c context-viewer-v1.7.6.zip.sha256`, extract it, and run `./context-viewer/install.sh` (or `agy plugin install ./context-viewer`).
+Or download `context-viewer-v1.7.7.zip` and `context-viewer-v1.7.7.zip.sha256` from [Releases](https://github.com/Dong-Kevin/agy-plugins/releases), verify the checksum via `shasum -a 256 -c context-viewer-v1.7.7.zip.sha256`, extract it, and run `./context-viewer/install.sh` (or `agy plugin install ./context-viewer`).
 
 ---
 
@@ -275,7 +275,7 @@ agy-context-viewer/
 
 ```bash
 node scripts/verify.mjs           # Manifest spec, JS syntax, pattern + PNG metadata check, CSS isolation & behavioral tests
-node scripts/package-release.mjs  # Build lightweight dist/context-viewer-v1.7.6.zip + .sha256
+node scripts/package-release.mjs  # Build lightweight dist/context-viewer-v1.7.7.zip + .sha256
 ```
 
 ---

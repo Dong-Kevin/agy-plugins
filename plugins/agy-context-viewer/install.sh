@@ -45,6 +45,7 @@ if [[ "${1:-}" == "--uninstall" || "${1:-}" == "uninstall" ]]; then
         const os = require("node:os");
         const { execFileSync } = require("node:child_process");
         const cliPath = process.argv[1];
+        const expectedRel = "sidecars/dashboard/float_window.mjs";
         const agDir = process.env.AG_DIR || path.join(os.homedir(), ".gemini", "antigravity");
         const stateDir = process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR || path.join(agDir, "sidecar_data", "context-viewer", "dashboard", "data");
         const statePath = path.join(stateDir, "float_window_state.json");
@@ -65,35 +66,107 @@ if [[ "${1:-}" == "--uninstall" || "${1:-}" == "uninstall" ]]; then
           console.error(`[WARN] [context-viewer] 无法核实后台进程身份（PID ${pid}），已跳过发送退出信号；请手动确认进程状态。`);
           process.exit(0);
         }
-        let cmdLine = "";
+        const isFile = (p) => { try { return fs.statSync(p).isFile(); } catch { return false; } };
+        const isExec = (tok) => {
+          const raw = String(tok || "").trim().replace(/^[\x22\x27]|[\x22\x27]$/g, "").replace(/\\/g, "/");
+          if (!raw) return false;
+          const base = raw.split("/").pop() || "";
+          return /^(?:node(?:\d+(?:\.\d+)*)?|electron|antigravity|Antigravity(?:\s+Helper(?:\s+\([^)]+\))?)?)(?:\.exe)?$/i.test(base);
+        };
+        const isEntry = (cand) => {
+          const norm = String(cand || "").trim().replace(/\\/g, "/");
+          if (!norm || norm.startsWith("-")) return false;
+          return norm === expectedRel || norm.endsWith("/" + expectedRel);
+        };
+        const evalStructured = (argv) => {
+          if (!Array.isArray(argv) || argv.length === 0) return "unknown";
+          if (!isExec(argv[0]) || argv.length < 3 || !isEntry(argv[1]) || argv[2] !== "--daemon") return "mismatch";
+          return "verified";
+        };
+        const evalPs = (commRaw, argsRaw) => {
+          const comm = String(commRaw || "").replace(/[\r\n]+$/, "").trim();
+          const args = String(argsRaw || "").replace(/[\r\n]+$/, "").trim();
+          if (!args) return "unknown";
+          let execTok = "", rest = "";
+          if (comm && args === comm) return "mismatch";
+          if (comm && args.startsWith(comm + " ")) {
+            execTok = comm;
+            rest = args.slice(comm.length + 1).trimStart();
+          } else {
+            const m = args.match(/^(\S+)(?:\s+([\s\S]*))?$/);
+            if (!m) return "unknown";
+            const firstTok = m[1];
+            if (comm) {
+              const cb = comm.replace(/\\/g, "/").split("/").pop() || "";
+              const fb = firstTok.replace(/\\/g, "/").split("/").pop() || "";
+              if (cb && fb && !fb.startsWith(cb) && !cb.startsWith(fb)) {
+                return (!isExec(comm) && !isExec(firstTok)) ? "mismatch" : "unknown";
+              }
+            }
+            execTok = comm && isExec(comm) ? comm : firstTok;
+            rest = String(m[2] || "").trimStart();
+          }
+          if (!isExec(execTok) || !rest || rest.startsWith("-")) return "mismatch";
+          const normRest = rest.replace(/\\/g, "/");
+          const escRel = expectedRel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const em = new RegExp(`^([\\s\\S]*?${escRel})\\s+--daemon(?:\\s|$)`).exec(normRest);
+          if (!em) return "mismatch";
+          const rawCand = rest.slice(0, em[1].length);
+          if (!isEntry(rawCand)) return "mismatch";
+          if (!/\s/.test(rawCand)) return "verified";
+          const candExists = isFile(rawCand);
+          const wsRe = /\s+/g;
+          let ws;
+          while ((ws = wsRe.exec(rawCand)) !== null) {
+            const prefix = rawCand.slice(0, ws.index);
+            const after = rawCand.slice(ws.index + ws[0].length);
+            if (!candExists) {
+              if (after.startsWith("-") || /^(?:\.{0,2}\/|~\/|[A-Za-z]:[\\/])/.test(after) || /\.(?:m?js|cjs|ts|py|sh|pl|rb)$/i.test(prefix) || isFile(prefix)) {
+                return "mismatch";
+              }
+            } else if (isFile(prefix)) {
+              return "unknown";
+            }
+          }
+          return candExists ? "verified" : "unknown";
+        };
+        let status = "unknown";
         if (process.platform === "linux") {
-          try { cmdLine = fs.readFileSync(`/proc/${pid}/cmdline`).toString("utf8").replace(/\0+/g, " ").trim(); } catch {}
-        }
-        if (!cmdLine) {
           try {
-            cmdLine = execFileSync("ps", ["-ww", "-p", String(pid), "-o", "args="], {
-              env: { ...process.env, LC_ALL: "C" },
-              encoding: "utf8",
-              timeout: 1500,
-              stdio: ["ignore", "pipe", "ignore"]
-            }).trim();
+            const raw = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0+$/, "");
+            if (raw) status = evalStructured(raw.split("\0"));
           } catch {}
         }
-        if (!cmdLine) {
-          if (!alive(pid)) {
-            try { fs.rmSync(statePath, { force: true }); } catch {}
-          } else {
-            console.error(`[WARN] [context-viewer] 无法核实后台进程身份（PID ${pid}），已跳过发送退出信号；请手动确认进程状态。`);
+        if (status === "unknown") {
+          for (let attempt = 0; attempt < 3; attempt++) {
+            if (!alive(pid)) { status = "dead"; break; }
+            let ok = false, comm = "", args = "";
+            try {
+              comm = execFileSync("ps", ["-ww", "-p", String(pid), "-o", "comm="], {
+                env: { ...process.env, LC_ALL: "C" }, encoding: "utf8", timeout: 4000, stdio: ["ignore", "pipe", "ignore"]
+              }).replace(/[\r\n]+$/, "");
+              args = execFileSync("ps", ["-ww", "-p", String(pid), "-o", "args="], {
+                env: { ...process.env, LC_ALL: "C" }, encoding: "utf8", timeout: 4000, stdio: ["ignore", "pipe", "ignore"]
+              }).replace(/[\r\n]+$/, "");
+              ok = true;
+            } catch {}
+            if (ok && args.trim()) {
+              status = evalPs(comm, args);
+              break;
+            }
+            if (!alive(pid)) { status = "dead"; break; }
+            if (attempt < 2) {
+              try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50); } catch {}
+            }
           }
-          process.exit(0);
         }
-        const norm = cmdLine.replace(/\\/g, "/");
-        const isDaemon = norm.includes("sidecars/dashboard/float_window.mjs") && /(?:^|\s)--daemon(?:\s|$)/.test(norm) && !/(?:^|\s)(?:-e|--eval|--print|-p)(?:=|\s|$)/.test(norm);
-        if (!isDaemon) {
+        if (status === "verified") {
+          try { execFileSync(process.execPath, [cliPath, "float", "quit"], { stdio: ["ignore", "ignore", "inherit"] }); } catch {}
+        } else if (status === "dead" || status === "mismatch") {
           try { fs.rmSync(statePath, { force: true }); } catch {}
-          process.exit(0);
+        } else {
+          console.error(`[WARN] [context-viewer] 无法核实后台进程身份（PID ${pid}），已跳过发送退出信号；请手动确认进程状态。`);
         }
-        try { execFileSync(process.execPath, [cliPath, "float", "quit"], { stdio: ["ignore", "ignore", "inherit"] }); } catch {}
       ' "${TARGET_DIR}/sidecars/dashboard/cli.mjs" || true
     fi
   fi

@@ -2,7 +2,7 @@
 
 # AGY Finder 项目目录树 (`agy-finder`)
 
-[![Version](https://img.shields.io/badge/version-v0.2.6-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
+[![Version](https://img.shields.io/badge/version-v0.2.7-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-818cf8)](#安装与启用)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D%2018-22c55e)](#安装与启用)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-a855f7)](#核心特性)
@@ -83,6 +83,8 @@ agy-finder quit                     # 退出后台抽屉守护进程
 
 ## 安装与启用
 
+> **平台验证范围**：已在 **macOS** 完成 Swift 原生抽屉、Aux Pane 与全量实机验证；**Windows / Linux** 基于 `Node.js >= 18` 标准库提供宿主内嵌 Aux Pane、终端 CLI 与浏览器 `--app` 抽屉回退（尚未在对应桌面宿主机逐一实机验收）。
+>
 > **双插件共存升级说明**：若本机同时安装了 `context-viewer`，两者共享 `~/.gemini/antigravity/agy_aux_pane_trigger.json` 触发锁协议。升级 `agy-finder` 时请确保 `context-viewer` 也同步升级至 `>= v1.7.4`（建议直接执行总仓全量安装），并确认旧版后台守护进程与宿主 Sidecar 实例均已退出或重载，避免旧版进程绕过新 Bakery 锁协议并发认领同一事件；仅安装 `agy-finder` 的用户不受影响。
 
 ### 方式 1：让 Antigravity Agent 协助安装（推荐首选）
