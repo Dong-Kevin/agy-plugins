@@ -6,7 +6,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -371,6 +371,9 @@ async function verifyCrossPluginAuxTriggerLock() {
     const afterWrites = JSON.parse(readFileSync(triggerPath, 'utf-8'));
     assert.equal(afterWrites.seq, 40, `Expected seq=40 after 8x5 locked increments, got ${afterWrites.seq}`);
     assert.ok(!existsSync(`${triggerPath}.lock`), 'Trigger lock file must be released after writes');
+    if (existsSync(`${triggerPath}.lock.d`)) {
+      assert.equal(readdirSync(`${triggerPath}.lock.d`).length, 0, 'Trigger bakery lock dir must be empty after writes');
+    }
 
     // 2. 8 concurrent processes race to claim openingSeq and ackSeq on seq=40 (only 1 winner per claim)
     const claimJobs = [];
@@ -403,6 +406,9 @@ async function verifyCrossPluginAuxTriggerLock() {
     const finalTrigger = JSON.parse(readFileSync(triggerPath, 'utf-8'));
     assert.equal(finalTrigger.seq, 41, 'Stale dead-PID lock must be recovered cleanly');
     assert.ok(!existsSync(lockPath), 'Lock file must not linger after stale recovery');
+    if (existsSync(`${lockPath}.d`)) {
+      assert.equal(readdirSync(`${lockPath}.d`).length, 0, 'Bakery lock dir must be empty after stale recovery');
+    }
 
     // 4. S1: Active live-PID lock timeout must fail closed (never overwrite shared trigger or claim)
     const ownerToken = `${process.pid}:${Date.now()}:verify-live-owner`;
@@ -454,7 +460,226 @@ async function verifyCrossPluginAuxTriggerLock() {
     assert.equal(postRelease.claimed, true);
     assert.equal(JSON.parse(readFileSync(triggerPath, 'utf-8')).openingSeq, 41);
 
-    pass('R1/S1 cross-plugin 8-process Aux trigger lock integrity, stale recovery & fail-closed timeout');
+    // 5. T1: Bidirectional stale-lock reclamation interleaving across Finder & Context Viewer
+    const deadPid = spawnSync(process.execPath, ['-e', '']).pid;
+    assert.throws(() => process.kill(deadPid, 0), 'Dead helper PID must have exited');
+
+    const waitForMarker = async (markerPath, label) => {
+      const deadline = Date.now() + 5000;
+      while (!existsSync(markerPath)) {
+        if (Date.now() > deadline) throw new Error(`Timed out waiting for barrier marker: ${label}`);
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    };
+
+    const spawnBarrierWorker = ({ modUrl, seq, trigger, timeoutMs, hookScript }) => {
+      const workerScript = `
+        import fs from 'node:fs';
+        import { syncBuiltinESMExports } from 'node:module';
+        import { join } from 'node:path';
+        const triggerPath = process.env.AGY_AUX_TRIGGER_PATH;
+        const lockPath = triggerPath + '.lock';
+        const lockDir = lockPath + '.d';
+        function waitForResume(resumeFile) {
+          const deadline = Date.now() + 5000;
+          const wait = new Int32Array(new SharedArrayBuffer(4));
+          while (!fs.existsSync(resumeFile)) {
+            if (Date.now() > deadline) throw new Error('Worker barrier timeout: ' + resumeFile);
+            Atomics.wait(wait, 0, 0, 5);
+          }
+        }
+        ${hookScript}
+        syncBuiltinESMExports();
+        const mod = await import(${JSON.stringify(modUrl)});
+        console.log(JSON.stringify(mod.markAuxPaneOpening({ seq: ${seq} })));
+      `;
+      const child = spawn(process.execPath, ['--input-type=module', '-e', workerScript], {
+        env: {
+          ...process.env,
+          AGY_AUX_TRIGGER_PATH: trigger,
+          AGY_AUX_LOCK_TIMEOUT_MS: String(timeoutMs)
+        },
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      let out = '';
+      let err = '';
+      child.stdout.on('data', (d) => { out += d.toString('utf8'); });
+      child.stderr.on('data', (d) => { err += d.toString('utf8'); });
+      const done = new Promise((resolvePromise, rejectPromise) => {
+        child.on('error', rejectPromise);
+        child.on('exit', (code) => {
+          if (code !== 0) rejectPromise(new Error(`Barrier worker exited ${code}: ${err || out}`));
+          else resolvePromise(JSON.parse(out.trim()));
+        });
+      });
+      return { pid: child.pid, child, done };
+    };
+
+    const modPairs = [
+      ['agy-finder', finderModUrl, 'context-viewer', cvModUrl],
+      ['context-viewer', cvModUrl, 'agy-finder', finderModUrl]
+    ];
+
+    for (let idx = 0; idx < modPairs.length; idx += 1) {
+      const [reaperName, reaperUrl, contenderName, contenderUrl] = modPairs[idx];
+
+      // Case A: Reaper pauses mid-reclamation right before renameSync(lockPath, stalePath); contender must wait & fail closed
+      const caseADir = join(auxDir, `t1-case-a-${idx}`);
+      mkdirSync(caseADir, { recursive: true });
+      const caseATrigger = join(caseADir, 'trigger.json');
+      const caseALock = `${caseATrigger}.lock`;
+      const caseABarriers = join(caseADir, 'barriers');
+      mkdirSync(caseABarriers, { recursive: true });
+      const seqA = 50 + idx;
+      writeFileSync(caseATrigger, JSON.stringify({ seq: seqA, openingSeq: 0 }));
+      writeFileSync(caseALock, `${deadPid}:0:synthetic-dead-owner`);
+
+      const readyReaperA = join(caseABarriers, 'ready-reaper');
+      const resumeReaperA = join(caseABarriers, 'resume-reaper');
+      const reaperA = spawnBarrierWorker({
+        modUrl: reaperUrl,
+        seq: seqA,
+        trigger: caseATrigger,
+        timeoutMs: 2500,
+        hookScript: `
+          const origRename = fs.renameSync;
+          let paused = false;
+          fs.renameSync = function(from, to, ...args) {
+            if (!paused && from === lockPath && to.startsWith(lockPath + '.stale.')) {
+              paused = true;
+              fs.writeFileSync(${JSON.stringify(readyReaperA)}, 'ready');
+              waitForResume(${JSON.stringify(resumeReaperA)});
+            }
+            return origRename.call(fs, from, to, ...args);
+          };
+        `
+      });
+      try {
+        await waitForMarker(readyReaperA, `${reaperName} Case A ready`);
+        const contenderRes = JSON.parse(await spawnWorker(`
+          import { markAuxPaneOpening } from ${JSON.stringify(contenderUrl)};
+          console.log(JSON.stringify(markAuxPaneOpening({ seq: ${seqA} })));
+        `, { AGY_AUX_TRIGGER_PATH: caseATrigger, AGY_AUX_LOCK_TIMEOUT_MS: '160' }));
+        assert.equal(contenderRes.ok, false, `${contenderName} must fail closed while ${reaperName} holds bakery turn (${idx})`);
+        assert.equal(contenderRes.claimed, false, `${contenderName} must not claim seq while ${reaperName} is reclaiming (${idx})`);
+
+        writeFileSync(resumeReaperA, 'go');
+        const reaperRes = await reaperA.done;
+        assert.equal(reaperRes.ok, true, `${reaperName} must succeed after resume (${idx})`);
+        assert.equal(reaperRes.claimed, true, `${reaperName} must win seq ${seqA} (${idx})`);
+        assert.equal(Number(reaperRes.claimed) + Number(contenderRes.claimed), 1, `Case A totalWinners must be 1 (${idx})`);
+        assert.equal(JSON.parse(readFileSync(caseATrigger, 'utf-8')).openingSeq, seqA);
+        assert.ok(!existsSync(caseALock), 'Case A .lock must be released');
+        assert.equal(readdirSync(`${caseALock}.d`).length, 0, 'Case A .lock.d must be clean');
+      } finally {
+        if (reaperA.child.exitCode === null) reaperA.child.kill();
+      }
+
+      // Case B: Delayed reaper attempts to unlink dead bakery ticket while live holder is paused inside markAuxPaneOpening
+      const caseBDir = join(auxDir, `t1-case-b-${idx}`);
+      mkdirSync(caseBDir, { recursive: true });
+      const caseBTrigger = join(caseBDir, 'trigger.json');
+      const caseBLock = `${caseBTrigger}.lock`;
+      const caseBLockDir = `${caseBLock}.d`;
+      const caseBBarriers = join(caseBDir, 'barriers');
+      mkdirSync(caseBLockDir, { recursive: true });
+      mkdirSync(caseBBarriers, { recursive: true });
+      const seqB = 60 + idx;
+      const deadTicketName = `ticket-0000000000000000-${deadPid}-dead00000000`;
+      const deadTicketPath = join(caseBLockDir, deadTicketName);
+      writeFileSync(caseBTrigger, JSON.stringify({ seq: seqB, openingSeq: 0 }));
+      writeFileSync(caseBLock, `${deadPid}:0:synthetic-dead-owner`);
+      writeFileSync(deadTicketPath, '');
+
+      const readyHolderTicket = join(caseBBarriers, 'ready-holder-ticket');
+      const resumeHolderTicket = join(caseBBarriers, 'resume-holder-ticket');
+      const readyHolderCS = join(caseBBarriers, 'ready-holder-cs');
+      const resumeHolderCS = join(caseBBarriers, 'resume-holder-cs');
+      const readyReaperB = join(caseBBarriers, 'ready-reaper');
+      const resumeReaperB = join(caseBBarriers, 'resume-reaper');
+
+      const holderB = spawnBarrierWorker({
+        modUrl: contenderUrl,
+        seq: seqB,
+        trigger: caseBTrigger,
+        timeoutMs: 3500,
+        hookScript: `
+          const origUnlink = fs.unlinkSync;
+          const origRead = fs.readFileSync;
+          let pausedTicket = false;
+          let pausedCS = false;
+          fs.unlinkSync = function(targetPath, ...args) {
+            if (!pausedTicket && targetPath === join(lockDir, ${JSON.stringify(deadTicketName)})) {
+              pausedTicket = true;
+              fs.writeFileSync(${JSON.stringify(readyHolderTicket)}, 'ready');
+              waitForResume(${JSON.stringify(resumeHolderTicket)});
+            }
+            return origUnlink.call(fs, targetPath, ...args);
+          };
+          fs.readFileSync = function(targetPath, ...args) {
+            const bytes = origRead.call(fs, targetPath, ...args);
+            if (!pausedCS && targetPath === triggerPath) {
+              pausedCS = true;
+              fs.writeFileSync(${JSON.stringify(readyHolderCS)}, 'ready');
+              waitForResume(${JSON.stringify(resumeHolderCS)});
+            }
+            return bytes;
+          };
+        `
+      });
+
+      let reaperB = null;
+      try {
+        await waitForMarker(readyHolderTicket, `${contenderName} Case B ticket barrier`);
+        reaperB = spawnBarrierWorker({
+          modUrl: reaperUrl,
+          seq: seqB,
+          trigger: caseBTrigger,
+          timeoutMs: 320,
+          hookScript: `
+            const origUnlink = fs.unlinkSync;
+            let paused = false;
+            fs.unlinkSync = function(targetPath, ...args) {
+              if (!paused && targetPath === join(lockDir, ${JSON.stringify(deadTicketName)})) {
+                paused = true;
+                fs.writeFileSync(${JSON.stringify(readyReaperB)}, 'ready');
+                waitForResume(${JSON.stringify(resumeReaperB)});
+              }
+              return origUnlink.call(fs, targetPath, ...args);
+            };
+          `
+        });
+        await waitForMarker(readyReaperB, `${reaperName} Case B reaper ticket barrier`);
+
+        writeFileSync(resumeHolderTicket, 'go');
+        await waitForMarker(readyHolderCS, `${contenderName} Case B critical section`);
+
+        const liveToken = readFileSync(caseBLock, 'utf-8');
+        assert.ok(liveToken.startsWith(`${holderB.pid}:`), `Live lock must belong to holder ${holderB.pid}, got ${liveToken}`);
+        process.kill(holderB.pid, 0);
+
+        writeFileSync(resumeReaperB, 'go');
+        const reaperBRes = await reaperB.done;
+        assert.equal(reaperBRes.ok, false, `Delayed ${reaperName} must fail closed while ${contenderName} holds CS (${idx})`);
+        assert.equal(reaperBRes.claimed, false, `Delayed ${reaperName} must not claim seq ${seqB} (${idx})`);
+        assert.ok(existsSync(caseBLock), `Live lock must remain intact while holder ${contenderName} is inside CS (${idx})`);
+        assert.ok(readFileSync(caseBLock, 'utf-8').startsWith(`${holderB.pid}:`), 'Holder lock owner must remain unchanged');
+
+        writeFileSync(resumeHolderCS, 'go');
+        const holderBRes = await holderB.done;
+        assert.equal(holderBRes.ok, true, `${contenderName} must complete CS cleanly (${idx})`);
+        assert.equal(holderBRes.claimed, true, `${contenderName} must win seq ${seqB} (${idx})`);
+        assert.equal(Number(reaperBRes.claimed) + Number(holderBRes.claimed), 1, `Case B totalWinners must be 1 (${idx})`);
+        assert.equal(JSON.parse(readFileSync(caseBTrigger, 'utf-8')).openingSeq, seqB);
+        assert.ok(!existsSync(caseBLock), 'Case B .lock must be released');
+        assert.equal(readdirSync(caseBLockDir).length, 0, 'Case B .lock.d must be clean');
+      } finally {
+        if (reaperB && reaperB.child.exitCode === null) reaperB.child.kill();
+        if (holderB.child.exitCode === null) holderB.child.kill();
+      }
+    }
+
+    pass('R1/S1/T1 cross-plugin 8-process Aux trigger lock integrity, stale recovery, bidirectional reclamation race & fail-closed timeout');
   } finally {
     rmSync(auxDir, { recursive: true, force: true });
   }

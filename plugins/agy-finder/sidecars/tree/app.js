@@ -397,7 +397,7 @@
     // Clear active search filter so user sees full expanded tree context
     if (state.searchQuery) {
       state.searchQuery = '';
-      state.searchResults = null;
+      resetSearchResultsForContextChange();
       const input = $('search-input');
       if (input) input.value = '';
       $('btn-clear-search')?.classList.add('hidden');
@@ -548,15 +548,38 @@
     const extRoots = state.roots.filter((r) => !hostRoots.some((h) => h.path === r.path));
     state.roots = [...hostRoots, ...extRoots];
 
+    const prevRoot = state.activeRoot;
     if (!preserveRoot || !state.roots.some((r) => r.path === state.activeRoot)) {
       state.activeRoot = ws.primaryRoot || state.roots[0]?.path || '';
     }
     renderRootSelect();
 
+    const rootChanged = state.activeRoot !== prevRoot;
+    if (rootChanged) {
+      state.selectedRelPath = '';
+      state.selectedAbsPath = '';
+      state.selectedFileUri = '';
+      state.selectedIsDir = false;
+      state.revealedRelPath = '';
+      renderActivePathBar();
+      if (state.searchQuery.trim()) {
+        handleSearchInput(state.searchQuery, { immediate: true, resetResults: true });
+      } else {
+        resetSearchResultsForContextChange();
+      }
+    } else if (preserveRoot && state.searchQuery.trim()) {
+      handleSearchInput(state.searchQuery, { immediate: true });
+    }
+
     if (state.activeRoot) {
-      const expanded = Array.from(getExpandedSet(state.activeRoot));
-      clearCacheForRoot(state.activeRoot);
-      await Promise.all(expanded.map((d) => fetchDir(state.activeRoot, d, true).catch(() => [])));
+      const targetRoot = state.activeRoot;
+      const expanded = Array.from(getExpandedSet(targetRoot));
+      clearCacheForRoot(targetRoot);
+      await Promise.all(expanded.map((d) => fetchDir(targetRoot, d, true).catch(() => [])));
+      if (state.activeRoot === targetRoot) {
+        renderTree();
+      }
+    } else {
       renderTree();
     }
     return ws;
@@ -985,13 +1008,26 @@
   }
 
   let searchTimer = null;
-  function handleSearchInput(value) {
+  function resetSearchResultsForContextChange() {
+    clearTimeout(searchTimer);
+    ++state.searchReqSeq;
+    state.searchResults = null;
+    state.searchTruncated = false;
+    state.searchLoading = false;
+    state.searchError = '';
+  }
+
+  function handleSearchInput(value, options = {}) {
     state.searchQuery = value;
     $('btn-clear-search')?.classList.toggle('hidden', !value);
     clearTimeout(searchTimer);
 
     const trimmed = value.trim();
     const reqSeq = ++state.searchReqSeq;
+    if (options.resetResults) {
+      state.searchResults = null;
+      state.searchTruncated = false;
+    }
     if (!trimmed) {
       state.searchResults = null;
       state.searchTruncated = false;
@@ -1005,21 +1041,25 @@
     state.searchError = '';
     renderTree();
 
-    searchTimer = setTimeout(async () => {
-      if (!state.activeRoot) {
+    const executeSearch = async () => {
+      const requestRoot = state.activeRoot;
+      if (!requestRoot) {
         if (reqSeq === state.searchReqSeq) {
+          state.searchResults = null;
+          state.searchTruncated = false;
           state.searchLoading = false;
+          state.searchError = '';
           renderTree();
         }
         return;
       }
       try {
         const res = await apiGet('/api/search', {
-          root: state.activeRoot,
+          root: requestRoot,
           q: trimmed,
           showHidden: state.showHidden ? '1' : '0'
         });
-        if (reqSeq === state.searchReqSeq && state.searchQuery.trim() === trimmed) {
+        if (reqSeq === state.searchReqSeq && state.activeRoot === requestRoot && state.searchQuery.trim() === trimmed) {
           state.searchResults = Array.isArray(res.results) ? res.results : [];
           state.searchTruncated = Boolean(res.truncated);
           state.searchLoading = false;
@@ -1027,23 +1067,42 @@
           renderTree();
         }
       } catch (err) {
-        if (reqSeq === state.searchReqSeq && state.searchQuery.trim() === trimmed) {
+        if (reqSeq === state.searchReqSeq && state.activeRoot === requestRoot && state.searchQuery.trim() === trimmed) {
           state.searchLoading = false;
           state.searchError = err?.message || '搜索请求失败';
           renderTree();
         }
       }
-    }, 160);
+    };
+
+    if (options.immediate) {
+      executeSearch();
+    } else {
+      searchTimer = setTimeout(executeSearch, 160);
+    }
   }
 
   function bindEvents() {
     $('root-select')?.addEventListener('change', async (e) => {
-      state.activeRoot = e.target.value;
+      const nextRoot = e.target.value;
+      state.activeRoot = nextRoot;
       state.selectedRelPath = '';
       state.selectedAbsPath = '';
+      state.selectedFileUri = '';
+      state.selectedIsDir = false;
+      state.revealedRelPath = '';
       renderActivePathBar();
-      await fetchDir(state.activeRoot, '');
-      renderTree();
+      if (state.searchQuery.trim()) {
+        handleSearchInput(state.searchQuery, { immediate: true, resetResults: true });
+      } else {
+        resetSearchResultsForContextChange();
+      }
+      if (nextRoot) {
+        await fetchDir(nextRoot, '').catch(() => []);
+      }
+      if (state.activeRoot === nextRoot) {
+        renderTree();
+      }
     });
 
     $('btn-toggle-hidden')?.addEventListener('click', async () => {
@@ -1058,7 +1117,7 @@
         renderTree();
       }
       if (state.searchQuery.trim()) {
-        handleSearchInput(state.searchQuery);
+        handleSearchInput(state.searchQuery, { immediate: true, resetResults: true });
       }
     });
 

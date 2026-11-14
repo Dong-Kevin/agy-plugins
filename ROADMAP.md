@@ -1,26 +1,24 @@
 # agy-plugins ROADMAP
 
-更新时间：2026-11-14 02:03（Asia/Shanghai）。
+更新时间：2026-11-14 09:40（Asia/Shanghai）。
 
 ## 本次交付目标
 
-1. 发布 `v2026.11.14.1` 稳定性补丁版（`agy-finder v0.2.3` / `context-viewer v1.7.3`）：
-   - 补全共享触发锁 fail-closed 超时互斥、`agy-finder` 符号链接工作区相对路径一致化与 `>25` 展开目录轮转同步、`context-viewer` 自动跟随态下宿主会话 ID 实时变更感知与并发防覆盖。
+1. 发布 `v2026.11.14.2` 稳定性补丁版（`agy-finder v0.2.4` / `context-viewer v1.7.4`）：
+   - 修复双插件共享触发锁并发回收旧锁时的 TOCTOU 抢占竞态，以及 `agy-finder` 切换工作区根目录时保留旧搜索结果并遗漏对新根目录重新搜索的问题。
 
 ## 当前阶段与状态
 
-- **已完成（`v2026.11.14.1` 发布就绪）**：
-  - `plugins/agy-finder/`（`v0.2.3`）：
-    - `drawer.mjs` / `main.mjs` / `app.js`：`withAuxTriggerLock()` 改为获锁失败即中止执行（fail-closed）并通过 `onFail` 明确返回 `ok: false` / `claimed: false` / `lockBusy: true`（同步等待收敛为 1200 ms，死进程 PID 锁立即回收、活进程锁绝不抢占），前端改用严格 `sw?.claimed` / `ackRes?.claimed` 判定。
-    - `path_utils.mjs` / `app.js`：抽出统一 `matchWorkspaceRoot()`，在绝对路径、相对路径与兜底分支统一执行符号链接工作区路径重映射，保持目录读取 `403` 越界校验不放宽，并在 `revealPathInTree` 暴露目录加载失败提示。
-    - `app.js`：`syncVisibleExpandedDirs()` 过滤祖先未展开的子目录，并按 `root` 维护 `syncCursorByRoot` 分批轮转刷新（单轮上限 1 个根目录 + 24 个可见子目录），`btn-collapse-all` 同步重置游标。
-    - `scripts/verify.mjs`：补齐符号链接工作区相对路径展开（含 `listDirectoryEntries` 校验）及 >25 展开目录轮转同步与折叠过滤 VM 回归测试。
-  - `plugins/agy-context-viewer/`（`context-viewer v1.7.3`）：
-    - `collector.mjs` / `main.mjs` / `float_window.mjs` / `app.js`：同步落地 fail-closed `withAuxTriggerLock()` 与全链路锁繁忙返回。
-    - `app.js`：`loadContext()` 在在途合并判断前先同步实时 `window.sidecar?.conversationId`，仅同一 `contextInFlightConv` 合并跳过；响应返回后再次核对实时宿主 ID 并拒绝滞后旧响应。
-    - `scripts/verify.mjs`：补齐自动跟随态宿主会话请求期切换与滞后覆盖防护 VM 回归测试。
-  - 全仓校验、打包与本机热升级实测：根目录 `scripts/verify.mjs` 补齐活进程持锁超时互斥、死进程锁即时回收及释放后复领测试；构建 `RELEASE_REF=v2026.11.14.1` 发行包 `dist/agy-finder-v0.2.3.zip` 与 `dist/context-viewer-v1.7.3.zip`；执行 `./install.sh` 完成本机热升级并验证已安装实例的符号链接 `/api/resolve` + `/api/tree`、fail-closed 锁超时互斥、CLI/菜单栏常驻及 `Ctrl+K` 配置保留。
+- **已完成（`v2026.11.14.2` 发布就绪）**：
+  - `plugins/agy-finder/`（`v0.2.4`）：
+    - `drawer.mjs`：`withAuxTriggerLock()` 升级为两层协议 -- 外层采用持久化目录 `${lockPath}.d` 内的 Lamport Bakery 票据互斥（唯一不可变 `entering-*` / `ticket-*` / `cand-*` 文件名 + 死 PID 清理），内层结合 `linkSync(candPath, lockPath)`（按需回退 `'wx'`）与 `renameSync` 回收死锁，使旧锁回收与新锁获取遵守同一互斥序，避免迟到回收者误移活持有者锁；严格先释放 `.lock` 再释放票据。
+    - `app.js`：抽出 `resetSearchResultsForContextChange()`，在 `handleSearchInput()` 捕获并核对 `requestRoot === state.activeRoot`；`root-select` 切换根目录与 `refreshWorkspace()` 变更根目录时立即作废旧请求并清空旧结果，若搜索框非空则立即按新根目录重查并展示加载态（同时拉取新根目录首层目录缓存，清空搜索后可直接渲染对应目录树）；`btn-toggle-hidden` 同步切为立即刷新搜索。
+    - `scripts/verify.mjs`：在 `verifyFinderFrontendBehavior` 补齐“已有结果后 A → B”“搜索未完成时 A → B”“快速 A → B → A”“旧请求报错不污染新根目录”与“清空搜索回归当前目录树” VM 回归测试。
+  - `plugins/agy-context-viewer/`（`context-viewer v1.7.4`）：
+    - `collector.mjs`：同步将 `withAuxTriggerLock()` 升级为 `${lockPath}.d` 两层 Bakery 票据互斥 + `linkSync` 原子锁获取与死锁回收协议，更新清单、CLI 与 `index.html` 版本至 `1.7.4`。
+  - 全仓校验、打包与本机热升级实测：`scripts/verify.mjs` 新增双向旧锁回收交错障碍回归测试（Case A 回收中途被阻塞与 Case B 迟到回收者尝试删除死票据不破坏活持有者锁）；生成 `dist/agy-finder-v0.2.4.zip`（84.5 KB）与 `dist/context-viewer-v1.7.4.zip`（168.4 KB）；执行 `./install.sh` 将 `~/.gemini/config/plugins/` 热升级至 `agy-finder 0.2.4` 与 `context-viewer 1.7.4`，保留原有快捷键与 `menubarMode: speed` 偏好，CLI 与隔离已安装模块 Bakery 死锁回收测试全部通过。
 - **历史基线**：
+  - `v2026.11.14.1`（`b6e5b81`）：`agy-finder v0.2.3` / `context-viewer v1.7.3`（闭合共享触发锁超时 fail-closed 与常驻活锁不抢占边界，并修复符号链接工作区相对路径、展开目录轮转同步与自动跟随切会话竞态；并发回收旧锁的 TOCTOU 竞态由 `v2026.11.14.2` 补齐）。
   - `v2026.11.14`（`f74753e`）：`agy-finder v0.2.2` / `context-viewer v1.7.2`；`v2026.11.13`：`agy-finder v0.2.1` / `context-viewer v1.7.1`。
 - **跨平台待测项**：
   - Windows PowerShell 5.1 / 7 + `cmd.exe`、Linux 桌面端、`Node.js 18` 最低版本及真实桌面端宿主复用/侧栏交互尚未在对应宿主机实机验收。
@@ -35,6 +33,6 @@
 
 ## 最近验证
 
-- `./install.sh` + 本机已安装实测：通过，热升级至 `agy-finder 0.2.3` / `context-viewer 1.7.3`（保留自定义 `Ctrl+K` 与 `menubarMode: speed`），`agy-finder` 符号链接工作区独立 HTTP `/api/resolve`（`200`）与 `/api/tree`（`200`）及双插件已安装模块 fail-closed 锁超时测试全部通过，时间：`2026-11-14 02:03`（Asia/Shanghai）。
-- `node scripts/verify.mjs --strict-git-identity`：通过（含 S1/R1 8 进程竞争 + 死锁回收 + 活锁 fail-closed 超时互斥、S2/R2 符号链接工作区相对路径 + `403` 守卫、S3 `>25` 展开目录轮转 + 折叠祖先过滤 VM 测试、S4 自动跟随宿主会话切换 + 乱序防覆盖 VM 测试、隔离安装器与 Swift `-typecheck`），时间：`2026-11-14 02:03`（Asia/Shanghai）。
-- `RELEASE_REF=v2026.11.14.1 LC_ALL=C node scripts/package-all.mjs && (cd dist && LC_ALL=C shasum -a 256 -c agy-finder-v0.2.3.zip.sha256 context-viewer-v1.7.3.zip.sha256)`：通过，生成 `dist/agy-finder-v0.2.3.zip`（83.0 KB）与 `dist/context-viewer-v1.7.3.zip`（167.2 KB），SHA-256 校验 `OK`，时间：`2026-11-14 02:03`（Asia/Shanghai）。
+- `./install.sh` + 本机已安装实测：通过，热升级至 `agy-finder 0.2.4` / `context-viewer 1.7.4`（保留自定义 `Ctrl+K` 与 `menubarMode: speed`），`~/.local/bin/agy-finder status --json`（`daemonRunning: true`）与 `agy-context --version`（`v1.7.4`）及双插件已安装模块隔离 Bakery 死锁回收测试全部通过，时间：`2026-11-14 09:40`（Asia/Shanghai）。
+- `node scripts/verify.mjs --strict-git-identity`：通过（含双插件自检、`v0.2.4` / `v1.7.4` 清单与隔离检查、R1/S1/T1 8 进程竞争与双向旧锁并发回收交错测试、R2/S2/S3/T2 符号链接相对路径 + 目录轮转 + 切工作区重搜 VM 测试、S4 自动跟随切会话 VM 测试、隔离安装卸载与 Swift `-typecheck`），时间：`2026-11-14 09:40`（Asia/Shanghai）。
+- `RELEASE_REF=v2026.11.14.2 LC_ALL=C node scripts/package-all.mjs && (cd dist && unzip -t agy-finder-v0.2.4.zip && unzip -t context-viewer-v1.7.4.zip && LC_ALL=C shasum -a 256 -c agy-finder-v0.2.4.zip.sha256 context-viewer-v1.7.4.zip.sha256)`：通过，生成 `dist/agy-finder-v0.2.4.zip`（84.5 KB）与 `dist/context-viewer-v1.7.4.zip`（168.4 KB），ZIP 完整性与 SHA-256 校验均 `OK`，时间：`2026-11-14 09:40`（Asia/Shanghai）。

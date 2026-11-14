@@ -726,6 +726,7 @@ function verifyPathResolutionAndSymlinkSearch() {
 async function verifyFinderFrontendBehavior() {
   const appCode = readFileSync(join(ROOT, 'sidecars', 'tree', 'app.js'), 'utf8');
   const wsRoot = '/mock-ws';
+  const wsRootB = '/Users/demo/project-b';
 
   const makeEl = (id = '') => {
     const attrs = new Map();
@@ -780,6 +781,7 @@ async function verifyFinderFrontendBehavior() {
   ]);
   const treeFetches = [];
   let searchMode = 'truncated';
+  const pendingSearchQueue = [];
   const intervalCbs = [];
 
   const mockLocation = {
@@ -859,7 +861,15 @@ async function verifyFinderFrontendBehavior() {
         return {
           ok: true,
           status: 200,
-          json: async () => ({ ok: true, roots: [{ path: wsRoot, name: 'mock-ws' }], primaryRoot: wsRoot, showHidden: false })
+          json: async () => ({
+            ok: true,
+            roots: [
+              { path: wsRoot, name: 'mock-ws', fileUri: `file://${wsRoot}` },
+              { path: wsRootB, name: 'mock-ws-b', fileUri: `file://${wsRootB}` }
+            ],
+            primaryRoot: wsRoot,
+            showHidden: false
+          })
         };
       }
       if (u.pathname === '/api/shortcut') {
@@ -873,8 +883,15 @@ async function verifyFinderFrontendBehavior() {
         return { ok: true, status: 200, json: async () => ({ ok: true, mentions: [] }) };
       }
       if (u.pathname === '/api/tree') {
+        const reqRoot = u.searchParams.get('root') || wsRoot;
         const dir = u.searchParams.get('dir') || '';
         treeFetches.push(dir);
+        if (reqRoot === wsRootB) {
+          const items = dir === ''
+            ? [{ name: 'only-in-b.ts', relPath: 'only-in-b.ts', absPath: `${wsRootB}/only-in-b.ts`, fileUri: `file://${wsRootB}/only-in-b.ts`, isDirectory: false }]
+            : [];
+          return { ok: true, status: 200, json: async () => ({ ok: true, items }) };
+        }
         const items = (treeData.get(dir) || []).map((entry) => ({ ...entry }));
         return { ok: true, status: 200, json: async () => ({ ok: true, items }) };
       }
@@ -898,6 +915,18 @@ async function verifyFinderFrontendBehavior() {
         };
       }
       if (u.pathname === '/api/search') {
+        if (searchMode === 'deferred') {
+          const reqRoot = u.searchParams.get('root') || '';
+          const q = u.searchParams.get('q') || '';
+          return new Promise((resolvePromise) => {
+            pendingSearchQueue.push({
+              root: reqRoot,
+              q,
+              resolve: (payload) => resolvePromise({ ok: true, status: 200, json: async () => payload }),
+              reject: (msg = 'Simulated search error') => resolvePromise({ ok: false, status: 500, json: async () => ({ ok: false, error: msg }) })
+            });
+          });
+        }
         if (searchMode === 'error') {
           return { ok: false, status: 500, json: async () => ({ ok: false, error: 'Simulated search failure' }) };
         }
@@ -1053,7 +1082,160 @@ async function verifyFinderFrontendBehavior() {
   await new Promise((r) => setTimeout(r, 220));
   assert.ok(container.innerHTML.includes('af-search-error'), 'Failed search request must display error banner');
 
-  pass('VM behavioral checks: R3 reveal cache refresh, UX #1 visible sync, and UX #3 search states');
+  // T2 checks: workspace root switching invalidates stale searches & immediately searches new root
+  const rootSelect = getEl('root-select');
+  const clearBtn = getEl('btn-clear-search');
+  searchMode = 'deferred';
+  pendingSearchQueue.length = 0;
+
+  // T2.1: Existing search results from A cleared on switch to B, then B searched automatically
+  searchInput.value = 'readme';
+  searchInput.dispatch('input', { target: searchInput });
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(pendingSearchQueue.length, 1);
+  assert.equal(pendingSearchQueue[0].root, wsRoot);
+  pendingSearchQueue.shift().resolve({
+    ok: true,
+    truncated: false,
+    results: [{ name: 'readme-a.md', relPath: 'readme-a.md', absPath: `${wsRoot}/readme-a.md`, fileUri: `file://${wsRoot}/readme-a.md`, isDirectory: false }]
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(container.innerHTML.includes('readme-a.md'), 'Pre-switch search on A must render readme-a.md');
+
+  rootSelect.dispatch('change', { target: { value: wsRootB } });
+  await Promise.resolve();
+  assert.ok(!container.innerHTML.includes('readme-a.md'), 'Switching root A->B must clear previous root results');
+  assert.ok(container.innerHTML.includes('搜索中'), 'Switching root with active query must enter loading state for B');
+  assert.equal(pendingSearchQueue.length, 1);
+  assert.equal(pendingSearchQueue[0].root, wsRootB);
+  assert.equal(pendingSearchQueue[0].q, 'readme');
+  pendingSearchQueue.shift().resolve({
+    ok: true,
+    truncated: false,
+    results: [{ name: 'readme-b.md', relPath: 'readme-b.md', absPath: `${wsRootB}/readme-b.md`, fileUri: `file://${wsRootB}/readme-b.md`, isDirectory: false }]
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(container.innerHTML.includes('readme-b.md'), 'Switching root A->B must render new root search result');
+  assert.ok(!container.innerHTML.includes('readme-a.md'), 'Old root result must never reappear after switch');
+
+  // T2.2: In-flight A -> B ignores late response from A and keeps B loading until B resolves
+  searchInput.value = '';
+  clearBtn.dispatch('click');
+  rootSelect.dispatch('change', { target: { value: wsRoot } });
+  await new Promise((r) => setTimeout(r, 20));
+  pendingSearchQueue.length = 0;
+
+  searchInput.value = 'inflight';
+  searchInput.dispatch('input', { target: searchInput });
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(pendingSearchQueue.length, 1);
+  const reqInflightA = pendingSearchQueue.shift();
+  assert.equal(reqInflightA.root, wsRoot);
+
+  rootSelect.dispatch('change', { target: { value: wsRootB } });
+  await Promise.resolve();
+  assert.equal(pendingSearchQueue.length, 1);
+  const reqInflightB = pendingSearchQueue.shift();
+  assert.equal(reqInflightB.root, wsRootB);
+
+  reqInflightA.resolve({
+    ok: true,
+    truncated: false,
+    results: [{ name: 'stale-a.md', relPath: 'stale-a.md', absPath: `${wsRoot}/stale-a.md`, fileUri: `file://${wsRoot}/stale-a.md`, isDirectory: false }]
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(!container.innerHTML.includes('stale-a.md'), 'Stale in-flight response from A must be ignored after switching to B');
+  assert.ok(container.innerHTML.includes('搜索中'), 'UI must stay in loading state while B request is still pending');
+
+  reqInflightB.resolve({
+    ok: true,
+    truncated: false,
+    results: [{ name: 'fresh-b.md', relPath: 'fresh-b.md', absPath: `${wsRootB}/fresh-b.md`, fileUri: `file://${wsRootB}/fresh-b.md`, isDirectory: false }]
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(container.innerHTML.includes('fresh-b.md'), 'B response must commit after ignoring stale A response');
+
+  // T2.3: Rapid A -> B -> A ignores B and earlier A, committing only final A request
+  searchInput.value = '';
+  clearBtn.dispatch('click');
+  rootSelect.dispatch('change', { target: { value: wsRoot } });
+  await new Promise((r) => setTimeout(r, 20));
+  pendingSearchQueue.length = 0;
+
+  searchInput.value = 'bounce';
+  searchInput.dispatch('input', { target: searchInput });
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(pendingSearchQueue.length, 1);
+  const reqBounceA1 = pendingSearchQueue.shift();
+
+  rootSelect.dispatch('change', { target: { value: wsRootB } });
+  await Promise.resolve();
+  assert.equal(pendingSearchQueue.length, 1);
+  const reqBounceB = pendingSearchQueue.shift();
+  assert.equal(reqBounceB.root, wsRootB);
+
+  rootSelect.dispatch('change', { target: { value: wsRoot } });
+  await Promise.resolve();
+  assert.equal(pendingSearchQueue.length, 1);
+  const reqBounceA2 = pendingSearchQueue.shift();
+  assert.equal(reqBounceA2.root, wsRoot);
+
+  reqBounceB.resolve({
+    ok: true,
+    truncated: false,
+    results: [{ name: 'bounce-b.md', relPath: 'bounce-b.md', absPath: `${wsRootB}/bounce-b.md`, fileUri: `file://${wsRootB}/bounce-b.md`, isDirectory: false }]
+  });
+  reqBounceA1.resolve({
+    ok: true,
+    truncated: false,
+    results: [{ name: 'bounce-a-stale.md', relPath: 'bounce-a-stale.md', absPath: `${wsRoot}/bounce-a-stale.md`, fileUri: `file://${wsRoot}/bounce-a-stale.md`, isDirectory: false }]
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(!container.innerHTML.includes('bounce-b.md'), 'Rapid A->B->A must ignore late B response');
+  assert.ok(!container.innerHTML.includes('bounce-a-stale.md'), 'Rapid A->B->A must ignore superseded first A response');
+  assert.ok(container.innerHTML.includes('搜索中'), 'UI must keep loading until final A request settles');
+
+  reqBounceA2.resolve({
+    ok: true,
+    truncated: false,
+    results: [{ name: 'bounce-a-current.md', relPath: 'bounce-a-current.md', absPath: `${wsRoot}/bounce-a-current.md`, fileUri: `file://${wsRoot}/bounce-a-current.md`, isDirectory: false }]
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(container.innerHTML.includes('bounce-a-current.md'), 'Rapid A->B->A must commit final A search result');
+
+  // T2.4: Stale error response from previous root must not pollute new root
+  searchInput.value = 'err-root';
+  searchInput.dispatch('input', { target: searchInput });
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(pendingSearchQueue.length, 1);
+  const reqErrA = pendingSearchQueue.shift();
+
+  rootSelect.dispatch('change', { target: { value: wsRootB } });
+  await Promise.resolve();
+  assert.equal(pendingSearchQueue.length, 1);
+  const reqOkB = pendingSearchQueue.shift();
+
+  reqErrA.reject('Previous root A search failed');
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(!container.innerHTML.includes('af-search-error'), 'Stale error from A must not render error banner on B');
+  assert.ok(!container.innerHTML.includes('Previous root A search failed'), 'Stale error text from A must be ignored');
+  assert.ok(container.innerHTML.includes('搜索中'), 'New root B must remain loading while reqOkB is in flight');
+
+  reqOkB.resolve({
+    ok: true,
+    truncated: false,
+    results: [{ name: 'recovered-in-b.ts', relPath: 'recovered-in-b.ts', absPath: `${wsRootB}/recovered-in-b.ts`, fileUri: `file://${wsRootB}/recovered-in-b.ts`, isDirectory: false }]
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(container.innerHTML.includes('recovered-in-b.ts'), 'Root B search must resolve cleanly after stale A error');
+
+  // T2.5: Clearing search after switching displays current root directory tree
+  clearBtn.dispatch('click');
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(container.innerHTML.includes('only-in-b.ts'), 'Clearing search on B must display root B directory tree');
+  assert.ok(!container.innerHTML.includes('recovered-in-b.ts'), 'Clearing search must exit search results view');
+
+  pass('VM behavioral checks: R3 reveal cache refresh, UX #1 visible sync, UX #3 search states & T2 multi-root search switch');
 }
 
 async function main() {

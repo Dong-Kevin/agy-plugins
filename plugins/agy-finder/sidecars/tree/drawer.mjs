@@ -15,6 +15,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   closeSync,
   existsSync,
+  linkSync,
   mkdirSync,
   openSync,
   readdirSync,
@@ -876,86 +877,247 @@ function isAuxLockPidAlive(pid) {
   }
 }
 
+function parseAuxBakeryEntry(name) {
+  if (name.startsWith('ticket-')) {
+    const parts = name.split('-');
+    if (parts.length !== 4 || parts[1].length !== 16) return null;
+    let ticket;
+    try {
+      ticket = BigInt(`0x${parts[1]}`);
+    } catch {
+      return null;
+    }
+    const pid = Number(parts[2]);
+    if (!Number.isInteger(pid) || pid <= 0 || !parts[3]) return null;
+    return { kind: 'ticket', name, ticket, pid, nonce: parts[3] };
+  }
+  if (name.startsWith('entering-') || name.startsWith('cand-')) {
+    const parts = name.split('-');
+    if (parts.length !== 3) return null;
+    const pid = Number(parts[1]);
+    if (!Number.isInteger(pid) || pid <= 0 || !parts[2]) return null;
+    return { kind: name.startsWith('entering-') ? 'entering' : 'cand', name, pid, nonce: parts[2] };
+  }
+  return null;
+}
+
+function compareAuxTickets(aTicket, aPid, aNonce, bTicket, bPid, bNonce) {
+  if (aTicket !== bTicket) return aTicket < bTicket ? -1 : 1;
+  if (aPid !== bPid) return aPid < bPid ? -1 : 1;
+  if (aNonce === bNonce) return 0;
+  return aNonce < bNonce ? -1 : 1;
+}
+
 function withAuxTriggerLock(fn, options = {}) {
   const filePath = getSharedAuxTriggerPath();
   const lockPath = `${filePath}.lock`;
-  try {
-    mkdirSync(dirname(lockPath), { recursive: true });
-  } catch {}
-
-  const token = `${process.pid}:${Date.now()}:${randomBytes(6).toString('hex')}`;
+  const lockDir = `${lockPath}.d`;
+  const pid = process.pid;
+  const nonce = randomBytes(6).toString('hex');
+  const token = `${pid}:${Date.now()}:${nonce}`;
   const rawTimeout = Number(options.timeoutMs ?? process.env.AGY_AUX_LOCK_TIMEOUT_MS ?? 1200);
   const timeoutMs = Number.isFinite(rawTimeout) ? Math.max(20, Math.min(4000, rawTimeout)) : 1200;
   const deadline = Date.now() + timeoutMs;
-  let acquired = false;
-  let attempt = 0;
 
-  while (!acquired && Date.now() < deadline) {
-    let fd = null;
-    try {
-      fd = openSync(lockPath, 'wx', 0o600);
-      writeSync(fd, token);
-      acquired = true;
-    } catch (err) {
-      if (fd !== null && !acquired) {
-        try { closeSync(fd); } catch {}
-        fd = null;
-        try { unlinkSync(lockPath); } catch {}
-      }
-      if (err?.code === 'ENOENT') {
-        try { mkdirSync(dirname(lockPath), { recursive: true }); } catch {}
-        continue;
-      }
-      if (err?.code !== 'EEXIST') break;
-
-      try {
-        const st = statSync(lockPath);
-        const ageMs = Date.now() - Number(st.mtimeMs || 0);
-        let raw = '';
-        try { raw = readFileSync(lockPath, 'utf8'); } catch {}
-        const trimmed = String(raw || '').trim();
-        const hasPidSep = trimmed.includes(':');
-        const ownerPid = hasPidSep ? Number(trimmed.split(':')[0]) : 0;
-        const deadOwner = hasPidSep && Number.isInteger(ownerPid) && ownerPid > 0 && !isAuxLockPidAlive(ownerPid);
-        const orphanedBlank = !hasPidSep && ageMs >= 2000;
-        if (deadOwner || orphanedBlank) {
-          const stalePath = `${lockPath}.stale.${process.pid}.${Date.now()}.${attempt}`;
-          try {
-            renameSync(lockPath, stalePath);
-            try { unlinkSync(stalePath); } catch {}
-            continue;
-          } catch {}
-        }
-      } catch (statErr) {
-        if (statErr?.code === 'ENOENT') continue;
-      }
-
-      const remainingMs = deadline - Date.now();
-      if (remainingMs <= 0) break;
-      const waitMs = Math.min(remainingMs, Math.min(16, 2 + attempt * 2));
-      attempt += 1;
-      try {
-        Atomics.wait(AUX_TRIGGER_WAIT_ARR, 0, 0, waitMs);
-      } catch {}
-    } finally {
-      if (fd !== null) {
-        try { closeSync(fd); } catch {}
-      }
-    }
-  }
-
-  if (!acquired) {
-    return typeof options.onFail === 'function' ? options.onFail(filePath) : null;
-  }
+  let enteringPath = '';
+  let ticketPath = '';
+  let candPath = '';
+  let bakeryAcquired = false;
+  let lockAcquired = false;
 
   try {
-    return fn(filePath);
-  } finally {
     try {
-      if (readFileSync(lockPath, 'utf8') === token) {
-        unlinkSync(lockPath);
+      mkdirSync(lockDir, { recursive: true });
+      const enteringName = `entering-${pid}-${nonce}`;
+      enteringPath = join(lockDir, enteringName);
+      closeSync(openSync(enteringPath, 'wx', 0o600));
+
+      let maxTicket = 0n;
+      for (const name of readdirSync(lockDir)) {
+        const parsed = parseAuxBakeryEntry(name);
+        if (parsed?.kind === 'ticket' && parsed.ticket > maxTicket) {
+          maxTicket = parsed.ticket;
+        }
+      }
+      const myTicket = maxTicket + 1n;
+      const ticketName = `ticket-${myTicket.toString(16).padStart(16, '0')}-${pid}-${nonce}`;
+      ticketPath = join(lockDir, ticketName);
+      closeSync(openSync(ticketPath, 'wx', 0o600));
+
+      try { unlinkSync(enteringPath); } catch {}
+      enteringPath = '';
+
+      let snapshot = readdirSync(lockDir);
+      const pendingEntering = new Map();
+      for (const name of snapshot) {
+        const parsed = parseAuxBakeryEntry(name);
+        if (parsed?.kind === 'entering' && name !== enteringName) {
+          pendingEntering.set(name, parsed.pid);
+        }
+      }
+
+      let attempt = 0;
+      while (!bakeryAcquired && Date.now() < deadline) {
+        const currentNames = (snapshot ?? readdirSync(lockDir)).sort();
+        snapshot = null;
+        const currentSet = new Set(currentNames);
+        let blocked = false;
+        let reapedDead = false;
+
+        for (const [eName, ePid] of Array.from(pendingEntering.entries())) {
+          if (!currentSet.has(eName)) {
+            pendingEntering.delete(eName);
+          } else if (!isAuxLockPidAlive(ePid)) {
+            try { unlinkSync(join(lockDir, eName)); } catch {}
+            pendingEntering.delete(eName);
+            reapedDead = true;
+          } else {
+            blocked = true;
+            break;
+          }
+        }
+
+        if (!blocked && !reapedDead) {
+          for (const name of currentNames) {
+            if (name === ticketName) continue;
+            const parsed = parseAuxBakeryEntry(name);
+            if (
+              parsed?.kind === 'ticket' &&
+              compareAuxTickets(parsed.ticket, parsed.pid, parsed.nonce, myTicket, pid, nonce) < 0
+            ) {
+              if (!isAuxLockPidAlive(parsed.pid)) {
+                try { unlinkSync(join(lockDir, name)); } catch {}
+                reapedDead = true;
+              } else {
+                blocked = true;
+                break;
+              }
+            }
+          }
+        }
+
+        if (reapedDead && !blocked) {
+          continue;
+        }
+
+        if (!blocked && !reapedDead) {
+          for (const name of currentNames) {
+            const parsed = parseAuxBakeryEntry(name);
+            if (parsed?.kind === 'cand' && !isAuxLockPidAlive(parsed.pid)) {
+              try { unlinkSync(join(lockDir, name)); } catch {}
+            }
+          }
+          bakeryAcquired = true;
+          break;
+        }
+
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) break;
+        const waitMs = Math.min(remainingMs, Math.min(16, 2 + attempt * 2));
+        attempt += 1;
+        try {
+          Atomics.wait(AUX_TRIGGER_WAIT_ARR, 0, 0, waitMs);
+        } catch {}
+      }
+
+      if (bakeryAcquired) {
+        candPath = join(lockDir, `cand-${pid}-${nonce}`);
+        writeFileSync(candPath, token, { mode: 0o600 });
+        let lockAttempt = 0;
+        while (!lockAcquired && Date.now() < deadline) {
+          let fd = null;
+          try {
+            linkSync(candPath, lockPath);
+            lockAcquired = true;
+            break;
+          } catch (linkErr) {
+            let err = linkErr;
+            if (linkErr?.code === 'ENOSYS' || linkErr?.code === 'EPERM' || linkErr?.code === 'EXDEV' || linkErr?.code === 'EACCES') {
+              err = null;
+              try {
+                fd = openSync(lockPath, 'wx', 0o600);
+                writeSync(fd, token);
+                lockAcquired = true;
+                break;
+              } catch (openErr) {
+                err = openErr;
+                if (fd !== null && !lockAcquired) {
+                  try { closeSync(fd); } catch {}
+                  fd = null;
+                  try { unlinkSync(lockPath); } catch {}
+                }
+              } finally {
+                if (fd !== null) {
+                  try { closeSync(fd); } catch {}
+                }
+              }
+            }
+            if (err?.code === 'ENOENT') {
+              try { mkdirSync(lockDir, { recursive: true }); } catch {}
+              try { writeFileSync(candPath, token, { mode: 0o600 }); } catch {}
+              continue;
+            }
+            if (err?.code !== 'EEXIST') break;
+
+            try {
+              const st = statSync(lockPath);
+              const ageMs = Date.now() - Number(st.mtimeMs || 0);
+              let raw = '';
+              try { raw = readFileSync(lockPath, 'utf8'); } catch {}
+              const trimmed = String(raw || '').trim();
+              const hasPidSep = trimmed.includes(':');
+              const ownerPid = hasPidSep ? Number(trimmed.split(':')[0]) : 0;
+              const deadOwner = hasPidSep && Number.isInteger(ownerPid) && ownerPid > 0 && !isAuxLockPidAlive(ownerPid);
+              const orphanedBlank = !hasPidSep && ageMs >= 2000;
+              if (deadOwner || orphanedBlank) {
+                const stalePath = `${lockPath}.stale.${pid}.${Date.now()}.${lockAttempt}`;
+                try {
+                  renameSync(lockPath, stalePath);
+                  try { unlinkSync(stalePath); } catch {}
+                  continue;
+                } catch {}
+              }
+            } catch (statErr) {
+              if (statErr?.code === 'ENOENT') continue;
+            }
+
+            const remainingMs = deadline - Date.now();
+            if (remainingMs <= 0) break;
+            const waitMs = Math.min(remainingMs, Math.min(16, 2 + lockAttempt * 2));
+            lockAttempt += 1;
+            try {
+              Atomics.wait(AUX_TRIGGER_WAIT_ARR, 0, 0, waitMs);
+            } catch {}
+          }
+        }
+        if (candPath) {
+          try { unlinkSync(candPath); } catch {}
+          candPath = '';
+        }
       }
     } catch {}
+
+    if (!bakeryAcquired || !lockAcquired) {
+      return typeof options.onFail === 'function' ? options.onFail(filePath) : null;
+    }
+    return fn(filePath);
+  } finally {
+    if (candPath) {
+      try { unlinkSync(candPath); } catch {}
+    }
+    if (lockAcquired) {
+      try {
+        if (readFileSync(lockPath, 'utf8') === token) {
+          unlinkSync(lockPath);
+        }
+      } catch {}
+    }
+    if (ticketPath) {
+      try { unlinkSync(ticketPath); } catch {}
+    }
+    if (enteringPath) {
+      try { unlinkSync(enteringPath); } catch {}
+    }
   }
 }
 
