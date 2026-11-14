@@ -68,11 +68,11 @@ const TEXT_EXTENSIONS = new Set([
 
 // Caches
 const fileAuditCache = new Map();       // "realPath|size|mtimeMs" -> attachment result
-const transcriptHistCache = new Map();  // filePath -> { size, mtimeMs, records, firstDate, stepCount }
-const convGenMetaCache = new Map();     // convId -> { at, callsByStep, latestMeta }
+const transcriptHistCache = new Map();  // filePath -> { size, mtimeMs, firstDate, rawRecords, stepsNeedingGen }
+const convGenMetaCache = new Map();     // convId -> { at, generatorList, callsByStep }
 const lsGenMissCache = new Map();       // convId -> { lsKey, size, mtimeMs, at }
 const recentConvMetaCache = new Map();  // logPath -> { key, title, lastContextTokens, turnsCount }
-let genStepModelsCache = { path: '', data: null };
+let genStepModelsCache = { path: '', mtimeMs: -1, size: -1, data: null };
 let cachedHostStatus = {
   at: 0,
   lsKey: '',
@@ -95,6 +95,17 @@ let cachedHostStatus = {
 };
 let lastGoodHostData = null;
 let cachedHistoryResult = { at: 0, hostSig: '', etag: '', data: null };
+
+const GEN_BACKFILL_CONCURRENCY = 6;
+const GEN_BACKFILL_RPC_TIMEOUT_MS = 900;
+const GEN_BACKFILL_SYNC_BUDGET_MS = 350;
+const GEN_MISS_TTL_MS = 60_000;
+
+let genBackfillWaveSeq = 0;
+let genBackfillDataSeq = 0;
+const genBackfillState = {
+  wave: null
+};
 
 export const LOOPBACK_SECURITY_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
@@ -328,28 +339,104 @@ function getGenStepModelsPath() {
 
 function loadPersistedStepModels() {
   const p = getGenStepModelsPath();
-  if (genStepModelsCache.path === p && genStepModelsCache.data) {
+  let st = null;
+  try {
+    if (existsSync(p)) st = statSync(p);
+  } catch {}
+  const stMtime = st ? st.mtimeMs : -1;
+  const stSize = st ? st.size : -1;
+  if (
+    genStepModelsCache.path === p &&
+    genStepModelsCache.mtimeMs === stMtime &&
+    genStepModelsCache.size === stSize &&
+    genStepModelsCache.data
+  ) {
     return genStepModelsCache.data;
   }
   const raw = readJsonSafe(p, null);
-  const data = raw && typeof raw === 'object' && raw.convs && typeof raw.convs === 'object'
-    ? { version: 1, convs: { ...raw.convs } }
-    : { version: 1, convs: {} };
-  genStepModelsCache = { path: p, data };
+  const cleanConvs = {};
+  if (raw && typeof raw === 'object' && raw.convs && typeof raw.convs === 'object') {
+    for (const [convId, entry] of Object.entries(raw.convs)) {
+      if (!entry || typeof entry !== 'object' || !entry.steps || typeof entry.steps !== 'object') continue;
+      const cleanSteps = {};
+      for (const [k, v] of Object.entries(entry.steps)) {
+        const val = String(v || '').trim();
+        if (val) cleanSteps[String(k)] = val;
+      }
+      if (Object.keys(cleanSteps).length > 0) {
+        cleanConvs[convId] = {
+          size: Number(entry.size || 0),
+          mtimeMs: Number(entry.mtimeMs || 0),
+          steps: cleanSteps
+        };
+      }
+    }
+  }
+  const data = { version: 1, convs: cleanConvs };
+  genStepModelsCache = { path: p, mtimeMs: stMtime, size: stSize, data };
   return data;
 }
 
 function savePersistedStepModels(data) {
   const p = getGenStepModelsPath();
-  const entries = Object.entries(data?.convs || {});
+  const diskRaw = readJsonSafe(p, null);
+  const diskConvs = (diskRaw && typeof diskRaw === 'object' && diskRaw.convs && typeof diskRaw.convs === 'object')
+    ? diskRaw.convs
+    : {};
+  const mergedConvs = {};
+
+  const mergeInto = (srcConvs) => {
+    for (const [convId, entry] of Object.entries(srcConvs || {})) {
+      if (!entry || typeof entry !== 'object' || !entry.steps || typeof entry.steps !== 'object') continue;
+      const prev = mergedConvs[convId];
+      const combinedSteps = { ...(prev?.steps || {}) };
+      for (const [k, v] of Object.entries(entry.steps)) {
+        const val = String(v || '').trim();
+        if (val) combinedSteps[String(k)] = val;
+      }
+      if (!Object.keys(combinedSteps).length) continue;
+      const nextMtime = Number(entry.mtimeMs || 0);
+      const prevMtime = Number(prev?.mtimeMs || 0);
+      const nextSize = Number(entry.size || 0);
+      const prevSize = Number(prev?.size || 0);
+      const keepNextMeta = !prev || nextMtime > prevMtime || (nextMtime === prevMtime && nextSize >= prevSize);
+      mergedConvs[convId] = {
+        size: keepNextMeta ? nextSize : prevSize,
+        mtimeMs: keepNextMeta ? nextMtime : prevMtime,
+        steps: combinedSteps
+      };
+    }
+  };
+
+  mergeInto(diskConvs);
+  mergeInto(data?.convs);
+
+  const entries = Object.entries(mergedConvs);
   if (entries.length > 1500) {
     entries.sort((a, b) => Number(b[1]?.mtimeMs || 0) - Number(a[1]?.mtimeMs || 0));
-    data.convs = Object.fromEntries(entries.slice(0, 1500));
   }
-  genStepModelsCache = { path: p, data };
+  const nextData = {
+    version: 1,
+    convs: Object.fromEntries(entries.slice(0, 1500))
+  };
+  if (data && typeof data === 'object') {
+    data.version = 1;
+    data.convs = nextData.convs;
+  }
   try {
-    writeJsonAtomic(p, data);
-  } catch {}
+    writeJsonAtomic(p, nextData);
+    let st = null;
+    try { st = statSync(p); } catch {}
+    genStepModelsCache = {
+      path: p,
+      mtimeMs: st ? st.mtimeMs : -1,
+      size: st ? st.size : -1,
+      data: nextData
+    };
+  } catch {
+    genStepModelsCache = { path: p, mtimeMs: -1, size: -1, data: nextData };
+  }
+  return nextData;
 }
 
 function buildStepModelsRecord(generatorList = []) {
@@ -366,22 +453,41 @@ function buildStepModelsRecord(generatorList = []) {
   return steps;
 }
 
+function mergePersistedConvStepModels(convsMap, convId, st, generatorList) {
+  if (!convsMap || !convId || !st || !Array.isArray(generatorList) || !generatorList.length) return false;
+  const nextSteps = buildStepModelsRecord(generatorList);
+  const nextKeys = Object.keys(nextSteps);
+  if (!nextKeys.length) return false;
+
+  const prev = convsMap[convId];
+  const prevSteps = (prev?.steps && typeof prev.steps === 'object') ? prev.steps : {};
+  const mergedSteps = { ...prevSteps, ...nextSteps };
+  const unchanged = Boolean(
+    prev &&
+    prev.size === st.size &&
+    prev.mtimeMs === st.mtimeMs &&
+    Object.keys(prevSteps).length === Object.keys(mergedSteps).length &&
+    nextKeys.every((k) => prevSteps[k] === mergedSteps[k])
+  );
+  if (unchanged) return false;
+
+  convsMap[convId] = {
+    size: st.size,
+    mtimeMs: st.mtimeMs,
+    steps: mergedSteps
+  };
+  return true;
+}
+
 function maybePersistConvStepModels(convId, logPathForStat, generatorList) {
   if (!convId || !logPathForStat || !Array.isArray(generatorList) || !generatorList.length) return;
   try {
     if (!existsSync(logPathForStat)) return;
     const st = statSync(logPathForStat);
     const data = loadPersistedStepModels();
-    const prev = data.convs[convId];
-    const nextSteps = buildStepModelsRecord(generatorList);
-    const nextCount = Object.keys(nextSteps).length;
-    if (!nextCount) return;
-    const prevCount = prev?.steps ? Object.keys(prev.steps).length : 0;
-    if (prev && prev.size === st.size && prev.mtimeMs === st.mtimeMs && prevCount === nextCount) {
-      return;
+    if (mergePersistedConvStepModels(data.convs, convId, st, generatorList)) {
+      savePersistedStepModels(data);
     }
-    data.convs[convId] = { size: st.size, mtimeMs: st.mtimeMs, steps: nextSteps };
-    savePersistedStepModels(data);
   } catch {}
 }
 
@@ -410,24 +516,36 @@ function hashAccountKey(email) {
 // Official Language Server Connect RPC (uses env vars injected by Sidecar SDK)
 // ---------------------------------------------------------------------------
 
-function callLanguageServer(method, payload = {}, timeoutMs = 4500) {
+function callLanguageServer(method, payload = {}, timeoutMs = 4500, options = {}) {
   const lsAddr = process.env.ANTIGRAVITY_LS_ADDRESS;
   const csrf = process.env.ANTIGRAVITY_CSRF_TOKEN;
-  if (!lsAddr || !csrf) return Promise.resolve(null);
+  const signal = options?.signal || null;
+  if (!lsAddr || !csrf || signal?.aborted) return Promise.resolve(null);
 
   return new Promise((resolvePromise) => {
     let settled = false;
+    let req = null;
+    const onAbort = () => {
+      try { req?.destroy(); } catch {}
+      finish(null);
+    };
     const finish = (val) => {
       if (!settled) {
         settled = true;
+        if (signal) {
+          try { signal.removeEventListener('abort', onAbort); } catch {}
+        }
         resolvePromise(val);
       }
     };
+    if (signal) {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
 
     try {
       const targetUrl = new URL(`http://${lsAddr}/exa.language_server_pb.LanguageServerService/${method}`);
       const bodyStr = JSON.stringify(payload);
-      const req = http.request(
+      req = http.request(
         {
           hostname: targetUrl.hostname,
           port: targetUrl.port,
@@ -464,6 +582,11 @@ function callLanguageServer(method, payload = {}, timeoutMs = 4500) {
           });
         }
       );
+      if (options?.unrefSocket) {
+        req.on('socket', (sock) => {
+          sock.unref?.();
+        });
+      }
       req.setTimeout(timeoutMs, () => {
         req.destroy();
         finish(null);
@@ -2374,30 +2497,57 @@ function resolveActiveConversationId(recentConversations) {
 // Active Conversation Context & Audit Scanner
 // ---------------------------------------------------------------------------
 
-async function fetchGeneratorMetadataForConv(convId, force = false) {
+async function fetchGeneratorMetadataForConv(convId, force = false, options = {}) {
   const cached = convGenMetaCache.get(convId);
   if (!force && cached && Date.now() - cached.at < 2500) {
     return cached;
   }
-  const res = await callLanguageServer('GetCascadeTrajectoryGeneratorMetadata', {
-    cascadeId: convId,
-    generatorMetadataOffset: 0,
-    includeMessages: false
-  });
-  if (!res || !Array.isArray(res.generatorMetadata)) {
-    return cached || null;
+  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 4500;
+  const res = await callLanguageServer(
+    'GetCascadeTrajectoryGeneratorMetadata',
+    {
+      cascadeId: convId,
+      generatorMetadataOffset: 0,
+      includeMessages: false
+    },
+    timeoutMs,
+    {
+      signal: options.signal || null,
+      unrefSocket: Boolean(options.unrefSocket)
+    }
+  );
+  if (res === null) {
+    return cached ? { ...cached, fromFallbackCache: true, rpcFailed: true } : null;
   }
-  const callsByStep = new Map();
+  if (!Array.isArray(res.generatorMetadata)) {
+    return cached
+      ? { ...cached, fromFallbackCache: true, rpcFailed: false }
+      : { at: Date.now(), generatorList: [], callsByStep: new Map(), emptyFromHost: true, rpcFailed: false };
+  }
+  if (res.generatorMetadata.length === 0) {
+    return cached?.callsByStep?.size
+      ? { ...cached, fromFallbackCache: true, rpcFailed: false }
+      : { at: Date.now(), generatorList: [], callsByStep: new Map(), emptyFromHost: true, rpcFailed: false };
+  }
+
+  const callsByStep = new Map(cached?.callsByStep || []);
   const generatorList = res.generatorMetadata;
   for (const entry of generatorList) {
+    const hasModel = Boolean(extractStepModel(null, entry, ''));
     const indices = entry.stepIndices || (entry.stepIndex != null ? [entry.stepIndex] : []);
     for (const idx of indices) {
-      callsByStep.set(Number(idx), entry);
+      const stepNum = Number(idx);
+      if (!Number.isFinite(stepNum)) continue;
+      if (hasModel || !callsByStep.has(stepNum)) {
+        callsByStep.set(stepNum, entry);
+      }
     }
   }
   const value = { at: Date.now(), generatorList, callsByStep };
-  convGenMetaCache.set(convId, value);
-  return value;
+  if (callsByStep.size > 0) {
+    convGenMetaCache.set(convId, value);
+  }
+  return { ...value, rpcFailed: false };
 }
 
 function extractContextBreakdown(contextWindowMetadata) {
@@ -3107,11 +3257,207 @@ function countSessionFiles(convDir) {
   return count;
 }
 
+function invalidateHistoryResultCache() {
+  genBackfillDataSeq += 1;
+  cachedHistoryResult = { at: 0, hostSig: '', etag: '', data: null };
+}
+
+function flushGenBackfillPersisted(wave) {
+  if (!wave || wave.dirtyCount <= 0) return;
+  wave.dirtyCount = 0;
+  savePersistedStepModels(loadPersistedStepModels());
+  invalidateHistoryResultCache();
+}
+
+function notifyWaveIdle(wave) {
+  if (!wave || wave.activeWorkers > 0) return;
+  for (const resolveFn of wave.idleWaiters) {
+    resolveFn();
+  }
+  wave.idleWaiters.clear();
+}
+
+function waitForWaveIdle(wave) {
+  if (!wave || wave.activeWorkers <= 0) return Promise.resolve();
+  return new Promise((resolvePromise) => {
+    wave.idleWaiters.add(resolvePromise);
+  });
+}
+
+async function waitGenBackfillWithBudget(wave, budgetMs) {
+  if (!wave || wave.activeWorkers <= 0) return;
+  let timer = null;
+  await Promise.race([
+    waitForWaveIdle(wave),
+    new Promise((resolvePromise) => {
+      timer = setTimeout(resolvePromise, budgetMs);
+    })
+  ]);
+  if (timer) clearTimeout(timer);
+}
+
+function isConvStepsCovered(convId, stepsNeedingGen) {
+  if (!stepsNeedingGen?.length) return true;
+  const persistedSteps = loadPersistedStepModels().convs?.[convId]?.steps;
+  const memCalls = convGenMetaCache.get(convId)?.callsByStep;
+  return stepsNeedingGen.every((stepKey) => (
+    Boolean(persistedSteps?.[stepKey]) ||
+    Boolean(extractStepModel(null, memCalls?.get(Number(stepKey)), ''))
+  ));
+}
+
+function ensureGenBackfillWorkers(wave) {
+  const ac = wave.abortController;
+  while (
+    !wave.aborted &&
+    !ac.signal.aborted &&
+    wave.activeWorkers < GEN_BACKFILL_CONCURRENCY &&
+    wave.queue.length > 0
+  ) {
+    wave.activeWorkers += 1;
+    (async () => {
+      try {
+        while (!wave.aborted && !ac.signal.aborted) {
+          if (wave.consecutiveRpcFailures >= GEN_BACKFILL_CONCURRENCY) {
+            wave.queue.length = 0;
+            wave.queuedById.clear();
+            break;
+          }
+          const item = wave.queue.shift();
+          if (!item) break;
+          wave.queuedById.delete(item.convId);
+          wave.inFlightIds.add(item.convId);
+          try {
+            const existingGen = convGenMetaCache.get(item.convId);
+            const genFetchForce = item.force
+              || Boolean(existingGen && existingGen.at < item.st.mtimeMs)
+              || Boolean(
+                existingGen &&
+                !item.stepsNeedingGen.every((k) => Boolean(extractStepModel(null, existingGen.callsByStep?.get(Number(k)), '')))
+              );
+            const gm = await fetchGeneratorMetadataForConv(item.convId, genFetchForce, {
+              timeoutMs: GEN_BACKFILL_RPC_TIMEOUT_MS,
+              signal: ac.signal,
+              unrefSocket: true
+            });
+            if (wave.aborted || ac.signal.aborted) break;
+
+            if (!gm || gm.rpcFailed) {
+              wave.consecutiveRpcFailures += 1;
+            } else {
+              wave.consecutiveRpcFailures = 0;
+            }
+
+            if (gm && !gm.fromFallbackCache && Array.isArray(gm.generatorList) && gm.generatorList.length > 0) {
+              const persistedModels = loadPersistedStepModels();
+              if (mergePersistedConvStepModels(persistedModels.convs, item.convId, item.st, gm.generatorList)) {
+                wave.dirtyCount += 1;
+                invalidateHistoryResultCache();
+                if (wave.dirtyCount >= GEN_BACKFILL_CONCURRENCY) {
+                  flushGenBackfillPersisted(wave);
+                }
+              }
+            }
+
+            if (isConvStepsCovered(item.convId, item.stepsNeedingGen)) {
+              lsGenMissCache.delete(item.convId);
+            } else {
+              lsGenMissCache.set(item.convId, {
+                lsKey: wave.lsKey,
+                size: item.st.size,
+                mtimeMs: item.st.mtimeMs,
+                at: Date.now()
+              });
+            }
+          } finally {
+            wave.inFlightIds.delete(item.convId);
+          }
+        }
+      } finally {
+        wave.activeWorkers -= 1;
+        if (wave.activeWorkers === 0) {
+          flushGenBackfillPersisted(wave);
+          if (genBackfillState.wave === wave) {
+            genBackfillState.wave = null;
+          }
+          notifyWaveIdle(wave);
+        }
+      }
+    })();
+  }
+}
+
+async function enqueueAndWaitGenBackfill(candidates, { force = false, lsKey = '', budgetMs = GEN_BACKFILL_SYNC_BUDGET_MS } = {}) {
+  if (!candidates.length) return;
+  const oldWave = genBackfillState.wave;
+  if (oldWave && (force || (oldWave.lsKey && oldWave.lsKey !== lsKey))) {
+    const hadActive = oldWave.activeWorkers > 0;
+    oldWave.aborted = true;
+    oldWave.queue.length = 0;
+    oldWave.queuedById.clear();
+    oldWave.abortController.abort();
+    if (genBackfillState.wave === oldWave) {
+      genBackfillState.wave = null;
+    }
+    if (hadActive) {
+      let abortWaitTimer = null;
+      await Promise.race([
+        waitForWaveIdle(oldWave),
+        new Promise((r) => { abortWaitTimer = setTimeout(r, 50); })
+      ]);
+      if (abortWaitTimer) clearTimeout(abortWaitTimer);
+      // Allow loopback server sockets to process TCP FIN before opening the next wave.
+      await new Promise((r) => setTimeout(r, 15));
+    }
+  }
+
+  let wave = genBackfillState.wave;
+  if (!wave || wave.aborted) {
+    wave = {
+      id: ++genBackfillWaveSeq,
+      lsKey,
+      abortController: new AbortController(),
+      queue: [],
+      queuedById: new Map(),
+      inFlightIds: new Set(),
+      activeWorkers: 0,
+      consecutiveRpcFailures: 0,
+      dirtyCount: 0,
+      aborted: false,
+      idleWaiters: new Set()
+    };
+    genBackfillState.wave = wave;
+  }
+  wave.consecutiveRpcFailures = 0;
+
+  for (const item of candidates) {
+    if (wave.inFlightIds.has(item.convId)) continue;
+    const queued = wave.queuedById.get(item.convId);
+    if (queued) {
+      queued.st = item.st;
+      queued.stepsNeedingGen = item.stepsNeedingGen;
+      queued.force = queued.force || item.force;
+    } else {
+      const entry = { ...item };
+      wave.queue.push(entry);
+      wave.queuedById.set(item.convId, entry);
+    }
+  }
+
+  if (wave.queue.length > 0) {
+    ensureGenBackfillWorkers(wave);
+  }
+  if (wave.activeWorkers > 0) {
+    await waitGenBackfillWithBudget(wave, budgetMs);
+  }
+}
+
 export async function collectTokenHistory(options = {}) {
   const force = Boolean(options.force);
   if (force) {
     transcriptHistCache.clear();
-    genStepModelsCache = { path: '', data: null };
+    genStepModelsCache = { path: '', mtimeMs: -1, size: -1, data: null };
+    lsGenMissCache.clear();
   }
   const host = await getHostUserStatus(force);
   if (
@@ -3169,80 +3515,9 @@ export async function collectTokenHistory(options = {}) {
   const hasLsConfig = Boolean(lsAddr && lsCsrf);
   const lsKey = hasLsConfig ? `${lsAddr}|${lsCsrf}` : '';
 
-  const jobStats = new Array(allJobs.length).fill(null);
-  const jobsNeedingGenFetch = [];
+  const parsedJobs = [];
+  const backfillCandidates = [];
   const nowMs = Date.now();
-  for (let idx = 0; idx < allJobs.length; idx++) {
-    const job = allJobs[idx];
-    try {
-      const st = statSync(job.path);
-      jobStats[idx] = st;
-      if (!hasLsConfig) continue;
-      const cached = transcriptHistCache.get(job.path);
-      if (cached && cached.size === st.size && cached.mtimeMs === st.mtimeMs && cached.enrichedWithGen) {
-        continue;
-      }
-      const persistedEntry = persistedConvs[job.convId];
-      if (
-        persistedEntry &&
-        persistedEntry.size === st.size &&
-        persistedEntry.mtimeMs === st.mtimeMs &&
-        persistedEntry.steps &&
-        typeof persistedEntry.steps === 'object'
-      ) {
-        continue;
-      }
-      const miss = lsGenMissCache.get(job.convId);
-      if (
-        !force &&
-        miss &&
-        miss.lsKey === lsKey &&
-        miss.size === st.size &&
-        miss.mtimeMs === st.mtimeMs &&
-        (nowMs - miss.at) < 60_000
-      ) {
-        continue;
-      }
-      jobsNeedingGenFetch.push({ job, st });
-    } catch {}
-  }
-
-  if (hasLsConfig && jobsNeedingGenFetch.length) {
-    let persistedDirty = false;
-    let cursor = 0;
-    const workerCount = Math.min(6, jobsNeedingGenFetch.length);
-    await Promise.all(
-      Array.from({ length: workerCount }, async () => {
-        while (cursor < jobsNeedingGenFetch.length) {
-          const item = jobsNeedingGenFetch[cursor++];
-          if (!item) break;
-          const { job, st } = item;
-          const existingGen = convGenMetaCache.get(job.convId);
-          const genFetchForce = force || Boolean(existingGen && existingGen.at < st.mtimeMs);
-          const gm = await fetchGeneratorMetadataForConv(job.convId, genFetchForce);
-          if (gm && Array.isArray(gm.generatorList)) {
-            persistedConvs[job.convId] = {
-              size: st.size,
-              mtimeMs: st.mtimeMs,
-              steps: buildStepModelsRecord(gm.generatorList)
-            };
-            lsGenMissCache.delete(job.convId);
-            persistedDirty = true;
-          } else {
-            lsGenMissCache.set(job.convId, {
-              lsKey,
-              size: st.size,
-              mtimeMs: st.mtimeMs,
-              at: Date.now()
-            });
-          }
-        }
-      })
-    );
-    if (persistedDirty) {
-      savePersistedStepModels(persistedModels);
-    }
-  }
 
   for (let idx = 0; idx < allJobs.length; idx++) {
     const job = allJobs[idx];
@@ -3250,22 +3525,13 @@ export async function collectTokenHistory(options = {}) {
       await new Promise((r) => setImmediate(r));
     }
     try {
-      const st = jobStats[idx] || statSync(job.path);
+      const st = statSync(job.path);
       let cached = transcriptHistCache.get(job.path);
-      const genCached = convGenMetaCache.get(job.convId);
-      const rawPersisted = persistedConvs[job.convId];
-      const persistedEntry = (
-        rawPersisted &&
-        rawPersisted.size === st.size &&
-        rawPersisted.mtimeMs === st.mtimeMs &&
-        rawPersisted.steps
-      )
-        ? rawPersisted
-        : null;
-      const hasGenSource = Boolean(genCached || persistedEntry);
 
-      if (!cached || cached.size !== st.size || cached.mtimeMs !== st.mtimeMs || (hasGenSource && !cached.enrichedWithGen)) {
-        const records = [];
+      if (!cached || cached.size !== st.size || cached.mtimeMs !== st.mtimeMs) {
+        const rawRecords = [];
+        const missingStepSet = new Set();
+        let firstDate = null;
         let activeModel = '';
         const lines = readFileSync(job.path, 'utf-8').split(/\r?\n/);
 
@@ -3285,7 +3551,9 @@ export async function collectTokenHistory(options = {}) {
             const dt = new Date(ev.created_at);
             if (!Number.isNaN(dt.getTime())) dateKey = formatLocalDateKey(dt);
           }
-          if (dateKey) trackDate(dateKey);
+          if (dateKey && (!firstDate || dateKey < firstDate)) {
+            firstDate = dateKey;
+          }
 
           if (!isModelTurnStep(ev)) continue;
           const { input: inp, cache: cap, output: outp, thinking } = extractStepUsage(ev);
@@ -3293,20 +3561,20 @@ export async function collectTokenHistory(options = {}) {
           if (tot <= 0 || !dateKey) continue;
 
           const stepNum = Number(ev.step_index ?? lineIdx);
-          const gmEntry = genCached?.callsByStep?.get(stepNum)
-            || (persistedEntry?.steps?.[String(stepNum)]
-              ? { chatModel: { modelDisplayName: persistedEntry.steps[String(stepNum)] } }
-              : null);
-          const rawModel = extractStepModel(ev, gmEntry, activeModel);
-          const eventId = String(ev.callId || ev.responseId || `${job.convId}#${stepNum}`);
+          const stepKey = String(stepNum);
+          const stepOwnModel = extractStepModel(ev, null, '');
+          if (!stepOwnModel) missingStepSet.add(stepKey);
 
-          records.push({
-            eventId,
+          rawRecords.push({
+            eventId: String(ev.callId || ev.responseId || `${job.convId}#${stepNum}`),
             source: job.source,
             convId: job.convId,
             date: dateKey,
             created_at: ev.created_at || dateKey,
-            model: rawModel,
+            stepNum,
+            stepKey,
+            stepOwnModel,
+            fallbackRunningModel: activeModel,
             inputTokens: inp,
             cacheTokens: cap,
             outputTokens: outp,
@@ -3318,8 +3586,9 @@ export async function collectTokenHistory(options = {}) {
         cached = {
           size: st.size,
           mtimeMs: st.mtimeMs,
-          enrichedWithGen: hasGenSource,
-          records
+          firstDate,
+          rawRecords,
+          stepsNeedingGen: [...missingStepSet]
         };
         if (transcriptHistCache.size > 1200) {
           const firstKey = transcriptHistCache.keys().next().value;
@@ -3328,23 +3597,95 @@ export async function collectTokenHistory(options = {}) {
         transcriptHistCache.set(job.path, cached);
       }
 
-      for (const rec of cached.records) {
-        trackDate(rec.date);
-        if (seenEvents.has(rec.eventId)) continue;
-        seenEvents.add(rec.eventId);
+      parsedJobs.push({ job, cached });
 
-        const priced = calculateRequestApiCost(rec, host.dynamicModelMap);
-        const refCalc = calculateReferenceCost(rec, 'gemini-3.8-flash', rec.date);
-        const pCost = priced.isPriced ? (priced.costUSD || 0) : 0;
-        const rCost = refCalc.totalCostUSD || 0;
+      if (!hasLsConfig || job.source === 'cli' || !cached.stepsNeedingGen.length) continue;
 
-        addDaily(dailyBySource.all, rec.date, rec.inputTokens, rec.cacheTokens, rec.outputTokens, pCost, rCost);
-        addDaily(dailyBySource[rec.source] || dailyBySource.desktop, rec.date, rec.inputTokens, rec.cacheTokens, rec.outputTokens, pCost, rCost);
+      const persistedEntry = persistedConvs[job.convId];
+      const isPersistedComplete = Boolean(
+        persistedEntry &&
+        persistedEntry.size === st.size &&
+        persistedEntry.mtimeMs === st.mtimeMs &&
+        persistedEntry.steps &&
+        cached.stepsNeedingGen.every((stepKey) => Boolean(persistedEntry.steps[stepKey]))
+      );
+      if (isPersistedComplete) continue;
 
-        requestsBySource.all.push(rec);
-        (requestsBySource[rec.source] || requestsBySource.desktop).push(rec);
+      const miss = lsGenMissCache.get(job.convId);
+      if (
+        !force &&
+        miss &&
+        miss.lsKey === lsKey &&
+        miss.size === st.size &&
+        miss.mtimeMs === st.mtimeMs &&
+        (nowMs - miss.at) < GEN_MISS_TTL_MS
+      ) {
+        continue;
       }
+      backfillCandidates.push({
+        convId: job.convId,
+        st,
+        stepsNeedingGen: cached.stepsNeedingGen,
+        force
+      });
     } catch {}
+  }
+
+  if (hasLsConfig && backfillCandidates.length > 0) {
+    backfillCandidates.sort((a, b) => Number(b.st.mtimeMs || 0) - Number(a.st.mtimeMs || 0));
+    await enqueueAndWaitGenBackfill(backfillCandidates, {
+      force,
+      lsKey,
+      budgetMs: GEN_BACKFILL_SYNC_BUDGET_MS
+    });
+  }
+
+  const resultBuiltSeq = genBackfillDataSeq;
+  const latestPersistedConvs = loadPersistedStepModels().convs;
+
+  for (const { job, cached } of parsedJobs) {
+    if (cached.firstDate) trackDate(cached.firstDate);
+    const genCached = convGenMetaCache.get(job.convId);
+    const persistedSteps = latestPersistedConvs[job.convId]?.steps || null;
+
+    for (const rawRec of cached.rawRecords) {
+      trackDate(rawRec.date);
+      if (seenEvents.has(rawRec.eventId)) continue;
+      seenEvents.add(rawRec.eventId);
+
+      const gmEntry = genCached?.callsByStep?.get(rawRec.stepNum)
+        || (persistedSteps?.[rawRec.stepKey]
+          ? { chatModel: { modelDisplayName: persistedSteps[rawRec.stepKey] } }
+          : null);
+      const gmModel = gmEntry?.chatModel?.modelDisplayName
+        || gmEntry?.chatModel?.responseModel
+        || gmEntry?.chatModel?.model
+        || '';
+      const rec = {
+        eventId: rawRec.eventId,
+        source: rawRec.source,
+        convId: rawRec.convId,
+        date: rawRec.date,
+        created_at: rawRec.created_at,
+        model: String(gmModel || rawRec.stepOwnModel || rawRec.fallbackRunningModel || '').trim(),
+        inputTokens: rawRec.inputTokens,
+        cacheTokens: rawRec.cacheTokens,
+        outputTokens: rawRec.outputTokens,
+        thinkingTokens: rawRec.thinkingTokens,
+        totalTokens: rawRec.totalTokens
+      };
+
+      const priced = calculateRequestApiCost(rec, host.dynamicModelMap);
+      const refCalc = calculateReferenceCost(rec, 'gemini-3.8-flash', rec.date);
+      const pCost = priced.isPriced ? (priced.costUSD || 0) : 0;
+      const rCost = refCalc.totalCostUSD || 0;
+
+      addDaily(dailyBySource.all, rec.date, rec.inputTokens, rec.cacheTokens, rec.outputTokens, pCost, rCost);
+      addDaily(dailyBySource[rec.source] || dailyBySource.desktop, rec.date, rec.inputTokens, rec.cacheTokens, rec.outputTokens, pCost, rCost);
+
+      requestsBySource.all.push(rec);
+      (requestsBySource[rec.source] || requestsBySource.desktop).push(rec);
+    }
   }
 
   // Optional read-only merge of legacy unallocated daily totals if user previously had token_usage_archive_v2.json
@@ -3512,7 +3853,9 @@ export async function collectTokenHistory(options = {}) {
     }
   };
 
-  cachedHistoryResult = { at: Date.now(), hostSig: host.sig, etag, data: result };
+  if (resultBuiltSeq === genBackfillDataSeq) {
+    cachedHistoryResult = { at: Date.now(), hostSig: host.sig, etag, data: result };
+  }
   return result;
 }
 

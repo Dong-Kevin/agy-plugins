@@ -3503,10 +3503,11 @@
     initWorkspaceTracking();
     startAuxPaneBridgeCoordinator();
 
+    loadHistory(false).catch(() => {});
+
     await Promise.allSettled([
       loadInitialSettings(),
       loadContext(false),
-      loadHistory(false),
       refreshFloatStatus()
     ]);
 

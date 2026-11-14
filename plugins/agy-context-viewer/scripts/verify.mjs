@@ -21,7 +21,7 @@ import {
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, extname, join, relative, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runInNewContext } from 'node:vm';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1916,6 +1916,296 @@ async function main() {
       rmSync(join(isolatedStateDir, 'gen_step_models_v1.json'), { force: true });
     }
 
+    // H2 (X1): Empty / partial step model cache recovery, non-regression on transient empty response, and true cold-process offline persistence
+    const h2ConvIdA = '00000000-0000-4000-8000-000000000099';
+    const h2ConvIdB = '00000000-0000-4000-8000-00000000009a';
+    const h2ConvIdC = '00000000-0000-4000-8000-00000000009b';
+    const writeH2Transcript = (convId) => {
+      const d = join(isolatedAgDir, 'brain', convId, '.system_generated', 'logs');
+      mkdirSync(d, { recursive: true });
+      const p = join(d, 'transcript.jsonl');
+      const h2TodayIso = new Date().toISOString();
+      writeFileSync(
+        p,
+        [
+          { step_index: 0, type: 'USER_INPUT', status: 'DONE', created_at: h2TodayIso, content: 'verify X1 cache recovery' },
+          { step_index: 1, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: h2TodayIso, input_tokens: 1200, cache_read_tokens: 300, output_tokens: 150 },
+          { step_index: 2, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: h2TodayIso, input_tokens: 1400, cache_read_tokens: 400, output_tokens: 180 }
+        ].map((s) => JSON.stringify(s)).join('\n') + '\n',
+        'utf-8'
+      );
+      return statSync(p);
+    };
+    const h2CarbonMeta = {
+      stepIndices: [1],
+      chatModel: { modelDisplayName: 'Gemini 4 Carbon (High)', responseModel: 'gemini-4-carbon', model: 'MODEL_PLACEHOLDER_M427' }
+    };
+    const h2HydrogenMeta = {
+      stepIndices: [2],
+      chatModel: { modelDisplayName: 'Gemini 4 Hydrogen (High)', responseModel: 'gemini-4-hydrogen', model: 'MODEL_PLACEHOLDER_M525' }
+    };
+    let h2Mode = 'empty';
+    const h2Server = http.createServer((req, res) => {
+      req.resume();
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      if (req.url?.includes('GetCascadeTrajectoryGeneratorMetadata')) {
+        const list = h2Mode === 'empty'
+          ? []
+          : (h2Mode === 'partial' ? [h2CarbonMeta] : [h2CarbonMeta, h2HydrogenMeta]);
+        res.end(JSON.stringify({ generatorMetadata: list }));
+        return;
+      }
+      if (req.url?.includes('GetUserStatus')) {
+        res.end(JSON.stringify({ userStatus: { userTier: { id: 'g1-pro-tier', name: 'Google AI Pro' } } }));
+        return;
+      }
+      res.end('{}');
+    });
+    await new Promise((r) => h2Server.listen(0, '127.0.0.1', r));
+    try {
+      const h2Baseline = await collectTokenHistory({ force: true });
+      const h2BaseCarbon = h2Baseline.analyticsBySource?.all?.costs?.allTime?.identified?.byModel?.find((m) => m.displayName === 'Gemini 4 Carbon')?.requests || 0;
+      const stepCachePath = join(isolatedStateDir, 'gen_step_models_v1.json');
+
+      process.env.ANTIGRAVITY_LS_ADDRESS = `127.0.0.1:${h2Server.address().port}`;
+      process.env.ANTIGRAVITY_CSRF_TOKEN = 'h2-ls-csrf';
+
+      // Case A: Empty [] -> never persisted as complete -> recovers to full when host recovers
+      writeH2Transcript(h2ConvIdA);
+      h2Mode = 'empty';
+      const h2EmptyHist = await collectTokenHistory({ force: true });
+      assert(
+        h2EmptyHist.analyticsBySource?.all?.costs?.allTime?.identified?.unpricedReasons?.missingModel === 2,
+        `H2 Case A 空元数据初始缺失数应为 2：${JSON.stringify(h2EmptyHist.analyticsBySource?.all?.costs?.allTime?.identified)}`
+      );
+      if (existsSync(stepCachePath)) {
+        const cacheAfterEmpty = JSON.parse(readFileSync(stepCachePath, 'utf-8'));
+        assert(!cacheAfterEmpty.convs?.[h2ConvIdA], 'H2 Case A 空映射不得写入持久化缓存');
+      }
+      h2Mode = 'full';
+      const h2EmptyRecovered = await collectTokenHistory({ force: true });
+      const h2EmptyIdent = h2EmptyRecovered.analyticsBySource?.all?.costs?.allTime?.identified;
+      assert(
+        h2EmptyIdent?.unpricedReasons?.missingModel === 0 &&
+          h2EmptyIdent?.byModel?.some((m) => m.displayName === 'Gemini 4 Carbon' && m.requests === h2BaseCarbon + 1) &&
+          h2EmptyIdent?.byModel?.some((m) => m.displayName === 'Gemini 4 Hydrogen' && m.requests === 1 && !m.missingModel),
+        `H2 Case A 宿主恢复后强制刷新未能补齐：${JSON.stringify(h2EmptyIdent)}`
+      );
+      rmSync(join(isolatedAgDir, 'brain', h2ConvIdA), { recursive: true, force: true });
+      rmSync(stepCachePath, { force: true });
+
+      // Case B: Partial -> transient empty must NOT wipe step 1 -> full recovers step 2
+      writeH2Transcript(h2ConvIdB);
+      h2Mode = 'partial';
+      const h2Part = await collectTokenHistory({ force: true });
+      const h2PartIdent = h2Part.analyticsBySource?.all?.costs?.allTime?.identified;
+      assert(
+        h2PartIdent?.unpricedReasons?.missingModel === 1 &&
+          h2PartIdent?.byModel?.some((m) => m.displayName === 'Gemini 4 Carbon' && m.requests === h2BaseCarbon + 1),
+        `H2 Case B 部分结果应先识别 step 1 Carbon：${JSON.stringify(h2PartIdent)}`
+      );
+      h2Mode = 'empty';
+      const h2TransientEmpty = await collectTokenHistory({ force: true });
+      const h2TransIdent = h2TransientEmpty.analyticsBySource?.all?.costs?.allTime?.identified;
+      assert(
+        h2TransIdent?.unpricedReasons?.missingModel === 1 &&
+          h2TransIdent?.byModel?.some((m) => m.displayName === 'Gemini 4 Carbon' && m.requests === h2BaseCarbon + 1),
+        `H2 Case B 瞬时空响应不得覆盖已确认的 step 1 缓存：${JSON.stringify(h2TransIdent)}`
+      );
+      h2Mode = 'full';
+      const h2PartRecovered = await collectTokenHistory({ force: true });
+      const h2PartRecIdent = h2PartRecovered.analyticsBySource?.all?.costs?.allTime?.identified;
+      assert(
+        h2PartRecIdent?.unpricedReasons?.missingModel === 0 &&
+          h2PartRecIdent?.byModel?.some((m) => m.displayName === 'Gemini 4 Hydrogen' && m.requests === 1 && !m.missingModel),
+        `H2 Case B 部分缓存强制刷新未补齐 step 2：${JSON.stringify(h2PartRecIdent)}`
+      );
+      rmSync(join(isolatedAgDir, 'brain', h2ConvIdB), { recursive: true, force: true });
+      rmSync(stepCachePath, { force: true });
+
+      // Case C: Cold child processes (legacy empty/partial disk cache recovery + true offline cold-process read)
+      const h2StatC = writeH2Transcript(h2ConvIdC);
+      const collectorUrl = pathToFileURL(join(ROOT, 'sidecars', 'dashboard', 'collector.mjs')).href;
+      const runChildHistory = (childEnv) => new Promise((resolveChild, rejectChild) => {
+        const child = spawn(
+          process.execPath,
+          [
+            '--input-type=module',
+            '-e',
+            `const m = await import(${JSON.stringify(collectorUrl)}); const h = await m.collectTokenHistory({ force: true }); console.log(JSON.stringify(h.analyticsBySource.all.costs.allTime.identified));`
+          ],
+          { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] }
+        );
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (d) => { stdout += d.toString('utf-8'); });
+        child.stderr.on('data', (d) => { stderr += d.toString('utf-8'); });
+        child.on('error', rejectChild);
+        child.on('close', (code) => {
+          if (code !== 0) {
+            rejectChild(new Error(`child exited ${code}: ${stderr || stdout}`));
+          } else {
+            resolveChild(stdout.trim());
+          }
+        });
+      });
+
+      for (const legacySteps of [{}, { '1': 'Gemini 4 Carbon (High)' }]) {
+        writeFileSync(
+          stepCachePath,
+          JSON.stringify({ version: 1, convs: { [h2ConvIdC]: { size: h2StatC.size, mtimeMs: h2StatC.mtimeMs, steps: legacySteps } } }),
+          'utf-8'
+        );
+        const recoveredJson = await runChildHistory({ ...process.env });
+        const childIdent = JSON.parse(recoveredJson);
+        assert(
+          childIdent?.unpricedReasons?.missingModel === 0 &&
+            childIdent?.byModel?.some((m) => m.displayName === 'Gemini 4 Carbon' && m.requests === h2BaseCarbon + 1) &&
+            childIdent?.byModel?.some((m) => m.displayName === 'Gemini 4 Hydrogen' && m.requests === 1 && !m.missingModel),
+          `H2 Case C 新进程强刷旧缓存 (${JSON.stringify(legacySteps)}) 恢复失败：${recoveredJson}`
+        );
+      }
+
+      const offlineEnv = { ...process.env };
+      delete offlineEnv.ANTIGRAVITY_LS_ADDRESS;
+      delete offlineEnv.ANTIGRAVITY_CSRF_TOKEN;
+      const offlineChildJson = await runChildHistory(offlineEnv);
+      const offlineChildIdent = JSON.parse(offlineChildJson);
+      assert(
+        offlineChildIdent?.unpricedReasons?.missingModel === 0 &&
+          offlineChildIdent?.byModel?.some((m) => m.displayName === 'Gemini 4 Carbon' && m.requests === h2BaseCarbon + 1) &&
+          offlineChildIdent?.byModel?.some((m) => m.displayName === 'Gemini 4 Hydrogen' && m.requests === 1 && !m.missingModel),
+        `H2 Case C 纯离线冷进程未能读取完整持久化缓存：${offlineChildJson}`
+      );
+    } finally {
+      delete process.env.ANTIGRAVITY_LS_ADDRESS;
+      delete process.env.ANTIGRAVITY_CSRF_TOKEN;
+      h2Server.closeAllConnections?.();
+      await new Promise((r) => h2Server.close(r));
+      for (const id of [h2ConvIdA, h2ConvIdB, h2ConvIdC]) {
+        rmSync(join(isolatedAgDir, 'brain', id), { recursive: true, force: true });
+      }
+      rmSync(join(isolatedStateDir, 'gen_step_models_v1.json'), { force: true });
+    }
+
+    // H3 (X2): Inline-resolved transcripts skip metadata RPCs; hung/slow metadata obeys budget + concurrency cap and updates models/ETag on recovery
+    const h3ConvIds = Array.from({ length: 18 }, (_, i) => `00000000-0000-4000-8000-${String(101 + i).padStart(12, '0')}`);
+    let h3Mode = 'hung';
+    let h3Calls = 0;
+    let h3Active = 0;
+    let h3MaxActive = 0;
+    const h3Server = http.createServer((req, res) => {
+      req.resume();
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      if (req.url?.includes('GetCascadeTrajectoryGeneratorMetadata')) {
+        h3Calls += 1;
+        h3Active += 1;
+        h3MaxActive = Math.max(h3MaxActive, h3Active);
+        res.on('close', () => { h3Active = Math.max(0, h3Active - 1); });
+        if (h3Mode === 'hung') {
+          return;
+        }
+        const t = setTimeout(() => {
+          if (res.writableEnded || res.destroyed) return;
+          res.end(JSON.stringify({
+            generatorMetadata: [
+              { stepIndices: [1], chatModel: { modelDisplayName: 'Gemini 4 Carbon (High)', responseModel: 'gemini-4-carbon' } },
+              { stepIndices: [2], chatModel: { modelDisplayName: 'Gemini 4 Hydrogen (High)', responseModel: 'gemini-4-hydrogen' } }
+            ]
+          }));
+        }, 60);
+        t.unref?.();
+        return;
+      }
+      if (req.url?.includes('GetUserStatus')) {
+        res.end(JSON.stringify({ userStatus: { userTier: { id: 'g1-pro-tier', name: 'Google AI Pro' } } }));
+        return;
+      }
+      res.end('{}');
+    });
+    await new Promise((r) => h3Server.listen(0, '127.0.0.1', r));
+    try {
+      const h3Baseline = await collectTokenHistory({ force: true });
+      const h3BaseCarbon = h3Baseline.analyticsBySource?.all?.costs?.allTime?.identified?.byModel?.find((m) => m.displayName === 'Gemini 4 Carbon')?.requests || 0;
+      const h3TodayIso = new Date().toISOString();
+      const writeH3Dataset = (withInlineModel) => {
+        for (const id of h3ConvIds) {
+          const d = join(isolatedAgDir, 'brain', id, '.system_generated', 'logs');
+          mkdirSync(d, { recursive: true });
+          const rows = [1, 2].map((step) => ({
+            step_index: step,
+            type: 'PLANNER_RESPONSE',
+            status: 'DONE',
+            created_at: h3TodayIso,
+            input_tokens: 1200,
+            output_tokens: 150,
+            ...(withInlineModel ? { model: 'gemini-4-carbon' } : {})
+          }));
+          writeFileSync(join(d, 'transcript.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf-8');
+        }
+      };
+
+      process.env.ANTIGRAVITY_LS_ADDRESS = `127.0.0.1:${h3Server.address().port}`;
+      process.env.ANTIGRAVITY_CSRF_TOKEN = 'h3-ls-csrf';
+
+      // Case A: 18 inline-resolved conversations with hung metadata server -> 0 RPCs, fast return
+      writeH3Dataset(true);
+      h3Mode = 'hung';
+      h3Calls = 0;
+      const tA0 = performance.now();
+      const h3InlineHist = await collectTokenHistory({ force: true });
+      const elapsedA = performance.now() - tA0;
+      const h3InlineIdent = h3InlineHist.analyticsBySource?.all?.costs?.allTime?.identified;
+      assert(
+        elapsedA < 800 &&
+          h3Calls === 0 &&
+          h3InlineIdent?.unpricedReasons?.missingModel === 0 &&
+          h3InlineIdent?.byModel?.some((m) => m.displayName === 'Gemini 4 Carbon' && m.requests === h3BaseCarbon + 36),
+        `H3 Case A 内联模型会话不应触发 metadata RPC 或阻塞：elapsedMs=${Math.round(elapsedA)}, calls=${h3Calls}, ident=${JSON.stringify(h3InlineIdent)}`
+      );
+
+      // Case B: 18 unattributed conversations -> hung server returns within sync budget with full local tokens + concurrency <= 6, then recovered slow server updates models & ETag
+      writeH3Dataset(false);
+      h3Mode = 'hung';
+      h3Calls = 0;
+      h3MaxActive = 0;
+      const tB0 = performance.now();
+      const h3HungHist = await collectTokenHistory({ force: true });
+      const elapsedB = performance.now() - tB0;
+      assert(
+        elapsedB < 1200 &&
+          (h3HungHist.analyticsBySource?.all?.summary?.grandTotalTokens || 0) >= 48600 &&
+          h3MaxActive <= 6,
+        `H3 Case B 超时会话应受预算限制并保留完整本地 Token 总量：elapsedMs=${Math.round(elapsedB)}, maxActive=${h3MaxActive}, tokens=${h3HungHist.analyticsBySource?.all?.summary?.grandTotalTokens}`
+      );
+
+      h3Mode = 'slow';
+      h3MaxActive = 0;
+      let h3DoneHist = await collectTokenHistory({ force: true });
+      for (let waitAttempt = 0; waitAttempt < 12 && (h3DoneHist.analyticsBySource?.all?.costs?.allTime?.identified?.unpricedReasons?.missingModel || 0) > 0; waitAttempt++) {
+        await new Promise((r) => setTimeout(r, 150));
+        h3DoneHist = await collectTokenHistory({ force: false });
+      }
+      const h3DoneIdent = h3DoneHist.analyticsBySource?.all?.costs?.allTime?.identified;
+      assert(
+        h3MaxActive <= 6 &&
+          h3DoneIdent?.unpricedReasons?.missingModel === 0 &&
+          h3DoneIdent?.byModel?.some((m) => m.displayName === 'Gemini 4 Carbon' && m.requests === h3BaseCarbon + 18) &&
+          h3DoneIdent?.byModel?.some((m) => m.displayName === 'Gemini 4 Hydrogen' && m.requests === 18) &&
+          h3DoneHist.etag !== h3HungHist.etag,
+        `H3 Case B 宿主恢复后未能完成并发回溯并更新 ETag：maxActive=${h3MaxActive}, ident=${JSON.stringify(h3DoneIdent)}`
+      );
+    } finally {
+      delete process.env.ANTIGRAVITY_LS_ADDRESS;
+      delete process.env.ANTIGRAVITY_CSRF_TOKEN;
+      h3Server.closeAllConnections?.();
+      await new Promise((r) => h3Server.close(r));
+      for (const id of h3ConvIds) {
+        rmSync(join(isolatedAgDir, 'brain', id), { recursive: true, force: true });
+      }
+      rmSync(join(isolatedStateDir, 'gen_step_models_v1.json'), { force: true });
+    }
+
     // R8: Windows PowerShell Unicode-safe Base64 loader shim in non-ASCII + space directory
     const ps1Text = readFileSync(join(ROOT, 'install.ps1'), 'utf-8');
     assert(!/\$TargetDir.*-Encoding\s+ASCII/i.test(ps1Text), 'R8 install.ps1 仍将 $TargetDir 直接以 ASCII 编码写出');
@@ -3072,6 +3362,8 @@ async function verifyDashboardFrontendBehavior(appSource) {
   let holdNextA = false;
   let resolveSlowB = null;
   let holdNextB = false;
+  let holdInitialHistory = true;
+  let resolveSlowHistory = null;
   const seenContextQueries = [];
   const intervalCbs = [];
   const sessionMap = new Map();
@@ -3163,6 +3455,11 @@ async function verifyDashboardFrontendBehavior(appSource) {
         };
       }
       if (u.pathname === '/api/history') {
+        if (holdInitialHistory) {
+          holdInitialHistory = false;
+          const histPayload = await new Promise((r) => { resolveSlowHistory = r; });
+          return { ok: true, status: 200, json: async () => histPayload };
+        }
         return {
           ok: true,
           status: 200,
@@ -3226,7 +3523,22 @@ async function verifyDashboardFrontendBehavior(appSource) {
   runInNewContext(appSource, sandbox, { filename: 'dashboard-app.js' });
   await new Promise((r) => setTimeout(r, 40));
 
+  assert(typeof resolveSlowHistory === 'function', 'boot() 应立即并行发起 /api/history 请求');
+  assert(
+    intervalCbs.some((c) => c.ms === 1500),
+    '慢 /api/history 不得阻塞 1500ms context 轮询定时器注册'
+  );
   assert(takeaway.textContent.includes('Alpha'), `初始渲染应显示 Alpha，实际：${takeaway.textContent}`);
+  resolveSlowHistory({
+    ok: true,
+    etag: 'hist-1',
+    presets: [],
+    totals: { totalTokens: 1200 },
+    daily: [],
+    models: [],
+    plans: []
+  });
+  await new Promise((r) => setTimeout(r, 15));
   assert(
     cumSummaryChip.textContent.includes('1.20K') && cumSummaryChip.textContent.includes('$0.12'),
     `折叠摘要胶囊应显示累计 1.20K 与 $0.12，实际：${cumSummaryChip.textContent}`

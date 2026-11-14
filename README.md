@@ -7,7 +7,7 @@
 | 插件 | 核心能力 | 当前版本 | 文档 |
 | :--- | :--- | :---: | :--- |
 | **`agy-finder`** | 右侧目录树、聊天路径 `[📂]` 直达定位、对话提及提取、原生弹窗与 `⌘⇧E` 抽屉 | `v0.2.7` | [中文说明](plugins/agy-finder/README.md) · [EN](plugins/agy-finder/README_EN.md) |
-| **`context-viewer`** | 上下文占比 / 生成速度 / 53 周热力图、Gemini / Claude-GPT 双池配额、菜单栏与置顶小窗 | `v1.7.8` | [中文说明](plugins/agy-context-viewer/README.md) · [EN](plugins/agy-context-viewer/README_EN.md) |
+| **`context-viewer`** | 上下文占比 / 生成速度 / 53 周热力图、Gemini / Claude-GPT 双池配额、菜单栏与置顶小窗 | `v1.7.9` | [中文说明](plugins/agy-context-viewer/README.md) · [EN](plugins/agy-context-viewer/README_EN.md) |
 
 ---
 

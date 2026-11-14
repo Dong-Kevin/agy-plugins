@@ -30,7 +30,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/m
 irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.ps1 | iex
 ```
 
-- 也可直接从 [Releases](https://github.com/Dong-Kevin/agy-plugins/releases) 下载 `context-viewer-v1.7.8.zip` 解压后运行 `./install.sh`（或 `agy plugin install ./plugins/agy-context-viewer`）。
+- 也可直接从 [Releases](https://github.com/Dong-Kevin/agy-plugins/releases) 下载 `context-viewer-v1.7.9.zip` 解压后运行 `./install.sh`（或 `agy plugin install ./plugins/agy-context-viewer`）。
 - 仅通过 `agy plugin install` 安装时，CLI 入口为 `node ~/.gemini/config/plugins/context-viewer/sidecars/dashboard/cli.mjs`。
 
 </details>

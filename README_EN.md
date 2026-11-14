@@ -7,7 +7,7 @@ An open-source plugin suite for **Google Antigravity** (Desktop & `agy` CLI) -- 
 | Plugin | What It Does | Version | Docs |
 | :--- | :--- | :---: | :--- |
 | **`agy-finder`** | Right-side file tree, chat `[📂]` reveal links, conversation mentions, native preview & `⌘⇧E` drawer | `v0.2.7` | [EN](plugins/agy-finder/README_EN.md) · [中文](plugins/agy-finder/README.md) |
-| **`context-viewer`** | Context gauge, streaming speed, 53-week heatmap, Gemini / Partner dual quota pools, Menu Bar & pinned float | `v1.7.8` | [EN](plugins/agy-context-viewer/README_EN.md) · [中文](plugins/agy-context-viewer/README.md) |
+| **`context-viewer`** | Context gauge, streaming speed, 53-week heatmap, Gemini / Partner dual quota pools, Menu Bar & pinned float | `v1.7.9` | [EN](plugins/agy-context-viewer/README_EN.md) · [中文](plugins/agy-context-viewer/README.md) |
 
 ---
 

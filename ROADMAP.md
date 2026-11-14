@@ -1,13 +1,20 @@
 # agy-plugins ROADMAP
 
-更新时间：2026-11-14 22:59（Asia/Shanghai）。
+更新时间：2026-11-15 00:38（Asia/Shanghai）。
 
 ## 本次交付目标
 
-1. 在全仓精简版 README 中保留并还原独立的开源致谢章节（`## 致谢` / `## Acknowledgements`），并修正插件内 `./LICENSE` 相对链接。
+1. 修复第八轮代码审查确认的 Context Viewer 两项 P2 问题（历史步骤模型缓存无法从空／不完整状态恢复、全量历史回溯超时累积并延迟首屏轮询），升级 `context-viewer` 至 `v1.7.9`，补齐回归测试、完成全仓校验打包、本机热升级与本地 Git 提交；远端推送与 GitHub Release 待确认。
 
 ## 当前阶段与状态
 
+- **已完成本地修复、验证与本机热升级（`context-viewer v1.7.9`）**：
+  - **步骤模型缓存自愈与合并保护（X1）**：[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs) 禁止写入或长期命中空映射，按缺失步骤完整性与文件签名联合校验；新结果与磁盘已有 `steps` 增量合并且不覆写已知模型，`force: true` 显式清理内存／miss 状态以重新拉取补齐。
+  - **本地优先历史聚合、有界并发回溯与前端轮询解耦（X2）**：`collectTokenHistory()` 改为先解析本地 `transcript.jsonl`、跳过内联模型已完成或 `cli` 会话，仅对桌面缺模型步骤并发回溯（`6` 并发、单次 `900ms` 超时、单轮 `350ms` 同步预算、连续失败熔断并后台落盘更新 ETag）；[app.js](./plugins/agy-context-viewer/sidecars/dashboard/app.js) 中 `boot()` 不再阻塞 `1500ms` 上下文轮询启动。
+  - **回归测试与版本同步**：在 [verify.mjs](./plugins/agy-context-viewer/scripts/verify.mjs) 补齐 `H2`（含冷进程旧缓存恢复与纯离线读取）、`H3`（18 会话内联零 RPC、超时预算与恢复 ETag 更新）及前端慢 `/api/history` 轮询不阻塞用例，并同步 `context-viewer v1.7.9` 全套版本号引用。
+  - **本机热升级**：已执行 `./install.sh`，`~/.gemini/config/plugins/context-viewer` 升级至 `1.7.9`（`agy-finder` 保持 `0.2.7`），`~/.local/bin/agy-context --help` 与 `agy-context json` 验证正常；随本次同步提交至本地 `main`。
+- **待确认后置操作**：
+  - 尚未执行 `git push`、打 tag 或发布 GitHub Release（`v1.7.9`）。
 - **已完成（独立开源致谢章节恢复）**：
   - **独立开源致谢章节恢复**：在根目录 [README.md](./README.md)、[README_EN.md](./README_EN.md) 与 [context-viewer README.md](./plugins/agy-context-viewer/README.md) / [README_EN.md](./plugins/agy-context-viewer/README_EN.md) 中恢复独立的 `## 致谢` / `## Acknowledgements` 章节（完整保留对 **[elviscjn-cjn/antigravity-context-viewer](https://github.com/elviscjn-cjn/antigravity-context-viewer)** 的致谢与架构独立说明），并将插件目录内 README 许可证链接修正为 `./LICENSE`。
 - **已完成基线**：
@@ -33,5 +40,8 @@
 
 ## 最近验证
 
+- `./install.sh` 本机热升级验收：通过（`~/.gemini/config/plugins/context-viewer` 升级至 `1.7.9`，`agy-finder` 保持 `0.2.7`，`~/.local/bin/agy-context --help` 输出 `v1.7.9`，`agy-context json` 返回正常）。时间：`2026-11-15 00:38`（Asia/Shanghai）。
+- `node scripts/verify.mjs --strict-git-identity && node scripts/package-all.mjs`：通过（含全仓隐私扫描、PNG 元数据块 audit、`context-viewer v1.7.9` 6/6 自检与 `H2`/`H3`/前端慢历史用例、`agy-finder v0.2.7` 全套自检、跨插件锁校验与双插件发布包 `agy-finder-v0.2.7.zip` 90.4 KB / `context-viewer-v1.7.9.zip` 170.6 KB）。时间：`2026-11-15 00:30`（Asia/Shanghai）。
+- `node scripts/verify.mjs --strict-git-identity`：通过；发布标签提交与 HEAD 分别在临时副本执行 `node scripts/package-all.mjs`，两组 ZIP 完整性与校验和通过，标签重建摘要与发布资产一致。独立模拟探针复现上述两项 P2；18 个会话的 metadata 超时令历史采集等待约 13.5 秒。时间：`2026-11-14 23:33`（Asia/Shanghai）。
 - `node scripts/verify.mjs --strict-git-identity && node scripts/package-all.mjs`：通过（含全仓隐私扫描、PNG 元数据块 audit、`context-viewer v1.7.8` 6/6 自检、`agy-finder v0.2.7` 全套自检、跨插件锁校验与双插件 ZIP 发布包生成 `agy-finder-v0.2.7.zip` 90.4 KB / `context-viewer-v1.7.8.zip` 167.3 KB），时间：`2026-11-14 22:51`（Asia/Shanghai）。
 - `RELEASE_REF=v2026.11.14.6` 实机发布验收（`./install.sh` 热升级、双池与 5,505 次请求实机数据）：见历史提交 `v2026.11.14.6`，时间：`2026-11-14 20:49`（Asia/Shanghai）。
