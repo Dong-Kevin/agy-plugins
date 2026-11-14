@@ -2206,6 +2206,249 @@ async function main() {
       rmSync(join(isolatedStateDir, 'gen_step_models_v1.json'), { force: true });
     }
 
+    // H4 (Y1): Background backfill pending step models must flush before force refresh / directory switch
+    const h4ConvIdA1 = '00000000-0000-4000-8000-000000000201';
+    const h4ConvIdA2 = '00000000-0000-4000-8000-000000000202';
+    const h4ConvIdB1 = '00000000-0000-4000-8000-000000000203';
+    const h4ConvIdB2 = '00000000-0000-4000-8000-000000000204';
+    const h4ConvIdC1 = '00000000-0000-4000-8000-000000000205';
+    const h4ConvIdC2 = '00000000-0000-4000-8000-000000000206';
+    const h4ConvIdC3 = '00000000-0000-4000-8000-000000000207';
+    const h4SwitchDir1 = join(tmpVerifyRoot, 'h4_switch_dir1');
+    const h4SwitchDir2 = join(tmpVerifyRoot, 'h4_switch_dir2');
+    const writeH4Transcript = (agRoot, id) => {
+      const d = join(agRoot, 'brain', id, '.system_generated', 'logs');
+      mkdirSync(d, { recursive: true });
+      const iso = new Date().toISOString();
+      writeFileSync(
+        join(d, 'transcript.jsonl'),
+        [1, 2].map((step) => ({
+          step_index: step,
+          type: 'PLANNER_RESPONSE',
+          status: 'DONE',
+          created_at: iso,
+          input_tokens: 1200,
+          output_tokens: 150
+        })).map((r) => JSON.stringify(r)).join('\n') + '\n',
+        'utf-8'
+      );
+    };
+    const h4MetaPayload = JSON.stringify({
+      generatorMetadata: [
+        { stepIndices: [1], chatModel: { modelDisplayName: 'Gemini 4 Carbon (High)', responseModel: 'gemini-4-carbon' } },
+        { stepIndices: [2], chatModel: { modelDisplayName: 'Gemini 4 Hydrogen (High)', responseModel: 'gemini-4-hydrogen' } }
+      ]
+    });
+    let h4Mode = 'caseA';
+    let h4MaxActive = 0;
+    let h4Active = 0;
+    let resolveH4B1Replied = null;
+    let resolveH4C1Replied = null;
+    const h4Timers = new Set();
+    const h4Server = http.createServer((req, res) => {
+      let rawBody = '';
+      req.on('data', (c) => { rawBody += c; });
+      req.on('end', () => {
+        if (req.url?.includes('GetCascadeTrajectoryGeneratorMetadata')) {
+          h4Active += 1;
+          h4MaxActive = Math.max(h4MaxActive, h4Active);
+          res.on('close', () => { h4Active = Math.max(0, h4Active - 1); });
+          if (h4Mode === '503') {
+            res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end('{}');
+            return;
+          }
+          let cascadeId = '';
+          try { cascadeId = JSON.parse(rawBody || '{}').cascadeId || ''; } catch {}
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          if (cascadeId === h4ConvIdA1 || cascadeId === h4ConvIdC3) {
+            res.end(h4MetaPayload);
+            return;
+          }
+          if (cascadeId === h4ConvIdB1 || cascadeId === h4ConvIdC1) {
+            const t = setTimeout(() => {
+              h4Timers.delete(t);
+              if (!res.writableEnded && !res.destroyed) {
+                res.end(h4MetaPayload);
+              }
+              if (cascadeId === h4ConvIdB1 && resolveH4B1Replied) {
+                const done = resolveH4B1Replied;
+                resolveH4B1Replied = null;
+                done();
+              }
+              if (cascadeId === h4ConvIdC1 && resolveH4C1Replied) {
+                const done = resolveH4C1Replied;
+                resolveH4C1Replied = null;
+                done();
+              }
+            }, 430);
+            t.unref?.();
+            h4Timers.add(t);
+            return;
+          }
+          // h4ConvIdA2 / h4ConvIdB2 / h4ConvIdC2 stay pending until timeout or force-refresh abort
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        if (req.url?.includes('GetUserStatus')) {
+          res.end(JSON.stringify({ userStatus: { userTier: { id: 'g1-pro-tier', name: 'Google AI Pro' } } }));
+          return;
+        }
+        res.end('{}');
+      });
+    });
+    await new Promise((r) => h4Server.listen(0, '127.0.0.1', r));
+    const prevH4AgDir = process.env.AG_DIR;
+    const prevH4CliDir = process.env.AG_CLI_DIR;
+    const prevH4StateDir = process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR;
+    try {
+      const h4Baseline = await collectTokenHistory({ force: true });
+      const h4BaseIdent = h4Baseline.analyticsBySource?.all?.costs?.allTime?.identified;
+      const h4BaseMissing = h4BaseIdent?.unpricedReasons?.missingModel || 0;
+      const h4BaseCarbon = h4BaseIdent?.byModel?.find((m) => m.displayName === 'Gemini 4 Carbon')?.requests || 0;
+      const h4BaseHydrogen = h4BaseIdent?.byModel?.find((m) => m.displayName === 'Gemini 4 Hydrogen')?.requests || 0;
+      const stepCachePath = join(isolatedStateDir, 'gen_step_models_v1.json');
+      const collectorUrl = pathToFileURL(join(ROOT, 'sidecars', 'dashboard', 'collector.mjs')).href;
+      const runH4ColdOffline = (envOverrides = {}) => new Promise((resolveChild, rejectChild) => {
+        const childEnv = { ...process.env, ...envOverrides };
+        delete childEnv.ANTIGRAVITY_LS_ADDRESS;
+        delete childEnv.ANTIGRAVITY_CSRF_TOKEN;
+        const child = spawn(
+          process.execPath,
+          [
+            '--input-type=module',
+            '-e',
+            `const m = await import(${JSON.stringify(collectorUrl)}); const h = await m.collectTokenHistory({ force: true }); console.log(JSON.stringify(h.analyticsBySource.all.costs.allTime.identified));`
+          ],
+          { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] }
+        );
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (d) => { stdout += d.toString('utf-8'); });
+        child.stderr.on('data', (d) => { stderr += d.toString('utf-8'); });
+        child.on('error', rejectChild);
+        child.on('close', (code) => {
+          if (code !== 0) rejectChild(new Error(`H4 cold child exited ${code}: ${stderr || stdout}`));
+          else resolveChild(JSON.parse(stdout.trim()));
+        });
+      });
+
+      process.env.ANTIGRAVITY_LS_ADDRESS = `127.0.0.1:${h4Server.address().port}`;
+      process.env.ANTIGRAVITY_CSRF_TOKEN = 'h4-ls-csrf';
+
+      // Case A: Partial success inside sync budget + hung peer -> force refresh with 503 -> cold offline retains confirmed models
+      h4Mode = 'caseA';
+      h4MaxActive = 0;
+      writeH4Transcript(isolatedAgDir, h4ConvIdA1);
+      writeH4Transcript(isolatedAgDir, h4ConvIdA2);
+      const h4FirstA = await collectTokenHistory({ force: true });
+      assert(
+        h4FirstA.analyticsBySource?.all?.costs?.allTime?.identified?.unpricedReasons?.missingModel === h4BaseMissing + 2,
+        `H4 Case A 首轮缺失数应为 ${h4BaseMissing + 2}：${JSON.stringify(h4FirstA.analyticsBySource?.all?.costs?.allTime?.identified)}`
+      );
+      h4Mode = '503';
+      await collectTokenHistory({ force: true });
+      const h4OfflineA = await runH4ColdOffline();
+      assert(
+        h4MaxActive <= 6 &&
+          h4OfflineA?.unpricedReasons?.missingModel === h4BaseMissing + 2 &&
+          h4OfflineA?.byModel?.some((m) => m.displayName === 'Gemini 4 Carbon' && m.requests === h4BaseCarbon + 1) &&
+          h4OfflineA?.byModel?.some((m) => m.displayName === 'Gemini 4 Hydrogen' && m.requests === h4BaseHydrogen + 1),
+        `H4 Case A 强刷且宿主 503 后冷进程离线丢失已识别模型：maxActive=${h4MaxActive}, ident=${JSON.stringify(h4OfflineA)}`
+      );
+      rmSync(join(isolatedAgDir, 'brain', h4ConvIdA1), { recursive: true, force: true });
+      rmSync(join(isolatedAgDir, 'brain', h4ConvIdA2), { recursive: true, force: true });
+      rmSync(stepCachePath, { force: true });
+
+      // Case B: Background response completes after 350ms budget (dirtyCount < 6, still in memory pendingConvs) -> force refresh + 503 -> cold offline retains models
+      h4Mode = 'caseB';
+      h4MaxActive = 0;
+      writeH4Transcript(isolatedAgDir, h4ConvIdB1);
+      writeH4Transcript(isolatedAgDir, h4ConvIdB2);
+      const h4B1Replied = new Promise((r) => { resolveH4B1Replied = r; });
+      await collectTokenHistory({ force: true });
+      const diskBeforeB1 = existsSync(stepCachePath) ? JSON.parse(readFileSync(stepCachePath, 'utf-8')) : null;
+      assert(
+        !diskBeforeB1?.convs?.[h4ConvIdB1],
+        'H4 Case B 首轮 350ms 预算返回时 430ms 慢会话尚不应落盘'
+      );
+      await h4B1Replied;
+      await new Promise((r) => setTimeout(r, 30));
+      const diskBeforeRefreshB = existsSync(stepCachePath) ? JSON.parse(readFileSync(stepCachePath, 'utf-8')) : null;
+      assert(
+        !diskBeforeRefreshB?.convs?.[h4ConvIdB1],
+        'H4 Case B 单条后台完成 (<6) 在强刷前处于内存待写态，尚未写盘'
+      );
+      h4Mode = '503';
+      await collectTokenHistory({ force: true });
+      const h4OfflineB = await runH4ColdOffline();
+      assert(
+        h4MaxActive <= 6 &&
+          h4OfflineB?.unpricedReasons?.missingModel === h4BaseMissing + 2 &&
+          h4OfflineB?.byModel?.some((m) => m.displayName === 'Gemini 4 Carbon' && m.requests === h4BaseCarbon + 1) &&
+          h4OfflineB?.byModel?.some((m) => m.displayName === 'Gemini 4 Hydrogen' && m.requests === h4BaseHydrogen + 1),
+        `H4 Case B 后台待写映射在强刷+503 后被丢弃：maxActive=${h4MaxActive}, ident=${JSON.stringify(h4OfflineB)}`
+      );
+      rmSync(join(isolatedAgDir, 'brain', h4ConvIdB1), { recursive: true, force: true });
+      rmSync(join(isolatedAgDir, 'brain', h4ConvIdB2), { recursive: true, force: true });
+      rmSync(stepCachePath, { force: true });
+
+      // Case C: Switching data directory mid-backfill flushes to original dir1 without polluting dir2
+      const d1Ag = join(h4SwitchDir1, 'desktop');
+      const d1Cli = join(h4SwitchDir1, 'cli');
+      const d1State = join(h4SwitchDir1, 'state');
+      const d2Ag = join(h4SwitchDir2, 'desktop');
+      const d2Cli = join(h4SwitchDir2, 'cli');
+      const d2State = join(h4SwitchDir2, 'state');
+      for (const p of [d1Ag, d1Cli, d1State, d2Ag, d2Cli, d2State]) mkdirSync(p, { recursive: true });
+      process.env.AG_DIR = d1Ag;
+      process.env.AG_CLI_DIR = d1Cli;
+      process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR = d1State;
+      writeH4Transcript(d1Ag, h4ConvIdC1);
+      writeH4Transcript(d1Ag, h4ConvIdC2);
+      writeH4Transcript(d2Ag, h4ConvIdC3);
+
+      h4Mode = 'caseC';
+      const h4C1Replied = new Promise((r) => { resolveH4C1Replied = r; });
+      await collectTokenHistory({ force: true });
+      await h4C1Replied;
+      await new Promise((r) => setTimeout(r, 30));
+
+      process.env.AG_DIR = d2Ag;
+      process.env.AG_CLI_DIR = d2Cli;
+      process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR = d2State;
+      await collectTokenHistory({ force: true });
+
+      const d1CachePath = join(d1State, 'gen_step_models_v1.json');
+      const d2CachePath = join(d2State, 'gen_step_models_v1.json');
+      const d1Disk = existsSync(d1CachePath) ? JSON.parse(readFileSync(d1CachePath, 'utf-8')) : null;
+      const d2Disk = existsSync(d2CachePath) ? JSON.parse(readFileSync(d2CachePath, 'utf-8')) : null;
+      assert(
+        d1Disk?.convs?.[h4ConvIdC1]?.steps?.['1'] &&
+          d1Disk?.convs?.[h4ConvIdC1]?.steps?.['2'] &&
+          !d1Disk?.convs?.[h4ConvIdC3] &&
+          !d2Disk?.convs?.[h4ConvIdC1] &&
+          d2Disk?.convs?.[h4ConvIdC3]?.steps?.['1'],
+        `H4 Case C 切换数据目录时旧批次落盘隔离异常：dir1=${JSON.stringify(d1Disk)}, dir2=${JSON.stringify(d2Disk)}`
+      );
+    } finally {
+      for (const t of h4Timers) clearTimeout(t);
+      h4Timers.clear();
+      delete process.env.ANTIGRAVITY_LS_ADDRESS;
+      delete process.env.ANTIGRAVITY_CSRF_TOKEN;
+      if (prevH4AgDir === undefined) delete process.env.AG_DIR; else process.env.AG_DIR = prevH4AgDir;
+      if (prevH4CliDir === undefined) delete process.env.AG_CLI_DIR; else process.env.AG_CLI_DIR = prevH4CliDir;
+      if (prevH4StateDir === undefined) delete process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR; else process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR = prevH4StateDir;
+      h4Server.closeAllConnections?.();
+      await new Promise((r) => h4Server.close(r));
+      for (const id of [h4ConvIdA1, h4ConvIdA2, h4ConvIdB1, h4ConvIdB2]) {
+        rmSync(join(isolatedAgDir, 'brain', id), { recursive: true, force: true });
+      }
+      rmSync(h4SwitchDir1, { recursive: true, force: true });
+      rmSync(h4SwitchDir2, { recursive: true, force: true });
+      rmSync(join(isolatedStateDir, 'gen_step_models_v1.json'), { force: true });
+    }
+
     // R8: Windows PowerShell Unicode-safe Base64 loader shim in non-ASCII + space directory
     const ps1Text = readFileSync(join(ROOT, 'install.ps1'), 'utf-8');
     assert(!/\$TargetDir.*-Encoding\s+ASCII/i.test(ps1Text), 'R8 install.ps1 仍将 $TargetDir 直接以 ASCII 编码写出');

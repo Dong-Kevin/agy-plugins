@@ -104,7 +104,8 @@ const GEN_MISS_TTL_MS = 60_000;
 let genBackfillWaveSeq = 0;
 let genBackfillDataSeq = 0;
 const genBackfillState = {
-  wave: null
+  wave: null,
+  stopping: null
 };
 
 export const LOOPBACK_SECURITY_HEADERS = {
@@ -337,8 +338,33 @@ function getGenStepModelsPath() {
   return join(getPluginStateDir(), 'gen_step_models_v1.json');
 }
 
-function loadPersistedStepModels() {
-  const p = getGenStepModelsPath();
+function mergePersistedConvsInto(targetConvs, srcConvs) {
+  if (!targetConvs || !srcConvs || typeof srcConvs !== 'object') return;
+  for (const [convId, entry] of Object.entries(srcConvs)) {
+    if (!entry || typeof entry !== 'object' || !entry.steps || typeof entry.steps !== 'object') continue;
+    const prev = targetConvs[convId];
+    const combinedSteps = { ...(prev?.steps || {}) };
+    for (const [k, v] of Object.entries(entry.steps)) {
+      const val = String(v || '').trim();
+      if (val) combinedSteps[String(k)] = val;
+    }
+    if (!Object.keys(combinedSteps).length) continue;
+    const nextMtime = Number(entry.mtimeMs || 0);
+    const prevMtime = Number(prev?.mtimeMs || 0);
+    const nextSize = Number(entry.size || 0);
+    const prevSize = Number(prev?.size || 0);
+    const keepNextMeta = !prev || nextMtime > prevMtime || (nextMtime === prevMtime && nextSize >= prevSize);
+    targetConvs[convId] = {
+      size: keepNextMeta ? nextSize : prevSize,
+      mtimeMs: keepNextMeta ? nextMtime : prevMtime,
+      steps: combinedSteps
+    };
+  }
+}
+
+function loadPersistedStepModels(targetPath = getGenStepModelsPath()) {
+  const defaultPath = getGenStepModelsPath();
+  const p = targetPath || defaultPath;
   let st = null;
   try {
     if (existsSync(p)) st = statSync(p);
@@ -346,70 +372,41 @@ function loadPersistedStepModels() {
   const stMtime = st ? st.mtimeMs : -1;
   const stSize = st ? st.size : -1;
   if (
+    p === defaultPath &&
     genStepModelsCache.path === p &&
     genStepModelsCache.mtimeMs === stMtime &&
     genStepModelsCache.size === stSize &&
     genStepModelsCache.data
   ) {
+    if (genBackfillState.wave?.persistPath === p) {
+      mergePersistedConvsInto(genStepModelsCache.data.convs, genBackfillState.wave.pendingConvs);
+    }
     return genStepModelsCache.data;
   }
   const raw = readJsonSafe(p, null);
   const cleanConvs = {};
-  if (raw && typeof raw === 'object' && raw.convs && typeof raw.convs === 'object') {
-    for (const [convId, entry] of Object.entries(raw.convs)) {
-      if (!entry || typeof entry !== 'object' || !entry.steps || typeof entry.steps !== 'object') continue;
-      const cleanSteps = {};
-      for (const [k, v] of Object.entries(entry.steps)) {
-        const val = String(v || '').trim();
-        if (val) cleanSteps[String(k)] = val;
-      }
-      if (Object.keys(cleanSteps).length > 0) {
-        cleanConvs[convId] = {
-          size: Number(entry.size || 0),
-          mtimeMs: Number(entry.mtimeMs || 0),
-          steps: cleanSteps
-        };
-      }
-    }
+  mergePersistedConvsInto(cleanConvs, raw?.convs);
+  if (genBackfillState.wave?.persistPath === p) {
+    mergePersistedConvsInto(cleanConvs, genBackfillState.wave.pendingConvs);
   }
   const data = { version: 1, convs: cleanConvs };
-  genStepModelsCache = { path: p, mtimeMs: stMtime, size: stSize, data };
+  if (p === defaultPath) {
+    genStepModelsCache = { path: p, mtimeMs: stMtime, size: stSize, data };
+  }
   return data;
 }
 
-function savePersistedStepModels(data) {
-  const p = getGenStepModelsPath();
+function savePersistedStepModels(data, targetPath = getGenStepModelsPath()) {
+  const defaultPath = getGenStepModelsPath();
+  const p = targetPath || defaultPath;
   const diskRaw = readJsonSafe(p, null);
-  const diskConvs = (diskRaw && typeof diskRaw === 'object' && diskRaw.convs && typeof diskRaw.convs === 'object')
-    ? diskRaw.convs
-    : {};
   const mergedConvs = {};
 
-  const mergeInto = (srcConvs) => {
-    for (const [convId, entry] of Object.entries(srcConvs || {})) {
-      if (!entry || typeof entry !== 'object' || !entry.steps || typeof entry.steps !== 'object') continue;
-      const prev = mergedConvs[convId];
-      const combinedSteps = { ...(prev?.steps || {}) };
-      for (const [k, v] of Object.entries(entry.steps)) {
-        const val = String(v || '').trim();
-        if (val) combinedSteps[String(k)] = val;
-      }
-      if (!Object.keys(combinedSteps).length) continue;
-      const nextMtime = Number(entry.mtimeMs || 0);
-      const prevMtime = Number(prev?.mtimeMs || 0);
-      const nextSize = Number(entry.size || 0);
-      const prevSize = Number(prev?.size || 0);
-      const keepNextMeta = !prev || nextMtime > prevMtime || (nextMtime === prevMtime && nextSize >= prevSize);
-      mergedConvs[convId] = {
-        size: keepNextMeta ? nextSize : prevSize,
-        mtimeMs: keepNextMeta ? nextMtime : prevMtime,
-        steps: combinedSteps
-      };
-    }
-  };
-
-  mergeInto(diskConvs);
-  mergeInto(data?.convs);
+  mergePersistedConvsInto(mergedConvs, diskRaw?.convs);
+  if (genBackfillState.wave?.persistPath === p) {
+    mergePersistedConvsInto(mergedConvs, genBackfillState.wave.pendingConvs);
+  }
+  mergePersistedConvsInto(mergedConvs, data?.convs);
 
   const entries = Object.entries(mergedConvs);
   if (entries.length > 1500) {
@@ -425,16 +422,20 @@ function savePersistedStepModels(data) {
   }
   try {
     writeJsonAtomic(p, nextData);
-    let st = null;
-    try { st = statSync(p); } catch {}
-    genStepModelsCache = {
-      path: p,
-      mtimeMs: st ? st.mtimeMs : -1,
-      size: st ? st.size : -1,
-      data: nextData
-    };
+    if (p === defaultPath) {
+      let st = null;
+      try { st = statSync(p); } catch {}
+      genStepModelsCache = {
+        path: p,
+        mtimeMs: st ? st.mtimeMs : -1,
+        size: st ? st.size : -1,
+        data: nextData
+      };
+    }
   } catch {
-    genStepModelsCache = { path: p, mtimeMs: -1, size: -1, data: nextData };
+    if (p === defaultPath) {
+      genStepModelsCache = { path: p, mtimeMs: -1, size: -1, data: nextData };
+    }
   }
   return nextData;
 }
@@ -3263,9 +3264,18 @@ function invalidateHistoryResultCache() {
 }
 
 function flushGenBackfillPersisted(wave) {
-  if (!wave || wave.dirtyCount <= 0) return;
+  if (!wave) return;
+  const pendingKeys = Object.keys(wave.pendingConvs || {});
+  if (wave.dirtyCount <= 0 && pendingKeys.length === 0) return;
+  const pendingSnapshot = wave.pendingConvs;
+  wave.pendingConvs = {};
   wave.dirtyCount = 0;
-  savePersistedStepModels(loadPersistedStepModels());
+  if (
+    pendingKeys.length > 0 &&
+    ((wave.agDir && existsSync(wave.agDir)) || (wave.persistPath && existsSync(dirname(wave.persistPath))))
+  ) {
+    savePersistedStepModels({ version: 1, convs: pendingSnapshot }, wave.persistPath);
+  }
   invalidateHistoryResultCache();
 }
 
@@ -3284,6 +3294,44 @@ function waitForWaveIdle(wave) {
   });
 }
 
+async function stopGenBackfillWave(wave) {
+  if (!wave) return;
+  if (wave.stopPromise) {
+    await wave.stopPromise;
+    return;
+  }
+  wave.stopPromise = (async () => {
+    flushGenBackfillPersisted(wave);
+    const hadActive = wave.activeWorkers > 0;
+    wave.aborted = true;
+    wave.queue.length = 0;
+    wave.queuedById.clear();
+    wave.abortController.abort();
+    if (genBackfillState.wave === wave) {
+      genBackfillState.wave = null;
+    }
+    if (hadActive) {
+      let abortWaitTimer = null;
+      await Promise.race([
+        waitForWaveIdle(wave),
+        new Promise((r) => { abortWaitTimer = setTimeout(r, 50); })
+      ]);
+      if (abortWaitTimer) clearTimeout(abortWaitTimer);
+      // Allow loopback server sockets to process TCP FIN before opening the next wave.
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    flushGenBackfillPersisted(wave);
+  })();
+  genBackfillState.stopping = wave.stopPromise;
+  try {
+    await wave.stopPromise;
+  } finally {
+    if (genBackfillState.stopping === wave.stopPromise) {
+      genBackfillState.stopping = null;
+    }
+  }
+}
+
 async function waitGenBackfillWithBudget(wave, budgetMs) {
   if (!wave || wave.activeWorkers <= 0) return;
   let timer = null;
@@ -3296,9 +3344,9 @@ async function waitGenBackfillWithBudget(wave, budgetMs) {
   if (timer) clearTimeout(timer);
 }
 
-function isConvStepsCovered(convId, stepsNeedingGen) {
+function isConvStepsCovered(convId, stepsNeedingGen, persistPath = getGenStepModelsPath()) {
   if (!stepsNeedingGen?.length) return true;
-  const persistedSteps = loadPersistedStepModels().convs?.[convId]?.steps;
+  const persistedSteps = loadPersistedStepModels(persistPath).convs?.[convId]?.steps;
   const memCalls = convGenMetaCache.get(convId)?.callsByStep;
   return stepsNeedingGen.every((stepKey) => (
     Boolean(persistedSteps?.[stepKey]) ||
@@ -3340,17 +3388,18 @@ function ensureGenBackfillWorkers(wave) {
               signal: ac.signal,
               unrefSocket: true
             });
-            if (wave.aborted || ac.signal.aborted) break;
-
-            if (!gm || gm.rpcFailed) {
-              wave.consecutiveRpcFailures += 1;
-            } else {
-              wave.consecutiveRpcFailures = 0;
-            }
 
             if (gm && !gm.fromFallbackCache && Array.isArray(gm.generatorList) && gm.generatorList.length > 0) {
-              const persistedModels = loadPersistedStepModels();
+              const persistedModels = loadPersistedStepModels(wave.persistPath);
               if (mergePersistedConvStepModels(persistedModels.convs, item.convId, item.st, gm.generatorList)) {
+                const mergedEntry = persistedModels.convs[item.convId];
+                if (mergedEntry) {
+                  wave.pendingConvs[item.convId] = {
+                    size: mergedEntry.size,
+                    mtimeMs: mergedEntry.mtimeMs,
+                    steps: { ...mergedEntry.steps }
+                  };
+                }
                 wave.dirtyCount += 1;
                 invalidateHistoryResultCache();
                 if (wave.dirtyCount >= GEN_BACKFILL_CONCURRENCY) {
@@ -3359,7 +3408,15 @@ function ensureGenBackfillWorkers(wave) {
               }
             }
 
-            if (isConvStepsCovered(item.convId, item.stepsNeedingGen)) {
+            if (wave.aborted || ac.signal.aborted) break;
+
+            if (!gm || gm.rpcFailed) {
+              wave.consecutiveRpcFailures += 1;
+            } else {
+              wave.consecutiveRpcFailures = 0;
+            }
+
+            if (isConvStepsCovered(item.convId, item.stepsNeedingGen, wave.persistPath)) {
               lsGenMissCache.delete(item.convId);
             } else {
               lsGenMissCache.set(item.convId, {
@@ -3387,28 +3444,16 @@ function ensureGenBackfillWorkers(wave) {
   }
 }
 
-async function enqueueAndWaitGenBackfill(candidates, { force = false, lsKey = '', budgetMs = GEN_BACKFILL_SYNC_BUDGET_MS } = {}) {
+async function enqueueAndWaitGenBackfill(
+  candidates,
+  { force = false, lsKey = '', agDir = findAppDataDir(), persistPath = getGenStepModelsPath(), budgetMs = GEN_BACKFILL_SYNC_BUDGET_MS } = {}
+) {
   if (!candidates.length) return;
   const oldWave = genBackfillState.wave;
-  if (oldWave && (force || (oldWave.lsKey && oldWave.lsKey !== lsKey))) {
-    const hadActive = oldWave.activeWorkers > 0;
-    oldWave.aborted = true;
-    oldWave.queue.length = 0;
-    oldWave.queuedById.clear();
-    oldWave.abortController.abort();
-    if (genBackfillState.wave === oldWave) {
-      genBackfillState.wave = null;
-    }
-    if (hadActive) {
-      let abortWaitTimer = null;
-      await Promise.race([
-        waitForWaveIdle(oldWave),
-        new Promise((r) => { abortWaitTimer = setTimeout(r, 50); })
-      ]);
-      if (abortWaitTimer) clearTimeout(abortWaitTimer);
-      // Allow loopback server sockets to process TCP FIN before opening the next wave.
-      await new Promise((r) => setTimeout(r, 15));
-    }
+  if (oldWave && (force || (oldWave.lsKey && oldWave.lsKey !== lsKey) || oldWave.persistPath !== persistPath)) {
+    await stopGenBackfillWave(oldWave);
+  } else if (genBackfillState.stopping) {
+    await genBackfillState.stopping;
   }
 
   let wave = genBackfillState.wave;
@@ -3416,6 +3461,8 @@ async function enqueueAndWaitGenBackfill(candidates, { force = false, lsKey = ''
     wave = {
       id: ++genBackfillWaveSeq,
       lsKey,
+      agDir,
+      persistPath,
       abortController: new AbortController(),
       queue: [],
       queuedById: new Map(),
@@ -3423,8 +3470,10 @@ async function enqueueAndWaitGenBackfill(candidates, { force = false, lsKey = ''
       activeWorkers: 0,
       consecutiveRpcFailures: 0,
       dirtyCount: 0,
+      pendingConvs: {},
       aborted: false,
-      idleWaiters: new Set()
+      idleWaiters: new Set(),
+      stopPromise: null
     };
     genBackfillState.wave = wave;
   }
@@ -3450,10 +3499,24 @@ async function enqueueAndWaitGenBackfill(candidates, { force = false, lsKey = ''
   if (wave.activeWorkers > 0) {
     await waitGenBackfillWithBudget(wave, budgetMs);
   }
+  flushGenBackfillPersisted(wave);
 }
 
 export async function collectTokenHistory(options = {}) {
   const force = Boolean(options.force);
+  const curPersistPath = getGenStepModelsPath();
+  const curLsAddr = process.env.ANTIGRAVITY_LS_ADDRESS || '';
+  const curLsCsrf = process.env.ANTIGRAVITY_CSRF_TOKEN || '';
+  const curLsKey = (curLsAddr && curLsCsrf) ? `${curLsAddr}|${curLsCsrf}` : '';
+  const existingWave = genBackfillState.wave;
+  if (
+    existingWave &&
+    (force || existingWave.persistPath !== curPersistPath || existingWave.lsKey !== curLsKey)
+  ) {
+    await stopGenBackfillWave(existingWave);
+  } else if (genBackfillState.stopping) {
+    await genBackfillState.stopping;
+  }
   if (force) {
     transcriptHistCache.clear();
     genStepModelsCache = { path: '', mtimeMs: -1, size: -1, data: null };
@@ -3636,6 +3699,8 @@ export async function collectTokenHistory(options = {}) {
     await enqueueAndWaitGenBackfill(backfillCandidates, {
       force,
       lsKey,
+      agDir,
+      persistPath: curPersistPath,
       budgetMs: GEN_BACKFILL_SYNC_BUDGET_MS
     });
   }
