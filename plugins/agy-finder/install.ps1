@@ -27,9 +27,63 @@ $CliLoader = Join-Path $BinDir "agy-finder-loader.mjs"
 $RepoSlug = if ($env:REPO) { $env:REPO } else { "Dong-Kevin/agy-plugins" }
 $GitRef = if ($env:REF) { $env:REF } else { "main" }
 
+$ScriptDir = $null
+if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "plugin.json")) -and (Test-Path (Join-Path $PSScriptRoot "sidecars\tree"))) {
+  $ScriptDir = $PSScriptRoot
+}
+
 if ($Uninstall) {
-  if ((-not $OrigPluginsDir) -and (Test-Path (Join-Path $TargetDir "sidecars\tree\cli.mjs")) -and (Get-Command node -ErrorAction SilentlyContinue)) {
-    try { & node (Join-Path $TargetDir "sidecars\tree\cli.mjs") quit 2>&1 | Out-Null } catch {}
+  $HasNode = [bool](Get-Command node -ErrorAction SilentlyContinue)
+  if ((-not $OrigPluginsDir) -and $HasNode) {
+    $LocalCli = if ($ScriptDir) { Join-Path $ScriptDir "sidecars\tree\cli.mjs" } else { "" }
+    $InstalledCli = Join-Path $TargetDir "sidecars\tree\cli.mjs"
+    $PrevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+      if ($LocalCli -and (Test-Path $LocalCli)) {
+        & node $LocalCli quit 1>$null
+      } elseif (Test-Path $InstalledCli) {
+        $StateDir = if ($env:AGY_FINDER_DATA_DIR) { $env:AGY_FINDER_DATA_DIR } elseif ($env:ANTIGRAVITY_EXECUTABLE_DATA_DIR) { $env:ANTIGRAVITY_EXECUTABLE_DATA_DIR } else { Join-Path $HOME ".gemini\antigravity\sidecar_data\agy-finder\tree\data" }
+        $StatePath = Join-Path $StateDir "drawer_state.json"
+        if (Test-Path $StatePath) {
+          $StateObj = $null
+          try { $StateObj = Get-Content $StatePath -Raw -Encoding UTF8 | ConvertFrom-Json } catch {}
+          $DaemonPid = if ($StateObj -and $StateObj.pid) { [int]$StateObj.pid } else { 0 }
+          if ($DaemonPid -gt 1) {
+            $LiveProc = Get-Process -Id $DaemonPid -ErrorAction SilentlyContinue
+            if (-not $LiveProc) {
+              Remove-Item -Force $StatePath -ErrorAction SilentlyContinue
+            } elseif ($env:AGY_TEST_PID_IDENTITY_MODE -eq "unknown") {
+              Write-Host "[WARN] [agy-finder] 无法核实后台进程身份（PID $DaemonPid），已跳过发送退出信号；请手动确认进程状态。" -ForegroundColor Yellow
+            } else {
+              $ProcInfo = $null
+              try { $ProcInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $DaemonPid" -ErrorAction Stop } catch {}
+              if ($null -eq $ProcInfo) {
+                if (-not (Get-Process -Id $DaemonPid -ErrorAction SilentlyContinue)) {
+                  Remove-Item -Force $StatePath -ErrorAction SilentlyContinue
+                } else {
+                  Write-Host "[WARN] [agy-finder] 无法核实后台进程身份（PID $DaemonPid），已跳过发送退出信号；请手动确认进程状态。" -ForegroundColor Yellow
+                }
+              } else {
+                $CmdNorm = ([string]$ProcInfo.CommandLine).Replace('\', '/')
+                $ProcName = [string]$ProcInfo.Name
+                $NameOk = (-not $ProcName) -or ($ProcName -match '^(node|electron|antigravity)(\.exe)?$')
+                $IsDaemon = $NameOk -and $CmdNorm.Contains("sidecars/tree/drawer.mjs") -and ($CmdNorm -match '(?:^|\s)--daemon(?:\s|$)') -and ($CmdNorm -notmatch '(?:^|\s)(?:-e|--eval|--print|-p)(?:=|\s|$)')
+                if ($IsDaemon) {
+                  & node $InstalledCli quit 1>$null
+                } else {
+                  Remove-Item -Force $StatePath -ErrorAction SilentlyContinue
+                }
+              }
+            }
+          } else {
+            Remove-Item -Force $StatePath -ErrorAction SilentlyContinue
+          }
+        }
+      }
+    } finally {
+      $ErrorActionPreference = $PrevEap
+    }
   }
   if ($ShouldManageBin -and (Test-Path $CliLoader)) {
     $ExpectedEntry = [System.IO.Path]::GetFullPath((Join-Path $TargetDir "sidecars\tree\cli.mjs"))
@@ -57,11 +111,6 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
 $NodeMajor = [int](& node -p "process.versions.node.split('.')[0]")
 if ($NodeMajor -lt 18) {
   throw "当前 Node.js 主版本为 $NodeMajor，需要 Node.js >= 18。"
-}
-
-$ScriptDir = $null
-if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "plugin.json")) -and (Test-Path (Join-Path $PSScriptRoot "sidecars\tree"))) {
-  $ScriptDir = $PSScriptRoot
 }
 
 $TempDir = $null
@@ -100,9 +149,11 @@ try {
     }
   }
 
-  $ExistingCli = Join-Path $TargetDir "sidecars\tree\cli.mjs"
-  if ((-not $OrigPluginsDir) -and (Test-Path $ExistingCli)) {
-    try { & node $ExistingCli quit 2>&1 | Out-Null } catch {}
+  $NewCli = Join-Path $ScriptDir "sidecars\tree\cli.mjs"
+  if ((-not $OrigPluginsDir) -and (Test-Path $TargetDir) -and (Test-Path $NewCli)) {
+    $PrevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try { & node $NewCli quit 1>$null } catch {} finally { $ErrorActionPreference = $PrevEap }
   }
 
   $Dirs = @(

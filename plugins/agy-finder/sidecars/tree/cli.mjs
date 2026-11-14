@@ -133,6 +133,7 @@ async function main() {
   if (cmd === 'close' || cmd === 'toggle' || cmd === 'quit') {
     const res = await controlDrawer({ action: cmd });
     if (wantsJson) console.log(JSON.stringify(res, null, 2));
+    else if (res.warning) console.error(res.warning);
     else console.log(`[agy-finder] ${res.message || res.error || '已完成'}`);
     if (res.ok === false) process.exit(1);
     return;

@@ -1,27 +1,30 @@
 # agy-plugins ROADMAP
 
-更新时间：2026-11-14 13:39（Asia/Shanghai）。
+更新时间：2026-11-14 15:21（Asia/Shanghai）。
 
 ## 本次交付目标
 
-1. 发布 `v2026.11.14.3` 升级兼容性与恢复门禁加固版（`agy-finder v0.2.5` / `context-viewer v1.7.5`）：
-   - 明确双插件共存时的跨插件锁协议升级前提：须将 `agy-finder`（`>= 0.2.4`）与 `context-viewer`（`>= 1.7.4`）同步升级并确保旧版后台守护进程及宿主 Sidecar 实例均已退出或重载，方可消除旧版绕过 `.lock.d` Bakery 协议并发回收 `.lock` 的风险；仅安装单插件的用户不受影响。
-   - 在单插件安装时增加只读低版本对端 `[WARN]` 提示、`agy-finder` 升级前退出旧抽屉守护进程，并在全仓校验套件补齐 6 阶段 `SIGKILL` 崩溃恢复与安装告警回归测试。
+1. 发布 `v2026.11.14.4` 守护进程 PID 复用防护与升级边界加固版（`agy-finder v0.2.6` / `context-viewer v1.7.6`）：
+   - 修复状态文件（`drawer_state.json` / `float_window_state.json`）中的 PID 在守护进程异常退出后被系统复用于无关进程时，`quit`、热升级与 `--uninstall` 误发 `SIGUSR1`、`SIGTERM` 或 `SIGKILL` 的风险。
+   - 修复 `install.sh` / `install.ps1` 升级旧版本时调用 `$TARGET_DIR` 旧版 `cli.mjs` 导致新版进程身份校验被绕过的升级边界问题；同步加固独立 `--uninstall` / `-Uninstall` 的进程身份门禁。
 
 ## 当前阶段与状态
 
-- **已完成（`v2026.11.14.3` 发布就绪）**：
-  - **文档与版本矩阵（`agy-finder v0.2.5` / `context-viewer v1.7.5`）**：
-    - 在根目录 [README.md](./README.md)、[README_EN.md](./README_EN.md) 及两插件各自的中英文 README 补充双插件共存升级说明；同步更新版本至 `0.2.5` / `1.7.5`（保持已发布 `v2026.11.14.2` 包与校验和不可变，对端兼容检查下限仍为 `0.2.4` / `1.7.4`）。
-  - **安装器升级衔接与只读对端校验**：
-    - [install.sh](./install.sh) 与 [install.ps1](./install.ps1) 在非卸载批次中透传 `AGY_INSTALL_BATCH`，避免全仓批量升级按目录序先装 `context-viewer` 时对尚未更新的 `agy-finder` 误报陈旧告警。
-    - [plugins/agy-finder/install.sh](./plugins/agy-finder/install.sh) 与 [plugins/agy-finder/install.ps1](./plugins/agy-finder/install.ps1) 在非隔离模式下覆盖文件前先执行 `cli.mjs quit` 退出旧抽屉守护进程（隔离 `AGY_PLUGINS_DIR` 测试不触碰宿主守护进程）。
-    - [plugins/agy-finder/install.sh](./plugins/agy-finder/install.sh)、[plugins/agy-finder/install.ps1](./plugins/agy-finder/install.ps1)、[plugins/agy-context-viewer/install.sh](./plugins/agy-context-viewer/install.sh) 与 [plugins/agy-context-viewer/install.ps1](./plugins/agy-context-viewer/install.ps1) 安装后只读核对同级已装对端 `plugin.json`，若单插件安装或对端未在同一批次内且版本低于 `0.2.4` / `1.7.4`，输出 `[WARN]` 提示同步升级与重载旧进程（绝不自动改动对端插件）。
-  - **锁协议不变量注释与正式回归测试**：
-    - `plugins/agy-finder/sidecars/tree/drawer.mjs` 与 `plugins/agy-context-viewer/sidecars/dashboard/collector.mjs` 在 `withAuxTriggerLock()` 补充 3 条协议不变量注释（`>= 0.2.4` / `>= 1.7.4` 对端前提、`ticketPath` 建立后单次 `pendingEntering` 快照完备性、不可变 `(pid, nonce)` 文件名与 `finally` 先删 `.lock` 再删 `ticketPath` 顺序）。
-    - [scripts/verify.mjs](./scripts/verify.mjs) 新增两部分正式测试：（1）`verifyRootInstaller` 预置 `1.7.3` / `0.2.3` 对端验证单插件 `[WARN]` 与只读不改写、全量批次无误报及已升级无误报；（2）`verifyCrossPluginAuxTriggerLock` 补全 `['entering', 'ticket', 'critical']` × 双向 `finder <-> context` 共 6 组 `SIGKILL` 阶段中断崩溃恢复测试（活进程期间 `lockBusy: true, claimed: false`，`SIGKILL` 后继承者正常认领并清空 `.lock` 与 `.lock.d`）。
-  - **本机已安装环境热升级实测**：执行 `./install.sh` 将 `~/.gemini/config/plugins/` 热升级至 `agy-finder 0.2.5` 与 `context-viewer 1.7.5`（全程无 `[WARN]`，两插件旧后台守护进程均已平滑退出并重启新实例，保留已有快捷键与菜单栏“速度与耗时”模式配置）。
+- **已完成（`v2026.11.14.4` 发布就绪）**：
+  - **版本矩阵（`agy-finder v0.2.6` / `context-viewer v1.7.6`）**：
+    - 同步更新两插件 `plugin.json`、[plugins/agy-context-viewer/sidecars/dashboard/index.html](./plugins/agy-context-viewer/sidecars/dashboard/index.html) 静态资源版本参数、[plugins/agy-context-viewer/sidecars/dashboard/cli.mjs](./plugins/agy-context-viewer/sidecars/dashboard/cli.mjs) 兜底版本号，以及根目录与两插件各自中英文 README（保持 `v2026.11.14.2` 对端锁协议兼容下限 `>= 0.2.4` / `>= 1.7.4`）。
+  - **双插件守护进程 PID 身份核验（向后兼容 `<= 0.2.5` / `<= 1.7.5` 旧守护进程）**：
+    - [plugins/agy-finder/sidecars/tree/drawer.mjs](./plugins/agy-finder/sidecars/tree/drawer.mjs) 与 [plugins/agy-context-viewer/sidecars/dashboard/float_window.mjs](./plugins/agy-context-viewer/sidecars/dashboard/float_window.mjs) 新增跨平台命令行身份校验（macOS / POSIX `LC_ALL=C ps -ww -p <pid> -o args=`、Linux `/proc/<pid>/cmdline` 兜底、Windows `Win32_Process` `CommandLine`）及 `verifyDaemonProcessIdentity()`、`inspectDrawerState()` / `inspectFloatState()`、`clearStateIfPidMatches()`；仅核验 `sidecars/tree/drawer.mjs --daemon` 或 `sidecars/dashboard/float_window.mjs --daemon` 并排除 `-e` / `--eval` / `--print` / `-p`（不依赖 `daemonBuildId`，确保真实旧版守护进程可被平滑退出）。
+    - 将 `action === 'quit'` 前置于 `readDrawerState()` / `readFloatState()` 清理之前，并在发送 `SIGUSR1`、`SIGTERM` 与 `SIGKILL` 前二次核验 PID 身份：`dead` / `mismatch` 自动清理陈旧状态文件且严禁发信号；`unknown`（无法读取命令行）跳过信号、保留状态文件并由 [plugins/agy-finder/sidecars/tree/cli.mjs](./plugins/agy-finder/sidecars/tree/cli.mjs) 与 [plugins/agy-context-viewer/sidecars/dashboard/cli.mjs](./plugins/agy-context-viewer/sidecars/dashboard/cli.mjs) 向 `stderr` 输出 `[WARN]`。
+  - **安装器预退出边界与独立卸载门禁**：
+    - [plugins/agy-finder/install.sh](./plugins/agy-finder/install.sh)、[plugins/agy-context-viewer/install.sh](./plugins/agy-context-viewer/install.sh)、[plugins/agy-finder/install.ps1](./plugins/agy-finder/install.ps1) 与 [plugins/agy-context-viewer/install.ps1](./plugins/agy-context-viewer/install.ps1) 在非隔离升级覆盖目标目录前改为调用暂存/源码目录中的新版 `cli.mjs` 退出旧守护进程，杜绝执行已装目录内旧版 `<= 0.2.5` / `<= 1.7.5` 的无校验退出逻辑。
+    - 独立 `--uninstall` / `-Uninstall`（无本地源码目录，如 `curl ... | bash`）在调用已装 `cli.mjs` 前先核验状态文件中的 PID 身份，匹配才执行旧 `cli.mjs` 退出，不匹配仅清理陈旧状态文件，未知时跳过信号并输出 `[WARN]`。
+  - **正式回归测试**：
+    - [scripts/verify.mjs](./scripts/verify.mjs) 新增 `verifyDaemonQuitAndUpgradePidSafety()` 跨双插件回归套件，覆盖缺失与死 PID 状态、复用 PID 无误杀、`install.sh` 升级走 `$STAGE_DIR`（在目标目录植入模拟旧版盲杀脚本验证不被调用）、独立 `bash -s -- --uninstall` 拦截、真实路径旧版 `--daemon` 正常退出及 `AGY_TEST_PID_IDENTITY_MODE=unknown` `[WARN]` 保活。
+    - [plugins/agy-context-viewer/scripts/verify.mjs](./plugins/agy-context-viewer/scripts/verify.mjs) 更新 `6c` / `6d` 模拟守护进程脚本路径为 `sidecars/dashboard/float_window.mjs --daemon` 以匹配新身份核验。
+  - **本机已安装环境热升级实测**：执行 `./install.sh` 将 `~/.gemini/config/plugins/` 热升级至 `agy-finder 0.2.6` 与 `context-viewer 1.7.6`（全程无 `[WARN]`，两插件旧版后台守护进程均经新版暂存 CLI 身份核验平滑退出并拉起新实例，保留已有快捷键与菜单栏“速度与耗时”模式配置）。
 - **历史基线**：
+  - `v2026.11.14.3`（`c5d1c80`）：`agy-finder v0.2.5` / `context-viewer v1.7.5`（补充双插件共存升级说明、单插件低版本对端只读 `[WARN]`、`AGY_INSTALL_BATCH` 批次透传与 6 阶段 `SIGKILL` 崩溃恢复校验）。
   - `v2026.11.14.2`（`a365456`）：`agy-finder v0.2.4` / `context-viewer v1.7.4`（修复同代 Bakery 协议下并发回收旧锁的 TOCTOU 竞态及 `agy-finder` 切换工作区旧搜索结果残留；注：双插件共存时须双端均升级至 `>= 0.2.4` / `>= 1.7.4` 且旧守护与宿主 Sidecar 实例退出/重载后方完全生效）。
   - `v2026.11.14.1`（`b6e5b81`）：`agy-finder v0.2.3` / `context-viewer v1.7.3`（闭合共享触发锁超时 fail-closed 与常驻活锁不抢占边界，并修复符号链接工作区相对路径、展开目录轮转同步与自动跟随切会话竞态）。
   - `v2026.11.14`（`f74753e`）：`agy-finder v0.2.2` / `context-viewer v1.7.2`；`v2026.11.13`：`agy-finder v0.2.1` / `context-viewer v1.7.1`。
@@ -38,6 +41,6 @@
 
 ## 最近验证
 
-- `./install.sh` + 本机已安装实测：通过，热升级 `~/.gemini/config/plugins/` 至 `agy-finder 0.2.5` 与 `context-viewer 1.7.5`（无 `[WARN]`，保留已有快捷键与菜单栏速度模式），`~/.local/bin/agy-finder status --json`（`daemonRunning: true`）与 `~/.local/bin/agy-context`（`v1.7.5`）及 `menubar status` / `aux-shortcut status` 全部正常，时间：`2026-11-14 13:39`（Asia/Shanghai）。
-- `node scripts/verify.mjs --strict-git-identity`：通过（含 `v0.2.5` / `v1.7.5` 双插件自检、`U1` 隔离单插件 `[WARN]` 与只读对端保护测试、`U1` 6 阶段 `SIGKILL` 崩溃恢复测试、8 进程竞争与双向旧锁并发回收交错测试、隐私扫描与 Git noreply 身份门禁及 Swift `-typecheck`），时间：`2026-11-14 12:16`（Asia/Shanghai）。
-- `RELEASE_REF=v2026.11.14.3 LC_ALL=C node scripts/package-all.mjs && (cd dist && ls -lh agy-finder-v0.2.5.zip context-viewer-v1.7.5.zip && unzip -t agy-finder-v0.2.5.zip && unzip -t context-viewer-v1.7.5.zip && LC_ALL=C shasum -a 256 -c agy-finder-v0.2.5.zip.sha256 context-viewer-v1.7.5.zip.sha256)`：通过，生成 `dist/agy-finder-v0.2.5.zip`（86.5 KB，20 个文件）与 `dist/context-viewer-v1.7.5.zip`（170.2 KB，20 个文件），ZIP 完整性与 SHA-256 校验均 `OK`，时间：`2026-11-14 12:16`（Asia/Shanghai）。
+- `./install.sh` + 本机已安装实测：通过，热升级 `~/.gemini/config/plugins/` 至 `agy-finder 0.2.6` 与 `context-viewer 1.7.6`（全程无 `[WARN]`，两插件旧守护平滑退出并重启为新实例，保留已有快捷键与菜单栏“速度与耗时”模式），`~/.local/bin/agy-finder status --json`（`daemonRunning: true`）与 `~/.local/bin/agy-context float status --json`（`daemonRunning: true`）均正常，时间：`2026-11-14 15:21`（Asia/Shanghai）。
+- `node scripts/verify.mjs --strict-git-identity`：通过（含 `v0.2.6` / `v1.7.6` 双插件自检、`V1` 守护进程 PID 身份校验 / PID 复用不误杀 / `STAGE_DIR` 升级边界 / 独立 `--uninstall` 门禁 / `unknown` `[WARN]` 回归测试、`U1` 6 阶段 `SIGKILL` 崩溃恢复与单插件低版本 `[WARN]` 测试、隐私扫描与 Git noreply 身份门禁及 Swift `-typecheck`），时间：`2026-11-14 15:21`（Asia/Shanghai）。
+- `RELEASE_REF=v2026.11.14.4 LC_ALL=C node scripts/package-all.mjs && (cd dist && ls -lh agy-finder-v0.2.6.zip context-viewer-v1.7.6.zip && unzip -t agy-finder-v0.2.6.zip && unzip -t context-viewer-v1.7.6.zip && LC_ALL=C shasum -a 256 -c agy-finder-v0.2.6.zip.sha256 context-viewer-v1.7.6.zip.sha256)`：通过，生成 `dist/agy-finder-v0.2.6.zip`（89.9 KB，20 个文件）与 `dist/context-viewer-v1.7.6.zip`（173.5 KB，20 个文件），ZIP 完整性与 SHA-256 校验均 `OK`，时间：`2026-11-14 15:21`（Asia/Shanghai）。

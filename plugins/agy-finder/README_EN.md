@@ -2,7 +2,7 @@
 
 # AGY Finder (`agy-finder`)
 
-[![Version](https://img.shields.io/badge/version-v0.2.5-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
+[![Version](https://img.shields.io/badge/version-v0.2.6-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-818cf8)](#installation)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D%2018-22c55e)](#installation)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-a855f7)](#key-features)

@@ -121,9 +121,89 @@ function isPidAlive(pid) {
   try {
     process.kill(n, 0);
     return true;
-  } catch {
-    return false;
+  } catch (err) {
+    return err?.code === 'EPERM';
   }
+}
+
+function queryProcessIdentity(pid) {
+  const n = Number(pid);
+  if (process.platform === 'win32') {
+    try {
+      const psCmd = `$ErrorActionPreference='Stop'; $p = Get-CimInstance Win32_Process -Filter ('ProcessId = ' + ${n}); if ($null -eq $p) { [Console]::Out.Write('{"dead":true}') } else { [Console]::Out.Write((@{ dead = $false; name = [string]$p.Name; cmd = [string]$p.CommandLine } | ConvertTo-Json -Compress)) }`;
+      const raw = execFileSync(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-Command', psCmd],
+        { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }
+      ).trim();
+      if (!raw) {
+        return isPidAlive(n) ? { status: 'unknown', reason: 'win32-empty-output' } : { status: 'dead' };
+      }
+      const parsed = JSON.parse(raw);
+      if (parsed.dead || !isPidAlive(n)) return { status: 'dead' };
+      const procName = String(parsed.name || '').trim();
+      if (procName && !/^(node|electron|antigravity)(\.exe)?$/i.test(procName)) {
+        return { status: 'mismatch', reason: 'win32-name-mismatch', cmdLine: String(parsed.cmd || '') };
+      }
+      const cmdLine = String(parsed.cmd || '').trim();
+      if (!cmdLine) return { status: 'unknown', reason: 'win32-empty-cmdline' };
+      return { status: 'inspected', cmdLine };
+    } catch {
+      return isPidAlive(n) ? { status: 'unknown', reason: 'win32-probe-failed' } : { status: 'dead' };
+    }
+  }
+
+  let cmdLine = '';
+  if (process.platform === 'linux') {
+    try {
+      cmdLine = readFileSync(`/proc/${n}/cmdline`).toString('utf8').replace(/\0+/g, ' ').trim();
+    } catch {}
+  }
+  if (!cmdLine) {
+    try {
+      // -ww prevents macOS `ps` from truncating long paths at 80 columns
+      cmdLine = execFileSync(
+        'ps',
+        ['-ww', '-p', String(n), '-o', 'args='],
+        { env: { ...process.env, LC_ALL: 'C' }, encoding: 'utf8', timeout: 1500, stdio: ['ignore', 'pipe', 'ignore'] }
+      ).trim();
+    } catch {
+      return isPidAlive(n) ? { status: 'unknown', reason: 'ps-unavailable' } : { status: 'dead' };
+    }
+  }
+  if (!cmdLine) {
+    return isPidAlive(n) ? { status: 'unknown', reason: 'ps-empty-output' } : { status: 'dead' };
+  }
+  return { status: 'inspected', cmdLine };
+}
+
+export function verifyDaemonProcessIdentity(stateObj) {
+  const n = Number(stateObj?.pid);
+  if (!Number.isInteger(n) || n <= 1) return { status: 'dead' };
+  if (n === process.pid && !process.argv.includes('--daemon')) {
+    return { status: 'mismatch', reason: 'self-non-daemon' };
+  }
+  try {
+    process.kill(n, 0);
+  } catch (err) {
+    if (err?.code === 'EPERM') return { status: 'mismatch', reason: 'eperm' };
+    return { status: 'dead' };
+  }
+  if (process.env.AGY_TEST_PID_IDENTITY_MODE === 'unknown') {
+    return { status: 'unknown', reason: 'test-forced-unknown' };
+  }
+
+  const probe = queryProcessIdentity(n);
+  if (probe.status !== 'inspected') return probe;
+
+  const norm = probe.cmdLine.replace(/\\/g, '/').trim();
+  const hasEntry = norm.includes('sidecars/dashboard/float_window.mjs');
+  const hasDaemonFlag = /(?:^|\s)--daemon(?:\s|$)/.test(norm);
+  const isInlineEval = /(?:^|\s)(?:-e|--eval|--print|-p)(?:=|\s|$)/.test(norm);
+  if (hasEntry && hasDaemonFlag && !isInlineEval) {
+    return { status: 'verified', cmdLine: probe.cmdLine };
+  }
+  return { status: 'mismatch', reason: 'cmdline-mismatch', cmdLine: probe.cmdLine };
 }
 
 function writeJsonFileAtomic(filePath, data) {
@@ -133,27 +213,12 @@ function writeJsonFileAtomic(filePath, data) {
   renameSync(tmp, filePath);
 }
 
-function readFloatState() {
-  const p = getStateFilePath();
-  if (!existsSync(p)) return null;
-  try {
-    const obj = JSON.parse(readFileSync(p, 'utf-8'));
-    if (obj?.pid && isPidAlive(obj.pid)) return obj;
-  } catch {}
-  try { rmSync(p, { force: true }); } catch {}
-  return null;
-}
-
-function writeFloatState(data) {
-  writeJsonFileAtomic(getStateFilePath(), data);
-}
-
-function clearFloatStateIfOwned() {
+function clearStateIfPidMatches(pid) {
   const p = getStateFilePath();
   if (!existsSync(p)) return;
   try {
     const obj = JSON.parse(readFileSync(p, 'utf-8'));
-    if (!obj?.pid || obj.pid === process.pid) {
+    if (!obj?.pid || Number(obj.pid) === Number(pid)) {
       rmSync(p, { force: true });
     }
   } catch {
@@ -161,17 +226,79 @@ function clearFloatStateIfOwned() {
   }
 }
 
-async function terminateProcessAndWait(pid, timeoutMs = 900) {
-  if (!pid || !isPidAlive(pid)) return;
-  try { process.kill(pid, 'SIGTERM'); } catch {}
+function inspectFloatState() {
+  const p = getStateFilePath();
+  if (!existsSync(p)) {
+    return { state: null, rawState: null, identity: { status: 'dead' } };
+  }
+  let obj = null;
+  try {
+    obj = JSON.parse(readFileSync(p, 'utf-8'));
+  } catch {
+    try { rmSync(p, { force: true }); } catch {}
+    return { state: null, rawState: null, identity: { status: 'dead' } };
+  }
+  if (!obj?.pid) {
+    try { rmSync(p, { force: true }); } catch {}
+    return { state: null, rawState: null, identity: { status: 'dead' } };
+  }
+  const identity = verifyDaemonProcessIdentity(obj);
+  if (identity.status === 'verified') {
+    return { state: obj, rawState: obj, identity };
+  }
+  if (identity.status === 'dead' || identity.status === 'mismatch') {
+    try { rmSync(p, { force: true }); } catch {}
+  }
+  return { state: null, rawState: obj, identity };
+}
+
+function readFloatState() {
+  return inspectFloatState().state;
+}
+
+function writeFloatState(data) {
+  writeJsonFileAtomic(getStateFilePath(), data);
+}
+
+function clearFloatStateIfOwned() {
+  clearStateIfPidMatches(process.pid);
+}
+
+async function terminateProcessAndWait(pid, optionsOrTimeout = 900) {
+  const opts = typeof optionsOrTimeout === 'number'
+    ? { timeoutMs: optionsOrTimeout }
+    : (optionsOrTimeout || {});
+  const timeoutMs = Number(opts.timeoutMs ?? 900);
+  const targetState = opts.stateObj || { pid };
+
+  const initial = verifyDaemonProcessIdentity(targetState);
+  if (initial.status === 'dead' || initial.status === 'mismatch') {
+    clearStateIfPidMatches(pid);
+    return { terminated: false, skippedSignal: initial.status === 'mismatch', status: initial.status };
+  }
+  if (initial.status === 'unknown') {
+    return { terminated: false, skippedSignal: true, status: 'unknown' };
+  }
+
+  try { process.kill(Number(pid), 'SIGTERM'); } catch {}
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline && isPidAlive(pid)) {
     await new Promise((r) => setTimeout(r, 35));
   }
   if (isPidAlive(pid)) {
-    try { process.kill(pid, 'SIGKILL'); } catch {}
+    const beforeKill = verifyDaemonProcessIdentity(targetState);
+    if (beforeKill.status === 'verified') {
+      try { process.kill(Number(pid), 'SIGKILL'); } catch {}
+      const killDeadline = Date.now() + 200;
+      while (Date.now() < killDeadline && isPidAlive(pid)) {
+        await new Promise((r) => setTimeout(r, 15));
+      }
+    } else if (beforeKill.status === 'unknown') {
+      return { terminated: false, skippedSignal: true, status: 'unknown' };
+    }
   }
-  try { rmSync(getStateFilePath(), { force: true }); } catch {}
+  clearStateIfPidMatches(pid);
+  return { terminated: true, skippedSignal: false, status: 'verified' };
 }
 
 export function getFloatWindowStatus(platform = process.platform) {
@@ -237,6 +364,9 @@ export function getFloatWindowStatus(platform = process.platform) {
 }
 
 async function sendDaemonCommand(current, cmdObj) {
+  if (verifyDaemonProcessIdentity(current).status !== 'verified') {
+    return getFloatWindowStatus();
+  }
   const seq = Math.max(Number(current.cmdSeq || 0) + 1, Date.now());
   writeJsonFileAtomic(getCmdFilePath(), { seq, ...cmdObj });
   try {
@@ -404,6 +534,55 @@ export async function controlFloatWindow(options = {}, deps = {}) {
     };
   }
 
+  if (action === 'quit') {
+    const inspected = inspectFloatState();
+    if (inspected.identity.status === 'unknown') {
+      const pidLabel = inspected.rawState?.pid ?? 'unknown';
+      const warning = `[WARN] [context-viewer] 无法核实后台进程身份（PID ${pidLabel}），已跳过发送退出信号；请手动确认进程状态。`;
+      return {
+        ...getFloatWindowStatus(platform),
+        ok: true,
+        closed: false,
+        terminated: false,
+        skippedSignal: true,
+        unverifiedPid: inspected.rawState?.pid ?? null,
+        warning,
+        message: warning
+      };
+    }
+    if (inspected.identity.status === 'verified' && inspected.state?.pid) {
+      const termRes = await terminateFn(inspected.state.pid, { stateObj: inspected.state });
+      if (termRes?.skippedSignal && termRes?.status === 'unknown') {
+        const warning = `[WARN] [context-viewer] 无法核实后台进程身份（PID ${inspected.state.pid}），已跳过发送退出信号；请手动确认进程状态。`;
+        return {
+          ...getFloatWindowStatus(platform),
+          ok: true,
+          closed: false,
+          terminated: false,
+          skippedSignal: true,
+          unverifiedPid: inspected.state.pid,
+          warning,
+          message: warning
+        };
+      }
+      return {
+        ...getFloatWindowStatus(platform),
+        closed: true,
+        terminated: true,
+        skippedSignal: false,
+        message: '已彻底退出悬浮看板与顶部菜单栏守护进程'
+      };
+    }
+    return {
+      ...getFloatWindowStatus(platform),
+      closed: true,
+      terminated: false,
+      skippedSignal: inspected.identity.status === 'mismatch',
+      staleStateCleaned: inspected.identity.status === 'mismatch',
+      message: '已彻底退出悬浮看板与顶部菜单栏守护进程'
+    };
+  }
+
   let current = readFloatState();
   const callerLsAddr = process.env.ANTIGRAVITY_LS_ADDRESS || '';
   let upgradedFrom = null;
@@ -412,7 +591,6 @@ export async function controlFloatWindow(options = {}, deps = {}) {
   // OR refresh daemon when Antigravity restarts with a new LS port
   if (
     current &&
-    action !== 'quit' &&
     (!isDaemonStateCurrent(current) || (callerLsAddr && current.lsAddress !== callerLsAddr))
   ) {
     const prevVisible = Boolean(current.windowVisible ?? current.running);
@@ -422,7 +600,7 @@ export async function controlFloatWindow(options = {}, deps = {}) {
     const prevAuxShortcut = Boolean(current.auxShortcutEnabled ?? getAuxShortcutConfig(platform).enabled);
     const prevMode = MENUBAR_MODES.includes(current.menubarMode) ? current.menubarMode : getMenubarMode();
     upgradedFrom = { prevVisible, prevPinned, prevMenubar, prevShortcut, prevAuxShortcut, prevMode };
-    await terminateFn(current.pid);
+    await terminateFn(current.pid, { stateObj: current });
     current = null;
     if ((action === 'ensure-menubar' || action === 'ensure-daemon') && prevVisible) {
       const restarted = await spawnFn({
@@ -442,17 +620,6 @@ export async function controlFloatWindow(options = {}, deps = {}) {
       });
       return restarted || getFloatWindowStatus(platform);
     }
-  }
-
-  if (action === 'quit') {
-    if (current?.pid) {
-      await terminateFn(current.pid);
-    }
-    return {
-      ...getFloatWindowStatus(platform),
-      closed: true,
-      message: '已彻底退出悬浮看板与顶部菜单栏守护进程'
-    };
   }
 
   if (action === 'refresh-session') {
@@ -772,7 +939,7 @@ export async function controlFloatWindow(options = {}, deps = {}) {
         message: `已收回右侧小窗（${reopenHint}）`
       };
     }
-    await terminateFn(current.pid);
+    await terminateFn(current.pid, { stateObj: current });
     return {
       ...getFloatWindowStatus(platform),
       closed: true,

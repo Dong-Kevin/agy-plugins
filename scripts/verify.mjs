@@ -15,6 +15,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   utimesSync,
   writeFileSync
 } from 'node:fs';
@@ -800,6 +801,201 @@ async function verifyCrossPluginAuxTriggerLock() {
   }
 }
 
+async function verifyDaemonQuitAndUpgradePidSafety() {
+  const workDir = mkdtempSync(join(tmpdir(), 'agy-plugins-pid-safety-'));
+  const isoBinDir = join(workDir, 'iso-bin');
+  mkdirSync(isoBinDir, { recursive: true });
+  symlinkSync(process.execPath, join(isoBinDir, 'node'));
+
+  const spawnedChildren = [];
+  const trackProc = (child) => {
+    spawnedChildren.push(child);
+    return child;
+  };
+  const isChildAlive = (child) => {
+    if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return false;
+    try {
+      process.kill(child.pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const runAsync = (cmd, args, { env, stdinText = '' } = {}) =>
+    new Promise((resolvePromise, rejectPromise) => {
+      const child = spawn(cmd, args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (d) => { stdout += d.toString('utf8'); });
+      child.stderr.on('data', (d) => { stderr += d.toString('utf8'); });
+      child.on('error', rejectPromise);
+      child.on('exit', (status, signal) => resolvePromise({ status, signal, stdout, stderr }));
+      if (stdinText) child.stdin.write(stdinText);
+      child.stdin.end();
+    });
+
+  const baseIsoEnv = (fakeHome, extraEnv = {}) => {
+    const env = {
+      ...process.env,
+      HOME: fakeHome,
+      PATH: `${isoBinDir}:/usr/bin:/bin:/usr/sbin:/sbin`,
+      AGY_FINDER_DISABLE_DRAWER: '1',
+      AGY_CONTEXT_VIEWER_DISABLE_DAEMON: '1',
+      ...extraEnv
+    };
+    delete env.AGY_PLUGINS_DIR;
+    delete env.ANTIGRAVITY_PLUGINS_DIR;
+    delete env.AGY_BIN_DIR;
+    delete env.ANTIGRAVITY_BIN_DIR;
+    delete env.AG_DIR;
+    delete env.AGY_FINDER_DATA_DIR;
+    delete env.ANTIGRAVITY_EXECUTABLE_DATA_DIR;
+    delete env.AGY_AUX_TRIGGER_PATH;
+    delete env.AGY_TEST_PID_IDENTITY_MODE;
+    if (extraEnv.AGY_TEST_PID_IDENTITY_MODE !== undefined) {
+      env.AGY_TEST_PID_IDENTITY_MODE = extraEnv.AGY_TEST_PID_IDENTITY_MODE;
+    }
+    return env;
+  };
+
+  const deadPid = spawnSync(process.execPath, ['-e', '']).pid;
+  const pluginSpecs = [
+    {
+      name: 'agy-finder',
+      dirName: 'agy-finder',
+      expectedVer: JSON.parse(readFileSync(join(ROOT, 'plugins', 'agy-finder', 'plugin.json'), 'utf-8')).version,
+      cliRel: join('sidecars', 'tree', 'cli.mjs'),
+      daemonRel: join('sidecars', 'tree', 'drawer.mjs'),
+      quitArgs: ['quit'],
+      getStatePath: (fakeHome) => join(fakeHome, '.gemini', 'antigravity', 'sidecar_data', 'agy-finder', 'tree', 'data', 'drawer_state.json'),
+      installerPath: join(ROOT, 'plugins', 'agy-finder', 'install.sh')
+    },
+    {
+      name: 'context-viewer',
+      dirName: 'context-viewer',
+      expectedVer: JSON.parse(readFileSync(join(ROOT, 'plugins', 'agy-context-viewer', 'plugin.json'), 'utf-8')).version,
+      cliRel: join('sidecars', 'dashboard', 'cli.mjs'),
+      daemonRel: join('sidecars', 'dashboard', 'float_window.mjs'),
+      quitArgs: ['float', 'quit'],
+      getStatePath: (fakeHome) => join(fakeHome, '.gemini', 'antigravity', 'sidecar_data', 'context-viewer', 'dashboard', 'data', 'float_window_state.json'),
+      installerPath: join(ROOT, 'plugins', 'agy-context-viewer', 'install.sh')
+    }
+  ];
+
+  try {
+    const sentinel = trackProc(spawn(process.execPath, ['-e', 'setInterval(() => {}, 10000)'], { stdio: 'ignore' }));
+    assert.ok(isChildAlive(sentinel), 'Unrelated sentinel process must be running');
+
+    for (const spec of pluginSpecs) {
+      const fakeHome = join(workDir, `home-${spec.name}`);
+      const targetCli = join(fakeHome, '.gemini', 'config', 'plugins', spec.dirName, spec.cliRel);
+      const statePath = spec.getStatePath(fakeHome);
+      const env = baseIsoEnv(fakeHome);
+      mkdirSync(dirname(statePath), { recursive: true });
+
+      const seedPoisonTargetCli = (markerPath) => {
+        mkdirSync(dirname(targetCli), { recursive: true });
+        writeFileSync(
+          targetCli,
+          [
+            "import { existsSync, readFileSync, writeFileSync } from 'node:fs';",
+            `writeFileSync(${JSON.stringify(markerPath)}, 'old-cli-invoked');`,
+            `if (existsSync(${JSON.stringify(statePath)})) {`,
+            `  try { const st = JSON.parse(readFileSync(${JSON.stringify(statePath)}, 'utf8')); if (st.pid) process.kill(st.pid, 'SIGTERM'); } catch {}`,
+            '}'
+          ].join('\n')
+        );
+      };
+
+      // Case 1: Missing state file & dead-PID state file on new CLI quit
+      const srcCli = join(ROOT, 'plugins', spec.name === 'agy-finder' ? 'agy-finder' : 'agy-context-viewer', spec.cliRel);
+      const quitEmpty = await runAsync(process.execPath, [srcCli, ...spec.quitArgs, '--json'], { env });
+      assert.equal(quitEmpty.status, 0, `${spec.name} quit without state must succeed`);
+      assert.equal(JSON.parse(quitEmpty.stdout).closed, true);
+
+      writeFileSync(statePath, JSON.stringify({ pid: deadPid, daemonVersion: 1, cmdSeq: 1 }));
+      const quitDead = await runAsync(process.execPath, [srcCli, ...spec.quitArgs, '--json'], { env });
+      assert.equal(quitDead.status, 0, `${spec.name} quit with dead PID must succeed`);
+      assert.ok(!existsSync(statePath), `${spec.name} quit must clean dead-PID state file`);
+
+      // Case 2: Reused PID pointing to live unrelated sentinel -> new CLI quit must NOT signal sentinel
+      writeFileSync(statePath, JSON.stringify({ pid: sentinel.pid, daemonVersion: 1, daemonBuildId: 'legacy-build', cmdSeq: 1 }));
+      const quitReused = await runAsync(process.execPath, [srcCli, ...spec.quitArgs, '--json'], { env });
+      assert.equal(quitReused.status, 0, `${spec.name} quit on reused PID must exit 0`);
+      const quitReusedJson = JSON.parse(quitReused.stdout);
+      assert.equal(quitReusedJson.terminated, false, `${spec.name} must not report terminating reused PID`);
+      assert.equal(quitReusedJson.staleStateCleaned, true, `${spec.name} must clean reused-PID stale state`);
+      assert.ok(isChildAlive(sentinel), `${spec.name} CLI quit must leave unrelated sentinel PID ${sentinel.pid} alive`);
+      assert.ok(!existsSync(statePath), `${spec.name} must remove mismatched state file after reused-PID check`);
+
+      // Case 3a: Upgrade from old <= 0.2.5 / <= 1.7.5 blind-kill CLI in TARGET_DIR must invoke STAGE_DIR CLI and leave sentinel alive
+      const upgradeMarker = join(fakeHome, 'old-cli-upgrade.marker');
+      seedPoisonTargetCli(upgradeMarker);
+      writeFileSync(statePath, JSON.stringify({ pid: sentinel.pid, daemonVersion: 1, daemonBuildId: 'old-025-175', cmdSeq: 1 }));
+      const upgRes = await runAsync('bash', [spec.installerPath], { env });
+      assert.equal(upgRes.status, 0, `${spec.name} install.sh upgrade failed: ${upgRes.stderr}`);
+      assert.ok(!existsSync(upgradeMarker), `${spec.name} upgrade must invoke STAGE_DIR cli.mjs, NEVER old TARGET_DIR cli.mjs`);
+      assert.ok(isChildAlive(sentinel), `${spec.name} upgrade with reused PID must leave unrelated sentinel alive`);
+      assert.ok(!existsSync(statePath), `${spec.name} upgrade must remove mismatched stale state file`);
+      const installedVer = JSON.parse(readFileSync(join(fakeHome, '.gemini', 'config', 'plugins', spec.dirName, 'plugin.json'), 'utf-8')).version;
+      assert.equal(installedVer, spec.expectedVer, `${spec.name} upgraded manifest version mismatch`);
+
+      // Case 3b: Standalone piped uninstall (empty BASH_SOURCE[0]) must verify PID identity before invoking TARGET_DIR cli.mjs
+      const uninstMarker = join(fakeHome, 'old-cli-uninstall.marker');
+      seedPoisonTargetCli(uninstMarker);
+      writeFileSync(statePath, JSON.stringify({ pid: sentinel.pid, daemonVersion: 1, cmdSeq: 1 }));
+      const installerSrc = readFileSync(spec.installerPath, 'utf-8');
+      const uninstRes = await runAsync('bash', ['-s', '--', '--uninstall'], { env, stdinText: installerSrc });
+      assert.equal(uninstRes.status, 0, `${spec.name} standalone --uninstall failed: ${uninstRes.stderr}`);
+      assert.ok(!existsSync(uninstMarker), `${spec.name} standalone --uninstall must block poison old CLI on mismatched PID`);
+      assert.ok(isChildAlive(sentinel), `${spec.name} standalone --uninstall must leave unrelated sentinel alive`);
+      assert.ok(!existsSync(statePath), `${spec.name} standalone --uninstall must clean mismatched state file`);
+
+      // Case 4: Legitimate older-version daemon IS recognized and cleanly terminated by install.sh upgrade
+      const legacyDaemonEntry = join(fakeHome, 'legacy-runtime', spec.daemonRel);
+      mkdirSync(dirname(legacyDaemonEntry), { recursive: true });
+      writeFileSync(legacyDaemonEntry, 'setInterval(() => {}, 10000);\n');
+      const oldDaemon = trackProc(spawn(process.execPath, [legacyDaemonEntry, '--daemon'], { stdio: 'ignore' }));
+      assert.ok(isChildAlive(oldDaemon), `${spec.name} mock legacy daemon must start alive`);
+      mkdirSync(dirname(targetCli), { recursive: true });
+      writeFileSync(targetCli, '// placeholder old cli\n');
+      writeFileSync(statePath, JSON.stringify({
+        pid: oldDaemon.pid,
+        daemonVersion: 1,
+        daemonBuildId: 'legacy-older-build',
+        daemonRunning: true,
+        cmdSeq: 1
+      }));
+      const upgRealRes = await runAsync('bash', [spec.installerPath], { env });
+      assert.equal(upgRealRes.status, 0, `${spec.name} upgrade stopping legacy daemon failed: ${upgRealRes.stderr}`);
+      assert.ok(!isChildAlive(oldDaemon), `${spec.name} upgrade must cleanly terminate legitimate older daemon (regardless of daemonBuildId)`);
+      assert.ok(!existsSync(statePath), `${spec.name} upgrade must clear stopped legacy daemon state file`);
+
+      // Case 5: Unverifiable PID identity (unknown probe failure) skips signals, preserves state file & emits [WARN]
+      const unknownEnv = baseIsoEnv(fakeHome, { AGY_TEST_PID_IDENTITY_MODE: 'unknown' });
+      writeFileSync(statePath, JSON.stringify({ pid: sentinel.pid, daemonVersion: 1, cmdSeq: 1 }));
+      const quitUnknown = await runAsync(process.execPath, [srcCli, ...spec.quitArgs], { env: unknownEnv });
+      assert.equal(quitUnknown.status, 0, `${spec.name} quit on unknown identity must exit 0`);
+      assert.ok(quitUnknown.stderr.includes('[WARN]'), `${spec.name} quit on unknown identity must print [WARN] to stderr`);
+      assert.ok(isChildAlive(sentinel), `${spec.name} quit on unknown identity must not signal sentinel`);
+      assert.ok(existsSync(statePath), `${spec.name} quit on unknown identity must preserve state file`);
+
+      const upgUnknown = await runAsync('bash', [spec.installerPath], { env: unknownEnv });
+      assert.equal(upgUnknown.status, 0, `${spec.name} install.sh on unknown identity must complete cleanly`);
+      assert.ok(upgUnknown.stderr.includes('[WARN]'), `${spec.name} install.sh must surface pre-upgrade [WARN] when identity is unknown`);
+      assert.ok(isChildAlive(sentinel), `${spec.name} install.sh on unknown identity must leave sentinel alive`);
+      assert.ok(existsSync(statePath), `${spec.name} install.sh on unknown identity must preserve state file`);
+    }
+
+    pass('V1 daemon PID identity verification, reused-PID non-termination, STAGE_DIR upgrade boundary, standalone uninstall guard & unknown [WARN]');
+  } finally {
+    for (const c of spawnedChildren) {
+      try { c.kill('SIGKILL'); } catch {}
+    }
+    rmSync(workDir, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   const allFiles = walkFiles(ROOT);
   verifyRootStructureAndSyntax(allFiles);
@@ -808,6 +1004,7 @@ async function main() {
   verifyIndividualPlugins(pluginDirs);
   verifyRootInstaller();
   await verifyCrossPluginAuxTriggerLock();
+  await verifyDaemonQuitAndUpgradePidSafety();
   console.log('\nAll agy-plugins repository checks passed.');
 }
 

@@ -427,9 +427,89 @@ function isPidAlive(pid) {
   try {
     process.kill(n, 0);
     return true;
-  } catch {
-    return false;
+  } catch (err) {
+    return err?.code === 'EPERM';
   }
+}
+
+function queryProcessIdentity(pid) {
+  const n = Number(pid);
+  if (process.platform === 'win32') {
+    try {
+      const psCmd = `$ErrorActionPreference='Stop'; $p = Get-CimInstance Win32_Process -Filter ('ProcessId = ' + ${n}); if ($null -eq $p) { [Console]::Out.Write('{"dead":true}') } else { [Console]::Out.Write((@{ dead = $false; name = [string]$p.Name; cmd = [string]$p.CommandLine } | ConvertTo-Json -Compress)) }`;
+      const raw = execFileSync(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-Command', psCmd],
+        { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }
+      ).trim();
+      if (!raw) {
+        return isPidAlive(n) ? { status: 'unknown', reason: 'win32-empty-output' } : { status: 'dead' };
+      }
+      const parsed = JSON.parse(raw);
+      if (parsed.dead || !isPidAlive(n)) return { status: 'dead' };
+      const procName = String(parsed.name || '').trim();
+      if (procName && !/^(node|electron|antigravity)(\.exe)?$/i.test(procName)) {
+        return { status: 'mismatch', reason: 'win32-name-mismatch', cmdLine: String(parsed.cmd || '') };
+      }
+      const cmdLine = String(parsed.cmd || '').trim();
+      if (!cmdLine) return { status: 'unknown', reason: 'win32-empty-cmdline' };
+      return { status: 'inspected', cmdLine };
+    } catch {
+      return isPidAlive(n) ? { status: 'unknown', reason: 'win32-probe-failed' } : { status: 'dead' };
+    }
+  }
+
+  let cmdLine = '';
+  if (process.platform === 'linux') {
+    try {
+      cmdLine = readFileSync(`/proc/${n}/cmdline`).toString('utf8').replace(/\0+/g, ' ').trim();
+    } catch {}
+  }
+  if (!cmdLine) {
+    try {
+      // -ww prevents macOS `ps` from truncating long paths at 80 columns
+      cmdLine = execFileSync(
+        'ps',
+        ['-ww', '-p', String(n), '-o', 'args='],
+        { env: { ...process.env, LC_ALL: 'C' }, encoding: 'utf8', timeout: 1500, stdio: ['ignore', 'pipe', 'ignore'] }
+      ).trim();
+    } catch {
+      return isPidAlive(n) ? { status: 'unknown', reason: 'ps-unavailable' } : { status: 'dead' };
+    }
+  }
+  if (!cmdLine) {
+    return isPidAlive(n) ? { status: 'unknown', reason: 'ps-empty-output' } : { status: 'dead' };
+  }
+  return { status: 'inspected', cmdLine };
+}
+
+export function verifyDaemonProcessIdentity(stateObj) {
+  const n = Number(stateObj?.pid);
+  if (!Number.isInteger(n) || n <= 1) return { status: 'dead' };
+  if (n === process.pid && !process.argv.includes('--daemon')) {
+    return { status: 'mismatch', reason: 'self-non-daemon' };
+  }
+  try {
+    process.kill(n, 0);
+  } catch (err) {
+    if (err?.code === 'EPERM') return { status: 'mismatch', reason: 'eperm' };
+    return { status: 'dead' };
+  }
+  if (process.env.AGY_TEST_PID_IDENTITY_MODE === 'unknown') {
+    return { status: 'unknown', reason: 'test-forced-unknown' };
+  }
+
+  const probe = queryProcessIdentity(n);
+  if (probe.status !== 'inspected') return probe;
+
+  const norm = probe.cmdLine.replace(/\\/g, '/').trim();
+  const hasEntry = norm.includes('sidecars/tree/drawer.mjs');
+  const hasDaemonFlag = /(?:^|\s)--daemon(?:\s|$)/.test(norm);
+  const isInlineEval = /(?:^|\s)(?:-e|--eval|--print|-p)(?:=|\s|$)/.test(norm);
+  if (hasEntry && hasDaemonFlag && !isInlineEval) {
+    return { status: 'verified', cmdLine: probe.cmdLine };
+  }
+  return { status: 'mismatch', reason: 'cmdline-mismatch', cmdLine: probe.cmdLine };
 }
 
 export function getDrawerShortcutConfig(platform = process.platform) {
@@ -1365,12 +1445,40 @@ function isDaemonStateCurrent(st) {
   return Boolean(st && st.daemonVersion === DAEMON_VERSION && st.daemonBuildId === DAEMON_BUILD_ID);
 }
 
-function readDrawerState() {
+function clearStateIfPidMatches(pid) {
   const p = getStateFilePath();
   const obj = readJsonSafe(p);
-  if (obj?.pid && isPidAlive(obj.pid)) return obj;
-  try { rmSync(p, { force: true }); } catch {}
-  return null;
+  if (!obj) {
+    try { rmSync(p, { force: true }); } catch {}
+    return;
+  }
+  if (!obj.pid || Number(obj.pid) === Number(pid)) {
+    try { rmSync(p, { force: true }); } catch {}
+  }
+}
+
+function inspectDrawerState() {
+  const p = getStateFilePath();
+  if (!existsSync(p)) {
+    return { state: null, rawState: null, identity: { status: 'dead' } };
+  }
+  const obj = readJsonSafe(p);
+  if (!obj?.pid) {
+    try { rmSync(p, { force: true }); } catch {}
+    return { state: null, rawState: null, identity: { status: 'dead' } };
+  }
+  const identity = verifyDaemonProcessIdentity(obj);
+  if (identity.status === 'verified') {
+    return { state: obj, rawState: obj, identity };
+  }
+  if (identity.status === 'dead' || identity.status === 'mismatch') {
+    try { rmSync(p, { force: true }); } catch {}
+  }
+  return { state: null, rawState: obj, identity };
+}
+
+function readDrawerState() {
+  return inspectDrawerState().state;
 }
 
 function writeDrawerState(data) {
@@ -1378,24 +1486,44 @@ function writeDrawerState(data) {
 }
 
 function clearDrawerStateIfOwned() {
-  const p = getStateFilePath();
-  const obj = readJsonSafe(p);
-  if (!obj?.pid || obj.pid === process.pid) {
-    try { rmSync(p, { force: true }); } catch {}
-  }
+  clearStateIfPidMatches(process.pid);
 }
 
-async function terminateProcessAndWait(pid, timeoutMs = 900) {
-  if (!pid || !isPidAlive(pid)) return;
-  try { process.kill(pid, 'SIGTERM'); } catch {}
+async function terminateProcessAndWait(pid, optionsOrTimeout = 900) {
+  const opts = typeof optionsOrTimeout === 'number'
+    ? { timeoutMs: optionsOrTimeout }
+    : (optionsOrTimeout || {});
+  const timeoutMs = Number(opts.timeoutMs ?? 900);
+  const targetState = opts.stateObj || { pid };
+
+  const initial = verifyDaemonProcessIdentity(targetState);
+  if (initial.status === 'dead' || initial.status === 'mismatch') {
+    clearStateIfPidMatches(pid);
+    return { terminated: false, skippedSignal: initial.status === 'mismatch', status: initial.status };
+  }
+  if (initial.status === 'unknown') {
+    return { terminated: false, skippedSignal: true, status: 'unknown' };
+  }
+
+  try { process.kill(Number(pid), 'SIGTERM'); } catch {}
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline && isPidAlive(pid)) {
     await new Promise((r) => setTimeout(r, 35));
   }
   if (isPidAlive(pid)) {
-    try { process.kill(pid, 'SIGKILL'); } catch {}
+    const beforeKill = verifyDaemonProcessIdentity(targetState);
+    if (beforeKill.status === 'verified') {
+      try { process.kill(Number(pid), 'SIGKILL'); } catch {}
+      const killDeadline = Date.now() + 200;
+      while (Date.now() < killDeadline && isPidAlive(pid)) {
+        await new Promise((r) => setTimeout(r, 15));
+      }
+    } else if (beforeKill.status === 'unknown') {
+      return { terminated: false, skippedSignal: true, status: 'unknown' };
+    }
   }
-  try { rmSync(getStateFilePath(), { force: true }); } catch {}
+  clearStateIfPidMatches(pid);
+  return { terminated: true, skippedSignal: false, status: 'verified' };
 }
 
 export function getDrawerStatus(platform = process.platform) {
@@ -1455,6 +1583,10 @@ async function sendDaemonCommand(current, cmdObj) {
         return getDrawerStatus();
       }
     } catch {}
+  }
+
+  if (verifyDaemonProcessIdentity(current).status !== 'verified') {
+    return getDrawerStatus();
   }
 
   const seq = Math.max(Number(current.cmdSeq || 0) + 1, Date.now());
@@ -1703,13 +1835,13 @@ export async function controlDrawer(options = {}, deps = {}) {
 
     let current = readDrawerState();
     if (current && !isDaemonStateCurrent(current)) {
-      await terminateProcessAndWait(current.pid);
+      await terminateProcessAndWait(current.pid, { stateObj: current });
       current = null;
     }
 
     if (current) {
       if (!shouldStayResident && !current.windowVisible) {
-        await terminateProcessAndWait(current.pid);
+        await terminateProcessAndWait(current.pid, { stateObj: current });
       } else {
         await sendDaemonCommand(current, {
           cmd: isAux ? 'setAuxShortcut' : 'setDrawerShortcut',
@@ -1774,7 +1906,7 @@ export async function controlDrawer(options = {}, deps = {}) {
     const current = readDrawerState();
     if (current) {
       if (!shouldStayResident && !current.windowVisible) {
-        await terminateProcessAndWait(current.pid);
+        await terminateProcessAndWait(current.pid, { stateObj: current });
         return {
           ...getDrawerStatus(platform),
           hotkeyPreset: next.hotkeyPreset,
@@ -1826,25 +1958,66 @@ export async function controlDrawer(options = {}, deps = {}) {
     return { ...getDrawerStatus(platform), pinned: nextPinned };
   }
 
+  if (action === 'quit') {
+    const inspected = inspectDrawerState();
+    if (inspected.identity.status === 'unknown') {
+      const pidLabel = inspected.rawState?.pid ?? 'unknown';
+      const warning = `[WARN] [agy-finder] 无法核实后台进程身份（PID ${pidLabel}），已跳过发送退出信号；请手动确认进程状态。`;
+      return {
+        ...getDrawerStatus(platform),
+        ok: true,
+        closed: false,
+        terminated: false,
+        skippedSignal: true,
+        unverifiedPid: inspected.rawState?.pid ?? null,
+        warning,
+        message: warning
+      };
+    }
+    if (inspected.identity.status === 'verified' && inspected.state?.pid) {
+      if (inspected.state.controlPort && inspected.state.controlToken) {
+        await sendDaemonCommand(inspected.state, { cmd: 'close' });
+      }
+      const termRes = await terminateProcessAndWait(inspected.state.pid, { stateObj: inspected.state });
+      if (termRes?.skippedSignal && termRes?.status === 'unknown') {
+        const warning = `[WARN] [agy-finder] 无法核实后台进程身份（PID ${inspected.state.pid}），已跳过发送退出信号；请手动确认进程状态。`;
+        return {
+          ...getDrawerStatus(platform),
+          ok: true,
+          closed: false,
+          terminated: false,
+          skippedSignal: true,
+          unverifiedPid: inspected.state.pid,
+          warning,
+          message: warning
+        };
+      }
+      return {
+        ...getDrawerStatus(platform),
+        closed: true,
+        terminated: true,
+        skippedSignal: false,
+        message: '已退出目录树抽屉助手'
+      };
+    }
+    return {
+      ...getDrawerStatus(platform),
+      closed: true,
+      terminated: false,
+      skippedSignal: inspected.identity.status === 'mismatch',
+      staleStateCleaned: inspected.identity.status === 'mismatch',
+      message: '已退出目录树抽屉助手'
+    };
+  }
+
   if (disableDrawer) {
     return getDrawerStatus(platform);
   }
 
   let current = readDrawerState();
-  if (current && action !== 'quit' && !isDaemonStateCurrent(current)) {
-    await terminateProcessAndWait(current.pid);
+  if (current && !isDaemonStateCurrent(current)) {
+    await terminateProcessAndWait(current.pid, { stateObj: current });
     current = null;
-  }
-
-  if (action === 'quit') {
-    if (current?.pid) {
-      await terminateProcessAndWait(current.pid);
-    }
-    return {
-      ...getDrawerStatus(platform),
-      closed: true,
-      message: '已退出目录树抽屉助手'
-    };
   }
 
   if (action === 'ensure-hotkey') {
@@ -1896,7 +2069,7 @@ export async function controlDrawer(options = {}, deps = {}) {
     if (current.controlPort && current.controlToken) {
       await sendDaemonCommand(current, { cmd: 'close' });
     }
-    await terminateProcessAndWait(current.pid);
+    await terminateProcessAndWait(current.pid, { stateObj: current });
     return {
       ...getDrawerStatus(platform),
       closed: true,

@@ -35,9 +35,9 @@ const PLUGIN_ROOT = resolve(__dirname, '..', '..');
 const PLUGIN_DIR_ID = basename(PLUGIN_ROOT);
 const PLUGIN_VERSION = (() => {
   try {
-    return JSON.parse(readFileSync(join(PLUGIN_ROOT, 'plugin.json'), 'utf-8')).version || '1.7.5';
+    return JSON.parse(readFileSync(join(PLUGIN_ROOT, 'plugin.json'), 'utf-8')).version || '1.7.6';
   } catch {
-    return '1.7.5';
+    return '1.7.6';
   }
 })();
 
@@ -247,6 +247,10 @@ async function runFloatCommand(rawArgs) {
   if (!res.ok) {
     console.error(formatZh(`${c.red}✗${c.reset} ${res.error || '操作失败'}`));
     process.exitCode = 1;
+    return;
+  }
+  if (res.warning) {
+    console.error(formatZh(`${c.yellow}${res.warning}${c.reset}`));
     return;
   }
   if (action === 'status') {

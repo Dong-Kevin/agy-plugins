@@ -17,8 +17,66 @@ REPO_SLUG="${REPO:-Dong-Kevin/agy-plugins}"
 GIT_REF="${REF:-main}"
 
 if [[ "${1:-}" == "--uninstall" || "${1:-}" == "uninstall" ]]; then
-  if [[ -z "$ORIG_PLUGINS_DIR" ]] && [[ -f "$TARGET_DIR/sidecars/tree/cli.mjs" ]] && command -v node >/dev/null 2>&1; then
-    node "$TARGET_DIR/sidecars/tree/cli.mjs" quit >/dev/null 2>&1 || true
+  if [[ -z "$ORIG_PLUGINS_DIR" ]] && command -v node >/dev/null 2>&1; then
+    if [[ -n "${SCRIPT_DIR}" && -f "${SCRIPT_DIR}/sidecars/tree/cli.mjs" ]]; then
+      node "${SCRIPT_DIR}/sidecars/tree/cli.mjs" quit >/dev/null || true
+    elif [[ -f "$TARGET_DIR/sidecars/tree/cli.mjs" ]]; then
+      node -e '
+        const fs = require("node:fs");
+        const path = require("node:path");
+        const os = require("node:os");
+        const { execFileSync } = require("node:child_process");
+        const cliPath = process.argv[1];
+        const dataDir = process.env.AGY_FINDER_DATA_DIR || process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR || path.join(os.homedir(), ".gemini", "antigravity", "sidecar_data", "agy-finder", "tree", "data");
+        const statePath = path.join(dataDir, "drawer_state.json");
+        if (!fs.existsSync(statePath)) process.exit(0);
+        let obj = null;
+        try { obj = JSON.parse(fs.readFileSync(statePath, "utf8")); } catch {}
+        const pid = Number(obj && obj.pid);
+        if (!Number.isInteger(pid) || pid <= 1) {
+          try { fs.rmSync(statePath, { force: true }); } catch {}
+          process.exit(0);
+        }
+        const alive = (p) => { try { process.kill(p, 0); return true; } catch (e) { return e && e.code === "EPERM"; } };
+        try { process.kill(pid, 0); } catch (e) {
+          try { fs.rmSync(statePath, { force: true }); } catch {}
+          process.exit(0);
+        }
+        if (process.env.AGY_TEST_PID_IDENTITY_MODE === "unknown") {
+          console.error(`[WARN] [agy-finder] 无法核实后台进程身份（PID ${pid}），已跳过发送退出信号；请手动确认进程状态。`);
+          process.exit(0);
+        }
+        let cmdLine = "";
+        if (process.platform === "linux") {
+          try { cmdLine = fs.readFileSync(`/proc/${pid}/cmdline`).toString("utf8").replace(/\0+/g, " ").trim(); } catch {}
+        }
+        if (!cmdLine) {
+          try {
+            cmdLine = execFileSync("ps", ["-ww", "-p", String(pid), "-o", "args="], {
+              env: { ...process.env, LC_ALL: "C" },
+              encoding: "utf8",
+              timeout: 1500,
+              stdio: ["ignore", "pipe", "ignore"]
+            }).trim();
+          } catch {}
+        }
+        if (!cmdLine) {
+          if (!alive(pid)) {
+            try { fs.rmSync(statePath, { force: true }); } catch {}
+          } else {
+            console.error(`[WARN] [agy-finder] 无法核实后台进程身份（PID ${pid}），已跳过发送退出信号；请手动确认进程状态。`);
+          }
+          process.exit(0);
+        }
+        const norm = cmdLine.replace(/\\/g, "/");
+        const isDaemon = norm.includes("sidecars/tree/drawer.mjs") && /(?:^|\s)--daemon(?:\s|$)/.test(norm) && !/(?:^|\s)(?:-e|--eval|--print|-p)(?:=|\s|$)/.test(norm);
+        if (!isDaemon) {
+          try { fs.rmSync(statePath, { force: true }); } catch {}
+          process.exit(0);
+        }
+        try { execFileSync(process.execPath, [cliPath, "quit"], { stdio: ["ignore", "ignore", "inherit"] }); } catch {}
+      ' "$TARGET_DIR/sidecars/tree/cli.mjs" || true
+    fi
   fi
   if [[ -L "$BIN_DIR/agy-finder" ]] && ([[ -n "${AGY_BIN_DIR:-}${ANTIGRAVITY_BIN_DIR:-}" ]] || [[ -z "$ORIG_PLUGINS_DIR" ]]); then
     LINK_TARGET="$(readlink "$BIN_DIR/agy-finder" || true)"
@@ -92,8 +150,9 @@ for f in package.json main.mjs path_utils.mjs mentions.mjs drawer.mjs cli.mjs na
   cp "$SCRIPT_DIR/sidecars/tree/$f" "$STAGE_DIR/sidecars/tree/$f"
 done
 
-if [[ -z "$ORIG_PLUGINS_DIR" ]] && [[ -f "$TARGET_DIR/sidecars/tree/cli.mjs" ]]; then
-  node "$TARGET_DIR/sidecars/tree/cli.mjs" quit >/dev/null 2>&1 || true
+if [[ -z "$ORIG_PLUGINS_DIR" ]] && [[ -d "$TARGET_DIR" ]]; then
+  chmod +x "$STAGE_DIR/sidecars/tree/cli.mjs"
+  node "$STAGE_DIR/sidecars/tree/cli.mjs" quit >/dev/null || true
 fi
 
 mkdir -p "$TARGET_DIR/assets" "$TARGET_DIR/rules" "$TARGET_DIR/skills/agy-finder" "$TARGET_DIR/sidecars/tree"

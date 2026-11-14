@@ -2239,9 +2239,12 @@ async function main() {
         return false;
       }
     };
+    const mockDaemonScript = join(tmpVerifyRoot, 'sidecars', 'dashboard', 'float_window.mjs');
+    mkdirSync(dirname(mockDaemonScript), { recursive: true });
+    writeFileSync(mockDaemonScript, 'setInterval(() => {}, 10000);\n', 'utf-8');
     const dummyProcs = [];
     const spawnDummyProc = () => {
-      const p = spawn(process.execPath, ['-e', 'setInterval(() => {}, 10000)'], { stdio: 'ignore' });
+      const p = spawn(process.execPath, [mockDaemonScript, '--daemon'], { stdio: 'ignore' });
       dummyProcs.push(p);
       return p;
     };
@@ -2444,7 +2447,7 @@ async function main() {
     // Resident daemon lifecycle when menubar is OFF while shortcut is ON
     const scProcs = [];
     const spawnScDummy = () => {
-      const p = spawn(process.execPath, ['-e', 'setInterval(() => {}, 10000)'], { stdio: 'ignore' });
+      const p = spawn(process.execPath, [mockDaemonScript, '--daemon'], { stdio: 'ignore' });
       scProcs.push(p);
       return p;
     };

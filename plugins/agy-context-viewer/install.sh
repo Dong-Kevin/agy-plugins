@@ -21,14 +21,81 @@ CLI_WRAPPER="${BIN_DIR}/agy-context"
 REPO_SLUG="${REPO:-Dong-Kevin/agy-plugins}"
 GIT_REF="${REF:-main}"
 
+SCRIPT_SOURCE_DIR=""
+if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
+  CANDIDATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [[ -f "${CANDIDATE_DIR}/plugin.json" && -d "${CANDIDATE_DIR}/sidecars/dashboard" ]]; then
+    SCRIPT_SOURCE_DIR="${CANDIDATE_DIR}"
+  fi
+fi
+
 info()  { printf "\033[1;36m[context-viewer]\033[0m %s\n" "$*"; }
 ok()    { printf "\033[1;32m[context-viewer]\033[0m %s\n" "$*"; }
 warn()  { printf "\033[1;33m[context-viewer]\033[0m %s\n" "$*"; }
 err()   { printf "\033[1;31m[context-viewer]\033[0m %s\n" "$*" >&2; exit 1; }
 
 if [[ "${1:-}" == "--uninstall" || "${1:-}" == "uninstall" ]]; then
-  if [[ -z "${ORIG_PLUGINS_DIR}" && -f "${TARGET_DIR}/sidecars/dashboard/cli.mjs" ]]; then
-    node "${TARGET_DIR}/sidecars/dashboard/cli.mjs" float quit >/dev/null 2>&1 || true
+  if [[ -z "${ORIG_PLUGINS_DIR}" ]] && command -v node >/dev/null 2>&1; then
+    if [[ -n "${SCRIPT_SOURCE_DIR}" && -f "${SCRIPT_SOURCE_DIR}/sidecars/dashboard/cli.mjs" ]]; then
+      node "${SCRIPT_SOURCE_DIR}/sidecars/dashboard/cli.mjs" float quit >/dev/null || true
+    elif [[ -f "${TARGET_DIR}/sidecars/dashboard/cli.mjs" ]]; then
+      node -e '
+        const fs = require("node:fs");
+        const path = require("node:path");
+        const os = require("node:os");
+        const { execFileSync } = require("node:child_process");
+        const cliPath = process.argv[1];
+        const agDir = process.env.AG_DIR || path.join(os.homedir(), ".gemini", "antigravity");
+        const stateDir = process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR || path.join(agDir, "sidecar_data", "context-viewer", "dashboard", "data");
+        const statePath = path.join(stateDir, "float_window_state.json");
+        if (!fs.existsSync(statePath)) process.exit(0);
+        let obj = null;
+        try { obj = JSON.parse(fs.readFileSync(statePath, "utf8")); } catch {}
+        const pid = Number(obj && obj.pid);
+        if (!Number.isInteger(pid) || pid <= 1) {
+          try { fs.rmSync(statePath, { force: true }); } catch {}
+          process.exit(0);
+        }
+        const alive = (p) => { try { process.kill(p, 0); return true; } catch (e) { return e && e.code === "EPERM"; } };
+        try { process.kill(pid, 0); } catch (e) {
+          try { fs.rmSync(statePath, { force: true }); } catch {}
+          process.exit(0);
+        }
+        if (process.env.AGY_TEST_PID_IDENTITY_MODE === "unknown") {
+          console.error(`[WARN] [context-viewer] 无法核实后台进程身份（PID ${pid}），已跳过发送退出信号；请手动确认进程状态。`);
+          process.exit(0);
+        }
+        let cmdLine = "";
+        if (process.platform === "linux") {
+          try { cmdLine = fs.readFileSync(`/proc/${pid}/cmdline`).toString("utf8").replace(/\0+/g, " ").trim(); } catch {}
+        }
+        if (!cmdLine) {
+          try {
+            cmdLine = execFileSync("ps", ["-ww", "-p", String(pid), "-o", "args="], {
+              env: { ...process.env, LC_ALL: "C" },
+              encoding: "utf8",
+              timeout: 1500,
+              stdio: ["ignore", "pipe", "ignore"]
+            }).trim();
+          } catch {}
+        }
+        if (!cmdLine) {
+          if (!alive(pid)) {
+            try { fs.rmSync(statePath, { force: true }); } catch {}
+          } else {
+            console.error(`[WARN] [context-viewer] 无法核实后台进程身份（PID ${pid}），已跳过发送退出信号；请手动确认进程状态。`);
+          }
+          process.exit(0);
+        }
+        const norm = cmdLine.replace(/\\/g, "/");
+        const isDaemon = norm.includes("sidecars/dashboard/float_window.mjs") && /(?:^|\s)--daemon(?:\s|$)/.test(norm) && !/(?:^|\s)(?:-e|--eval|--print|-p)(?:=|\s|$)/.test(norm);
+        if (!isDaemon) {
+          try { fs.rmSync(statePath, { force: true }); } catch {}
+          process.exit(0);
+        }
+        try { execFileSync(process.execPath, [cliPath, "float", "quit"], { stdio: ["ignore", "ignore", "inherit"] }); } catch {}
+      ' "${TARGET_DIR}/sidecars/dashboard/cli.mjs" || true
+    fi
   fi
   if [[ -n "${ORIG_BIN_DIR}" || -z "${ORIG_PLUGINS_DIR}" ]] && [[ -L "${CLI_WRAPPER}" || -f "${CLI_WRAPPER}" ]]; then
     SHOULD_REMOVE_WRAPPER=false
@@ -63,14 +130,6 @@ if [[ "${NODE_MAJOR}" -lt 18 ]]; then
 fi
 
 # 2. Resolve source directory (local checkout / extracted zip OR remote GitHub tarball)
-SCRIPT_SOURCE_DIR=""
-if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
-  CANDIDATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  if [[ -f "${CANDIDATE_DIR}/plugin.json" && -d "${CANDIDATE_DIR}/sidecars/dashboard" ]]; then
-    SCRIPT_SOURCE_DIR="${CANDIDATE_DIR}"
-  fi
-fi
-
 TMP_WORK_DIR=""
 STAGE_DIR=""
 cleanup() {
@@ -124,8 +183,8 @@ for f in sidecar.json package.json main.mjs collector.mjs pricing.mjs float_wind
 done
 chmod +x "${STAGE_DIR}/sidecars/dashboard/cli.mjs" "${STAGE_DIR}/sidecars/dashboard/float_window.mjs" "${STAGE_DIR}/skills/context-viewer/scripts/status.mjs"
 
-if [[ -z "${ORIG_PLUGINS_DIR}" && -f "${TARGET_DIR}/sidecars/dashboard/cli.mjs" ]]; then
-  node "${TARGET_DIR}/sidecars/dashboard/cli.mjs" float quit >/dev/null 2>&1 || true
+if [[ -z "${ORIG_PLUGINS_DIR}" && -d "${TARGET_DIR}" ]]; then
+  node "${STAGE_DIR}/sidecars/dashboard/cli.mjs" float quit >/dev/null || true
 fi
 
 mkdir -p "${TARGET_DIR}/assets" "${TARGET_DIR}/skills" "${TARGET_DIR}/sidecars/dashboard"

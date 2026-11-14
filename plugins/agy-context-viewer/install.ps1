@@ -29,10 +29,64 @@ $CliLoader = Join-Path $BinDir "agy-context-loader.mjs"
 $RepoSlug = if ($env:REPO) { $env:REPO } else { "Dong-Kevin/agy-plugins" }
 $GitRef = if ($env:REF) { $env:REF } else { "main" }
 
+$SourceDir = $null
+if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "plugin.json")) -and (Test-Path (Join-Path $PSScriptRoot "sidecars\dashboard"))) {
+  $SourceDir = $PSScriptRoot
+}
+
 if ($Uninstall) {
-  $ExistingCli = Join-Path $TargetDir "sidecars\dashboard\cli.mjs"
-  if ((-not $OrigPluginsDir) -and (Test-Path $ExistingCli) -and (Get-Command node -ErrorAction SilentlyContinue)) {
-    try { & node $ExistingCli float quit 2>&1 | Out-Null } catch {}
+  $HasNode = [bool](Get-Command node -ErrorAction SilentlyContinue)
+  if ((-not $OrigPluginsDir) -and $HasNode) {
+    $LocalCli = if ($SourceDir) { Join-Path $SourceDir "sidecars\dashboard\cli.mjs" } else { "" }
+    $InstalledCli = Join-Path $TargetDir "sidecars\dashboard\cli.mjs"
+    $PrevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+      if ($LocalCli -and (Test-Path $LocalCli)) {
+        & node $LocalCli float quit 1>$null
+      } elseif (Test-Path $InstalledCli) {
+        $AgDir = if ($env:AG_DIR) { $env:AG_DIR } else { Join-Path $HOME ".gemini\antigravity" }
+        $StateDir = if ($env:ANTIGRAVITY_EXECUTABLE_DATA_DIR) { $env:ANTIGRAVITY_EXECUTABLE_DATA_DIR } else { Join-Path $AgDir "sidecar_data\context-viewer\dashboard\data" }
+        $StatePath = Join-Path $StateDir "float_window_state.json"
+        if (Test-Path $StatePath) {
+          $StateObj = $null
+          try { $StateObj = Get-Content $StatePath -Raw -Encoding UTF8 | ConvertFrom-Json } catch {}
+          $DaemonPid = if ($StateObj -and $StateObj.pid) { [int]$StateObj.pid } else { 0 }
+          if ($DaemonPid -gt 1) {
+            $LiveProc = Get-Process -Id $DaemonPid -ErrorAction SilentlyContinue
+            if (-not $LiveProc) {
+              Remove-Item -Force $StatePath -ErrorAction SilentlyContinue
+            } elseif ($env:AGY_TEST_PID_IDENTITY_MODE -eq "unknown") {
+              Write-Host "[WARN] [context-viewer] 无法核实后台进程身份（PID $DaemonPid），已跳过发送退出信号；请手动确认进程状态。" -ForegroundColor Yellow
+            } else {
+              $ProcInfo = $null
+              try { $ProcInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $DaemonPid" -ErrorAction Stop } catch {}
+              if ($null -eq $ProcInfo) {
+                if (-not (Get-Process -Id $DaemonPid -ErrorAction SilentlyContinue)) {
+                  Remove-Item -Force $StatePath -ErrorAction SilentlyContinue
+                } else {
+                  Write-Host "[WARN] [context-viewer] 无法核实后台进程身份（PID $DaemonPid），已跳过发送退出信号；请手动确认进程状态。" -ForegroundColor Yellow
+                }
+              } else {
+                $CmdNorm = ([string]$ProcInfo.CommandLine).Replace('\', '/')
+                $ProcName = [string]$ProcInfo.Name
+                $NameOk = (-not $ProcName) -or ($ProcName -match '^(node|electron|antigravity)(\.exe)?$')
+                $IsDaemon = $NameOk -and $CmdNorm.Contains("sidecars/dashboard/float_window.mjs") -and ($CmdNorm -match '(?:^|\s)--daemon(?:\s|$)') -and ($CmdNorm -notmatch '(?:^|\s)(?:-e|--eval|--print|-p)(?:=|\s|$)')
+                if ($IsDaemon) {
+                  & node $InstalledCli float quit 1>$null
+                } else {
+                  Remove-Item -Force $StatePath -ErrorAction SilentlyContinue
+                }
+              }
+            }
+          } else {
+            Remove-Item -Force $StatePath -ErrorAction SilentlyContinue
+          }
+        }
+      }
+    } finally {
+      $ErrorActionPreference = $PrevEap
+    }
   }
   if ($ShouldManageBin -and (Test-Path $CliLoader)) {
     $ExpectedEntry = [System.IO.Path]::GetFullPath((Join-Path $TargetDir "sidecars\dashboard\cli.mjs"))
@@ -66,11 +120,6 @@ if ($NodeMajor -lt 18) {
 }
 
 # 2. Locate local checkout or download zip from GitHub
-$SourceDir = $null
-if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "plugin.json")) -and (Test-Path (Join-Path $PSScriptRoot "sidecars\dashboard"))) {
-  $SourceDir = $PSScriptRoot
-}
-
 $TempDir = $null
 try {
   if (-not $SourceDir) {
@@ -115,9 +164,11 @@ try {
     }
   }
 
-  $ExistingCli = Join-Path $TargetDir "sidecars\dashboard\cli.mjs"
-  if ((-not $OrigPluginsDir) -and (Test-Path $ExistingCli)) {
-    try { & node $ExistingCli float quit 2>&1 | Out-Null } catch {}
+  $NewCli = Join-Path $SourceDir "sidecars\dashboard\cli.mjs"
+  if ((-not $OrigPluginsDir) -and (Test-Path $TargetDir) -and (Test-Path $NewCli)) {
+    $PrevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try { & node $NewCli float quit 1>$null } catch {} finally { $ErrorActionPreference = $PrevEap }
   }
 
   New-Item -ItemType Directory -Path $PluginsRoot -Force | Out-Null
