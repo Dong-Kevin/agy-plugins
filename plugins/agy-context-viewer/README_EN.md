@@ -1,293 +1,116 @@
-<img src="assets/logo.svg" width="84" align="right" alt="Antigravity Context & Token Viewer Logo" />
+# Antigravity Context & Token Viewer (`context-viewer`)
 
-# Antigravity Context & Token Viewer (`agy-context-viewer`)
+Live visibility into **Google Antigravity** (Desktop & `agy` CLI) context window usage, streaming speed (TTFT / `tok/s`), per-turn growth, 53-week activity heatmaps, and unified **Gemini / Non-Gemini (Claude · GPT) 5h + Weekly quota pools** -- zero external dependencies, zero client patching, 100% local read-only telemetry.
 
-[![Version](https://img.shields.io/badge/version-v1.7.8-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-818cf8)](#quick-install)
-[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D%2018-22c55e)](#quick-install)
-[![Zero Dependencies](https://img.shields.io/badge/dependencies-0-a855f7)](#privacy--security)
-[![License: MIT](https://img.shields.io/badge/License-MIT-f59e0b.svg)](./LICENSE)
-
-**[简体中文](./README.md)** | **English** · [Screenshots](#screenshots) · [Key Features](#key-features) · [Quick Install](#quick-install) · [Usage Guide](#usage-guide) · [Metrics Overview](#views--metrics-overview) · [Privacy & Security](#privacy--security) · [Acknowledgements](#acknowledgements)
-
-An official-spec, real-time **Context Window**, **Generation Speed (`TTFT` / `tok/s`)**, **Dual `5h + Weekly` Model Quota**, and **Token Usage Analytics** plugin for **Google Antigravity Desktop (`agy` App / IDE)** and the **`agy` CLI**.
-
-Zero client binary patching, zero external runtime dependencies, and 100% local read-only telemetry — featuring a **customizable macOS Menu Bar live indicator**, a **right-side pinned floating window (`📌`)**, native **Aux Pane Sidecar integration**, and a full **`agy-context` terminal dashboard**.
+[简体中文](README.md) | **English** | [Monorepo Home](../../README_EN.md)
 
 ---
 
-## Screenshots
+## One-Sentence Agent Install
 
-### 1. macOS Menu Bar Live Badge, 4-Section Hover Card & Customizer Drawer
-
-<table>
-  <tr>
-    <td width="48%" align="center" valign="middle">
-      <br/>
-      <img src="docs/images/macos-menubar-badge.png" width="220" alt="macOS Menu Bar Live Indicator" />
-      <br/><br/>
-      <img src="docs/images/macos-menubar-tooltip.png" width="245" alt="macOS Menu Bar 4-Section Hover Tooltip" />
-      <br/><br/>
-      <b>macOS Menu Bar Live Badge & Compact 4-Section Tooltip</b><br/>
-      <sub>Switch between Context %, Speed & Duration, and 5h/Weekly Quota; auto-follows active conversations; left-click toggles window in <code>&lt;5ms</code></sub>
-    </td>
-    <td width="52%" align="center" valign="middle">
-      <img src="docs/images/customizer-drawer.png" width="290" alt="Dual Shortcut Recorders, Quick Entry Modes & Appearance Customizer" />
-      <br/>
-      <b>Dual Shortcut Recorders (<code>⌥⌘K</code> / <code>⌃⌥K</code>) & Themes</b><br/>
-      <sub>Click-to-record hotkeys for Floating Window & AGY Aux Pane, pick host-only/global scope, and pick from 5 heatmap palettes</sub>
-    </td>
-  </tr>
-</table>
-
-### 2. Right-Side Pinned Floating Window (`📌`) & Core Analytics Views
-
-<table>
-  <tr>
-    <td width="33%" align="center" valign="top">
-      <img src="docs/images/pinned-float-window.png" width="268" alt="Right-Side Pinned Floating Window" />
-      <br/>
-      <b>Pinned Floating Window (<code>📌</code>)</b><br/>
-      <sub>Stays pinned cleanly on the right edge alongside your editor, terminal, and Artifacts without panel-switching</sub>
-    </td>
-    <td width="33%" align="center" valign="top">
-      <img src="docs/images/context-overview.png" width="268" alt="Context Window Breakdown & Cache Hit Rate" />
-      <br/>
-      <b>Session · Context & Cache Breakdown</b><br/>
-      <sub>Budget gauge, 98.5% cache hit ratio, 3-part prompt breakdown bar, and 4D cumulative token throughput</sub>
-    </td>
-    <td width="33%" align="center" valign="top">
-      <img src="docs/images/speed-and-turns.png" width="268" alt="Generation Speed, TTFT & Per-Turn Delta Timeline" />
-      <br/>
-      <b>Session · Speed & Per-Turn <code>±Delta</code></b><br/>
-      <sub>Server-timed <code>tok/s</code>, <code>TTFT</code>, dual quota bar, growth sparkline, and per-turn <code>±Delta</code> audit list</sub>
-    </td>
-  </tr>
-</table>
-
-<table>
-  <tr>
-    <td width="50%" align="center" valign="top">
-      <img src="docs/images/usage-trends.png" width="276" alt="Multi-Source Token Usage Trends & 53-Week Heatmap" />
-      <br/>
-      <b>Usage Trends · Desktop + CLI & 53-Week Heatmap</b><br/>
-      <sub>Unified Desktop & <code>agy</code> CLI token analytics across Daily, Weekly, Monthly, Yearly, and Cumulative views</sub>
-    </td>
-    <td width="50%" align="center" valign="top">
-      <img src="docs/images/cost-and-quotas.png" width="276" alt="Google AI Ultra, Family Sharing & Dual 5h + Weekly Quota Pools" />
-      <br/>
-      <b>Cost & Quotas · Ultra / Family Sharing & Dual Pools</b><br/>
-      <sub>Detects <code>Google AI Pro / Ultra</code>, supports Family Group sharing / split-billing, and tracks both <code>5h</code> & <code>Weekly</code> quota pools</sub>
-    </td>
-  </tr>
-</table>
-
----
-
-## Key Features
-
-- **100% Non-Intrusive Official Plugin Architecture**
-  - Built strictly on Antigravity's official `plugin.json` and `sidecar_sdk` specifications. **Never patches `Antigravity.app`'s `app.asar`, never requires CDP debug-port injection, and never rewrites `~/.gemini/config/config.json`** — keeping macOS `Developer ID` code-signing and automatic IDE updates completely intact.
-- **Customizable macOS Menu Bar Live Indicator + Auto Conversation Follow**
-  - Seamlessly switch between **3 real-time menu bar metrics** (synced across the right-click menu, dashboard drawer, and CLI):
-    1. **Context Window Usage %** (Default): `◈ 86%` (auto-escalates to `⚠` at high watermark)
-    2. **Latest Speed & Duration (with Session Avg / Peak)**: `⚡ 46t/s·33s (均 39/峰 132)`
-    3. **5-Hour / Weekly Quota Remaining**: `⏳ 5h 99%·周93%`
-  - **Automatic Conversation Follow**: Clicking any conversation in the Antigravity sidebar (including idle historical threads without sending a new message) automatically syncs the Menu Bar badge and floating window within `~1.5s`. Manual session locking is also supported via the dropdown selector.
-  - **Compact 4-Section Hover Tooltip & `<5ms` Toggle**: Hover for a clean summary of active conversation/model, context & speed stats, `5h + Weekly` model pool quotas, and shortcuts; **left-click** toggles the dashboard window in `<5ms`, and **right-click** opens the native quick-switch menu.
-- **Right-Side Pinned Floating Window (`📌` `⌥⌘K`) & AGY Aux Pane Direct Jump (`⌃⌥K`)**
-  - Pin the dashboard directly to the right edge of your screen so it remains visible even when the IDE's right Auxiliary Pane is displaying Artifacts, Diffs, or Terminals. On macOS, press **`⌥⌘K`** anytime while Antigravity or the dashboard is focused to toggle the floating window, or **`⌃⌥K`** to jump straight into Antigravity's Right Aux Pane on the Context Dashboard (**zero macOS Accessibility TCC permission prompt**, customizable via click-to-record in the palette drawer or `agy-context shortcut` / `aux-shortcut`, with optional global scope).
-  - Toggle always-on-top anytime via the title bar pill, the `📌` toolbar icon, or `Cmd+Shift+P` (`⌥⌘K` or `Cmd+W` to hide).
-- **Dual-Window Quota Pools (`5h + Weekly`) & Realistic Subscription Modeling**
-  - Queries both read-only `GetUserStatus` and `RetrieveUserQuotaSummary` local language-server RPCs to display **5-hour rolling burst limits** alongside **Weekly shared tier pools** and exact reset timestamps for Gemini and Claude / GPT families.
-  - Accurately identifies `Google AI Pro` and `Google AI Ultra` tiers, and includes built-in customization for **Family Group Sharing (`$0` extra cost)**, **Family Split-Billing (AA)**, **22 regional pricing presets**, and **40+ currencies**, side-by-side with retail API pay-as-you-go equivalence.
-- **Unified Desktop IDE + `agy` CLI Experience with Zero Dependencies**
-  - Powered purely by the `Node.js >= 18` standard library and native OS components (`0` external `npm` packages; hardware-verified end-to-end on **macOS**, with cross-platform standard-library support on **Windows / Linux** for embedded Aux Pane, CLI, `web`, and browser `--app` fallbacks) — complete with `agy-context` ANSI terminal bars, `turns` delta tables, `json` export, and standalone `web` mode.
-
----
-
-## Quick Install
-
-> **Prerequisites & Platform Capabilities**:
-> - `Node.js >= 18` installed locally.
-> - **macOS Native Menu Bar & Pinned Window**: Initial compilation requires the local Swift toolchain (Xcode Command Line Tools: `xcode-select --install`). On **Windows / Linux**, cross-platform standard-library implementations support the embedded Aux Pane Sidecar, `agy-context` CLI, `web` dashboard, and standalone browser `--app` window fallback for `float` (without a native OS menu bar icon or always-on-top window level; PowerShell installers, Linux desktops, and minimum `Node.js 18` have not yet been hardware-tested on dedicated hosts).
-> - **Standalone Terminal Mode**: Outside an Antigravity host session (where local language-server address & credentials are not injected), live plan/quota RPCs degrade gracefully while local session & multi-source token analytics remain fully available.
-> - **Coexisting-Plugin Upgrade Note**: When `agy-finder` is also installed on the same machine, both plugins share the `~/.gemini/antigravity/agy_aux_pane_trigger.json` lock protocol. Please ensure `agy-finder` is upgraded to `>= v0.2.4` alongside `context-viewer` (e.g., via the monorepo full installer), and confirm previously running daemons and host Sidecar instances have exited or reloaded so older builds cannot bypass the new Bakery lock; standalone installations are unaffected.
-
-### Option 1: Ask Your Antigravity Agent to Install (Recommended)
-
-Paste this prompt directly into **Antigravity**:
+Send this prompt to Antigravity to install and verify automatically:
 
 ```text
-Please install Antigravity Context & Token Viewer from https://github.com/Dong-Kevin/agy-plugins (on macOS/Linux run `bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.sh)"`, on Windows PowerShell run `irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.ps1 | iex`), verify with `agy-context menubar status`, and summarize its shortcuts.
+Please install the Antigravity Context & Token Viewer plugin from https://github.com/Dong-Kevin/agy-plugins (on macOS/Linux run `bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.sh)"`, on Windows PowerShell run `irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.ps1 | iex`), test `agy-context menubar status`, and summarize its keyboard shortcuts.
 ```
 
-### Option 2: macOS / Linux One-Liner
-
-Installs the plugin, compiles & launches the native macOS Menu Bar helper, and registers the `agy-context` CLI command (set `REF=<tag>` to pin a specific ref):
+<details>
+<summary>Manual CLI Install / Hot Upgrade / Uninstall (macOS · Linux · Windows)</summary>
 
 ```bash
+# macOS / Linux -- install or hot-upgrade
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.sh)"
-# Or via the unified monorepo installer:
-# curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh | bash -s -- agy-context-viewer
+
+# Uninstall
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.sh)" -- --uninstall
 ```
 
-### Option 3: Windows PowerShell One-Liner
-
 ```powershell
+# Windows PowerShell -- install or hot-upgrade (uninstall via .\plugins\agy-context-viewer\install.ps1 -Uninstall)
 irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.ps1 | iex
 ```
 
-### Option 4: Install Local Folder via Official `agy` CLI
+- You can also download `context-viewer-v1.7.8.zip` from [Releases](https://github.com/Dong-Kevin/agy-plugins/releases), extract it, and run `./install.sh` (or `agy plugin install ./plugins/agy-context-viewer`).
+- When installed via `agy plugin install` alone, invoke the CLI with `node ~/.gemini/config/plugins/context-viewer/sidecars/dashboard/cli.mjs`.
 
-```bash
-git clone https://github.com/Dong-Kevin/agy-plugins.git
-cd agy-plugins
-agy plugin install ./plugins/agy-context-viewer
-```
-
-### Option 5: Git Clone or Offline Release ZIP
-
-```bash
-git clone https://github.com/Dong-Kevin/agy-plugins.git
-cd agy-plugins
-./install.sh agy-context-viewer   # On Windows PowerShell: .\install.ps1 -Plugin agy-context-viewer
-```
-
-Or download `context-viewer-v1.7.8.zip` and `context-viewer-v1.7.8.zip.sha256` from [Releases](https://github.com/Dong-Kevin/agy-plugins/releases), verify the checksum via `shasum -a 256 -c context-viewer-v1.7.8.zip.sha256`, extract it, and run `./context-viewer/install.sh` (or `agy plugin install ./context-viewer`).
+</details>
 
 ---
 
-## Usage Guide
+## Shortcuts & Where to Customize
 
-### Shortcuts & Quick Commands
+| Trigger | Default Key / Action | What It Does | Where to Customize |
+| :--- | :--- | :--- | :--- |
+| **Floating Window (macOS)** | **`⌥⌘K`** (`⌘⇧P` pin · `⌘W` close) | Toggles the standalone pinned float window (same as clicking **`📌`**) | **Palette button right of `📌`** -> **`⌥⌘K` record button** (`Host Focus Only` / `Global`)<br/>CLI: `agy-context shortcut [opt+cmd+l\|reset\|off]` |
+| **AGY Aux Pane Jump** | **`⌃⌥K`** (`Ctrl+Alt+Shift+K` Win/Linux) | Wakes Antigravity's Right Aux Pane straight to the Context Dashboard | **Palette button** -> **`⌃⌥K` record button**; **right-click tab -> `Pin Tab`** to persist across threads<br/>CLI: `agy-context aux-shortcut [ctrl+opt+l\|reset\|off]` |
+| **macOS Menu Bar Badge** | **Left-click `<5ms` toggle · Right-click cycle** | Cycles `◈ 86%` / `⚡ 46t/s·33s` / `⏳ 5h·周` modes with full hover tooltip | **Palette button** -> toggle Menu Bar badge & 3 display modes<br/>CLI: `agy-context menubar [context\|speed\|quota\|off]` |
+| **Host Panel & Slash** | **`⌘⇧B`** (`Ctrl+Shift+B` Win/Linux)<br/>**`/context-viewer`** | Toggles host Right Aux Pane; opens dashboard directly from chat | Same **palette drawer** also switches Light/Dark theme and **5 heatmap palettes** (`L0-L4` stops) |
+| **Shared-Plan Split Billing** | -- | Customize monthly discounts, family-group sharing, or split ratios | **`Cost & Quota` tab** top-right -> **`Customize Plan ✎`** |
 
-| Trigger | Default Hotkey / Command | Behavior |
-| :--- | :--- | :--- |
-| **Pinned Floating Window (macOS)** | **`⌥⌘K`** | Toggle the right-side pinned floating window (Host-frontmost by default; click-to-record custom chord or switch to global scope; `Ctrl+Alt+K` inside dashboard on Win / Linux) |
-| **AGY Right Aux Pane Direct Jump** | **`⌃⌥K`** (`Ctrl+Alt+Shift+K` on Win / Linux) | Reveal and switch Antigravity's Right Aux Pane straight to the Context Dashboard (click-to-record custom chord or run `agy-context aux` / `aux-shortcut`) |
-| **Pin Toggle / Dismiss** | **`⌘⇧P`** · **`⌘W`** | Toggle always-on-top level / dismiss the floating dashboard |
-| **macOS Menu Bar Badge** | **Left-click** / **Right-click** | Left-click toggles the dashboard in `<5ms`; right-click switches 3 live metrics or pin state |
-| **Host Aux Pane & In-Chat** | **`⌘⇧B`** (`Ctrl+Shift+B` on Win / Linux)<br/>**`/context-viewer`** · [`sidecar://context-viewer/dashboard/`](sidecar://context-viewer/dashboard/) | Toggle Aux Pane or open the dashboard directly from chat |
-| **Terminal CLI Commands** | **`agy-context`** · `aux` · `float` · `menubar` · `shortcut` · `aux-shortcut` · `turns` · `json` · `web` | Terminal ANSI dashboard, Aux Pane jump, float/menubar/hotkey control, per-turn audit & standalone web UI |
-
-### 1. In Antigravity Desktop / IDE
-
-1. **macOS System Menu Bar Icon (Enabled by Default on macOS)**
-   - **Left-click** the top-right menu bar badge to show or hide the floating dashboard in `<5ms`;
-   - **Right-click** the badge to switch live display modes (**Context % / Speed & Duration / 5h & Weekly Quota**), toggle window pin state, or hide the menu bar icon;
-   - You can also configure everything visually inside the dashboard's top-right palette customizer drawer.
-2. **Right-Side Pinned Floating Window (`📌` `⌥⌘K`) & AGY Aux Pane Jump (`⌃⌥K`)**
-   - Press **`⌥⌘K`** on macOS (`Ctrl+Alt+K` inside the dashboard on Windows / Linux), click the **`📌` button** in the dashboard header, or run `agy-context float` in your terminal to toggle the floating window;
-   - Press **`⌃⌥K`** (or run `agy-context aux`) to wake Antigravity's native Right Aux Pane straight to the Context Dashboard even from `Overview`, collapsed, or cross-plugin states (right-click the tab → `Pin Tab` to keep it pinned across threads and protect it from `×`; on cold start before any tab loads, a native HUD prompt guides first-time open; `⌃⌥` / `⌥⌘` chords are recommended on macOS to avoid single `Ctrl+<Letter>` editor conflicts);
-   - Open the top-right palette drawer to click-and-record custom key chords for both **Floating Window** and **AGY Aux Pane**, switch between **Host App Only** (default, conflict-free) and **Global** scope, or reset / disable either shortcut;
-   - Click the title-bar `📌` pill (or press `Cmd+Shift+P`) to toggle always-on-top; press `⌥⌘K` again, `Cmd+W`, left-click the menu bar badge, or run `agy-context float close` to dismiss.
-3. **Embedded Auxiliary Pane Sidecar**
-   - Ensure the plugin is enabled under **Customizations → Plugins**, then click its icon in the right Auxiliary Pane (or press `⌃⌥K` / open `sidecar://context-viewer/dashboard/`).
-
-### 2. In Terminal & `agy` CLI
-
-- **In-Chat Skill**: Type `/context-viewer` inside any `agy` session, or ask naturally about your current context window usage, speed, or quota pools.
-- **Terminal `agy-context` CLI Reference**:
+<details>
+<summary>Quick <code>agy-context</code> Terminal Commands</summary>
 
 ```bash
-agy-context                  # Rich ANSI summary (context gauge, speed, last 5 turns ±Delta, 5h/Weekly quotas)
+agy-context                  # Rich ANSI terminal summary (gauge, speed, last 5 turns, dual quota pools)
 agy-context aux              # Reveal and switch Antigravity's Right Aux Pane straight to Context Dashboard
-agy-context menubar context  # Menu Bar mode: Context Window % (◈ 86%)
-agy-context menubar speed    # Menu Bar mode: Latest Speed & Duration (⚡ 46t/s·33s)
-agy-context menubar quota    # Menu Bar mode: 5h / Weekly Quota Remaining (⏳ 5h 99%·周93%)
-agy-context menubar off      # Hide Menu Bar badge (pass 'on' to re-enable, 'status' to inspect)
-agy-context float            # Open / toggle the right-side pinned floating window ('close' to hide, 'quit' to stop daemon)
-agy-context shortcut         # View or customize floating window shortcut (e.g. 'opt+cmd+l', 'reset', 'off', '--global')
-agy-context aux-shortcut     # View or customize AGY Aux Pane shortcut (e.g. 'ctrl+opt+l', 'reset', 'off', '--global')
-agy-context turns            # Inspect the last 20 turns with context ±Delta, cache hit %, and tool calls
-agy-context json             # Structured JSON summary (append --full for complete raw telemetry payload)
-agy-context web              # Start standalone local web UI on 127.0.0.1:18970 and open in default browser
+agy-context float            # Toggle pinned floating window ('close' to hide, 'quit' to stop daemon)
+agy-context menubar quota    # Switch Menu Bar mode ('context' | 'speed' | 'quota' | 'on' | 'off' | 'status')
+agy-context turns            # Inspect last 20 turns with context ±Delta, cache hit %, and tool calls
+agy-context web              # Launch standalone web dashboard on 127.0.0.1:18970
+agy-context json             # Output structured JSON summary (append --full for full telemetry)
 ```
 
-> If you installed solely via `agy plugin install` without running `install.sh`, invoke the CLI directly via `node ~/.gemini/config/plugins/context-viewer/sidecars/dashboard/cli.mjs` (replace `context-viewer` with `agy-context-viewer` if cloned under the repo name).
+</details>
 
 ---
 
-## Views & Metrics Overview
+## Core Highlights & Preview
 
-| Tab | Tracked Metrics & Interactive Capabilities |
-| :--- | :--- |
-| **Current Session** | Context budget ring gauge, live unsent input token estimator, budget ceiling switcher (`Auto / 200K / 256K / 1M`), per-turn & cumulative prompt cache hit rate, 3-segment context composition bar (`System Prompt / Tools / Chat & Thinking`, expandable per-tool schema byte breakdown), 4D cumulative token throughput, server-timed `tok/s` (overall, streaming peak, session mean) & `TTFT`, active model `5h + Weekly` quota bar, 24-turn growth sparkline, **filterable 40-turn `±Delta` & tool-call timeline**, and attachment audit. |
-| **Usage Trends** | Filter across **All Sources / Desktop / CLI**; 4 headline summary cards (All-Time, Today, Month, Year with active days, request counts, and API cost equivalent); 5 interactive chart modes: **Daily (53-week GitHub-style calendar heatmap), Weekly, Monthly, Yearly (12-month bubble matrix), and Cumulative**. |
-| **Cost & Subscription** | Automatic plan tier detection (`Google AI Pro` / `Google AI Ultra`, masked account email) and `Gemini / Non-Gemini` grouped **`5h` burst + `Weekly` shared quota pools**; customizable **Family Group Sharing (`$0` extra) / Split-Billing / Gifted / 22 regional presets / 40+ currencies**, plus **Current Month vs. All-Time** retail API valuation and per-model breakdown. |
+- **Active Session Diagnostics**: Aligns to host context limits (`200K` / `256K` / `1M`), splits System / Tools / Chat tokens, and tracks TTFT, streaming `tok/s`, cache hit rate, and per-turn growth.
+- **Unified Telemetry**: Aggregates Desktop + `agy` CLI history across a **53-week heatmap**, clean **Gemini vs. Non-Gemini (Claude · GPT)** 5h + Weekly quota pools, and public API cost reference.
 
----
+<p align="center">
+  <strong>macOS Menu Bar Live Badge &amp; Hover Tooltip:</strong><br/>
+  <img src="docs/images/macos-menubar-badge.png" alt="macOS Menu Bar Badge" width="210" />
+  &nbsp;&nbsp;
+  <img src="docs/images/macos-menubar-tooltip.png" alt="macOS Menu Bar Tooltip" width="242" />
+</p>
 
-## Project Structure
-
-```text
-agy-context-viewer/
-├── plugin.json                        # Official Antigravity plugin manifest
-├── install.sh                         # macOS / Linux installer, hot-upgrader & uninstaller
-├── install.ps1                        # Windows PowerShell installer & uninstaller
-├── assets/
-│   └── logo.svg                       # Vector plugin icon
-├── docs/
-│   └── images/                        # Sanitized README screenshots (excluded from lightweight Release ZIP)
-├── skills/
-│   └── context-viewer/
-│       ├── SKILL.md                   # /context-viewer cross-surface skill definition
-│       └── scripts/status.mjs         # Directory-agnostic portable CLI entry
-├── sidecars/
-│   └── dashboard/
-│       ├── sidecar.json               # Official Aux Pane UI Sidecar configuration
-│       ├── main.mjs                   # Sidecar & loopback HTTP server entrypoint
-│       ├── collector.mjs              # Read-only session parser, active-chat follower & dual-quota collector
-│       ├── pricing.mjs                # Model generation matching, API pricing, Ultra/Family presets & FX rates
-│       ├── float_window.mjs           # Pinned floating window & macOS Menu Bar daemon controller
-│       ├── native_float_macos.swift   # Native macOS NSStatusItem + WKWebView zero-port IPC bridge
-│       ├── cli.mjs                    # agy-context ANSI terminal dashboard & control CLI
-│       ├── index.html                 # Dashboard markup
-│       ├── styles.css                 # Strict --cv-* namespaced styles (host light/dark adaptive)
-│       └── app.js                     # Frontend rendering & interactive state
-└── scripts/
-    ├── verify.mjs                     # Manifest, syntax, pattern/PNG-chunk check, CSS isolation & behavioral tests
-    └── package-release.mjs            # Zero-dependency cross-platform Release ZIP & SHA-256 packager
-```
-
----
-
-## Privacy & Security
-
-- **100% Local Read-Only Telemetry & Zero External Assets**: Reads only local session metadata under `~/.gemini/antigravity/brain/`, `~/.gemini/antigravity-cli/brain/`, `~/.gemini/antigravity/annotations/`, and read-only `127.0.0.1` language-server status endpoints, using strictly host and local system font stacks (zero external CDN or Google Fonts requests). **Zero conversation prompts, file paths, account credentials, or analytics ever leave your machine.**
-- **Redaction & Loopback Write Protection**: Account emails displayed in the UI are automatically masked and long URLs are stripped from hover tooltips; standalone web and fallback HTTP modes bind strictly to `127.0.0.1` and enforce `Host` / `Origin` checks, `application/json` content types, and per-session CSRF tokens (`X-CV-Token`) on write routes.
-- **Isolated Plugin Storage & Safe Retention**: User preferences (theme, palette, menu bar mode, custom subscription overrides) are stored cleanly under `~/.gemini/antigravity/sidecar_data/context-viewer/dashboard/data/settings_v1.json` without touching `~/.gemini/config/config.json`, and are intentionally preserved across upgrades and uninstalls.
+<table>
+  <tr>
+    <td align="center" width="33%">
+      <strong>Context Breakdown</strong><br/>
+      <img src="docs/images/context-overview.png" width="245" alt="Context Breakdown" />
+    </td>
+    <td align="center" width="33%">
+      <strong>Speed &amp; Per-Turn Delta</strong><br/>
+      <img src="docs/images/speed-and-turns.png" width="245" alt="Speed and Turns" />
+    </td>
+    <td align="center" width="33%">
+      <strong>Dual Quota Pools &amp; Costs</strong><br/>
+      <img src="docs/images/cost-and-quotas.png" width="245" alt="Dual Quota Pools and Costs" />
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <strong>53-Week Usage Trends</strong><br/>
+      <img src="docs/images/usage-trends.png" width="245" alt="53-Week Usage Trends" />
+    </td>
+    <td align="center">
+      <strong>Shortcuts &amp; Palette Drawer</strong><br/>
+      <img src="docs/images/customizer-drawer.png" width="250" alt="Shortcuts and Palette Customizer" />
+    </td>
+    <td align="center">
+      <strong>Pinned Floating Window (<code>📌</code>)</strong><br/>
+      <img src="docs/images/pinned-float-window.png" width="245" alt="Pinned Floating Window" />
+    </td>
+  </tr>
+</table>
 
 ---
 
-## Upgrade & Uninstall
+## Credits & Notes
 
-- **In-Place Hot Upgrade**: Re-run any installation command above (e.g., `./install.sh` or `.\install.ps1`) to validate required runtime files, sync updated scripts in place, and replace `sidecar.json` last via atomic rename for a smooth reload.
-- **Uninstall & Data Cleanup**:
-  - Via script: `./install.sh --uninstall` on macOS / Linux (or append `-s -- --uninstall` to the `curl` command); `.\install.ps1 -Uninstall` on Windows (removes the plugin directory and CLI shims while preserving saved preferences; delete `~/.gemini/antigravity/sidecar_data/context-viewer` manually if you also want to reset saved preferences)
-  - Via `agy` CLI: `agy plugin uninstall context-viewer`
-  - Via Desktop IDE: Open `customization://context-viewer` and click **Uninstall**
-
----
-
-## Local Development & Verification
-
-```bash
-node scripts/verify.mjs           # Manifest spec, JS syntax, pattern + PNG metadata check, CSS isolation & behavioral tests
-node scripts/package-release.mjs  # Build lightweight dist/context-viewer-v1.7.8.zip + .sha256
-```
-
----
-
-## Acknowledgements
-
-This project was originally inspired by **[elviscjn-cjn/antigravity-context-viewer](https://github.com/elviscjn-cjn/antigravity-context-viewer)** — the pioneering open-source project that first explored context window breakdown, token activity heatmaps, and model quota visualization for Google Antigravity. Its thoughtful metric dimensions and visual clarity served as a valuable reference when we began designing our workflow. Huge thanks and respect to the original author!
-
-Building upon that inspiration, `agy-context-viewer` was engineered from scratch as a clean-room, official-spec Antigravity Plugin (`plugin.json` + `sidecar_sdk`) — requiring zero `app.asar` modification and preserving native app code-signing — while introducing a native macOS Menu Bar 3-mode live badge, automatic conversation-switch follow, a right-side pinned floating window (`📌`), dual `5h + Weekly` shared quota pools, `Google AI Ultra` & Family Sharing cost modeling, and a full `agy` CLI terminal suite.
-
----
-
-## License
-
-Released under the [MIT License](./LICENSE).
+- **Attribution**: Originally inspired by **[elviscjn-cjn/antigravity-context-viewer](https://github.com/elviscjn-cjn/antigravity-context-viewer)** -- sincere thanks to its author for pioneering Antigravity context breakdown and quota visualization.
+- **Compatibility**: Requires `Node.js >= 18`. Native Menu Bar and floating window are verified on Apple Silicon macOS; Windows & Linux support the native AGY Aux Pane Sidecar, standalone web UI, and `agy-context` CLI.
+- **Local Verification**: Run `node plugins/agy-context-viewer/scripts/verify.mjs`. Licensed under [MIT License](../../LICENSE).

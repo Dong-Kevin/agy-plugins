@@ -1,293 +1,116 @@
-<img src="assets/logo.svg" width="84" align="right" alt="Antigravity Context & Token Viewer Logo" />
+# Antigravity Context & Token Viewer（`context-viewer`）
 
-# Antigravity Context & Token Viewer (`agy-context-viewer`)
+实时观测 **Google Antigravity**（桌面端与 `agy` CLI）上下文窗口占比、生成速度（TTFT / `tok/s`）、每轮涨跌、53 周热力图，以及 **Gemini / 非 Gemini（Claude · GPT）双池 5h + 周额度** -- 零外部依赖、零客户端文件改动、纯本地只读统计。
 
-[![Version](https://img.shields.io/badge/version-v1.7.8-38bdf8)](https://github.com/Dong-Kevin/agy-plugins/releases)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-818cf8)](#一键安装)
-[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D%2018-22c55e)](#一键安装)
-[![Zero Dependencies](https://img.shields.io/badge/dependencies-0-a855f7)](#隐私与安全机制)
-[![License: MIT](https://img.shields.io/badge/License-MIT-f59e0b.svg)](./LICENSE)
-
-**简体中文** | **[English](./README_EN.md)** · [界面预览](#界面预览) · [核心特性](#核心特性) · [一键安装](#一键安装) · [快速上手](#快速上手) · [统计维度](#核心视图与统计维度) · [隐私安全](#隐私与安全机制) · [致谢](#致谢)
-
-面向 **Google Antigravity 桌面端（`agy` App / IDE）** 与 **终端 `agy` CLI** 的官方规范上下文窗口、生成速度（`TTFT` / `tok/s`）、`5h + Week` 双维度配额余量与 Token 历史趋势看板插件。
-
-零客户端文件篡改、零第三方运行时依赖、100% 本地只读采集 -- 安装即享 **macOS 顶部系统菜单栏实时徽章**、**屏幕右侧独立置顶小窗（`📌`）**、**宿主右侧内嵌辅助栏** 与 **`agy-context` 终端彩色看板**。
+**简体中文** | [English](README_EN.md) | [合集主页](../../README.md)
 
 ---
 
-## 界面预览
+## Agent 一句话安装
 
-### 1. 顶部菜单栏常驻徽章、四段式悬停卡片与个性化定制
-
-<table>
-  <tr>
-    <td width="48%" align="center" valign="middle">
-      <br/>
-      <img src="docs/images/macos-menubar-badge.png" width="220" alt="macOS 顶部菜单栏实时徽章" />
-      <br/><br/>
-      <img src="docs/images/macos-menubar-tooltip.png" width="245" alt="macOS 菜单栏四段式悬停卡片" />
-      <br/><br/>
-      <b>macOS 菜单栏常驻徽章 & 四段式精简悬停卡片</b><br/>
-      <sub>支持「上下文占比 / 速度与耗时 / 5h·Week 额度」三档快切，切换对话自动跟随；左键 <code>&lt;5ms</code> 秒开小窗</sub>
-    </td>
-    <td width="52%" align="center" valign="middle">
-      <img src="docs/images/customizer-drawer.png" width="290" alt="双快捷键录制、快捷入口与外观定制抽屉" />
-      <br/>
-      <b>双快捷键录制（<code>⌥⌘K</code> / <code>⌃⌥K</code>）与外观定制</b><br/>
-      <sub>分别点击录制独立悬浮窗与 AGY 侧栏看板快捷键、切换仅宿主/全局范围，并内置 5 套热力图配色</sub>
-    </td>
-  </tr>
-</table>
-
-### 2. 右侧独立置顶小窗（`📌`）与三大核心数据视图
-
-<table>
-  <tr>
-    <td width="33%" align="center" valign="top">
-      <img src="docs/images/pinned-float-window.png" width="268" alt="屏幕右侧独立置顶小窗" />
-      <br/>
-      <b>右侧独立置顶小窗（<code>📌</code> 常驻）</b><br/>
-      <sub>免点侧边栏折叠菜单，与代码、终端、Artifacts 同屏常驻显示</sub>
-    </td>
-    <td width="33%" align="center" valign="top">
-      <img src="docs/images/context-overview.png" width="268" alt="当前会话上下文窗口与缓存率透视" />
-      <br/>
-      <b>当前会话 · 上下文构成与缓存率</b><br/>
-      <sub>预算水位圆环、单轮 98.5% 缓存命中、三段构成条与四维累计吞吐</sub>
-    </td>
-    <td width="33%" align="center" valign="top">
-      <img src="docs/images/speed-and-turns.png" width="268" alt="生成速度耗时与每轮消耗涨跌时间线" />
-      <br/>
-      <b>当前会话 · 生成速度与逐轮涨跌</b><br/>
-      <sub>服务端精确 <code>tok/s</code>、首字延迟 <code>TTFT</code>、双配额条与每轮 <code>±Delta</code> 明细</sub>
-    </td>
-  </tr>
-</table>
-
-<table>
-  <tr>
-    <td width="50%" align="center" valign="top">
-      <img src="docs/images/usage-trends.png" width="276" alt="全端 Token 用量趋势与日历热力图" />
-      <br/>
-      <b>用量趋势 · 全端汇总与 53 周日历热力图</b><br/>
-      <sub>打通桌面端与 <code>agy</code> CLI 日志，支持按日 / 周 / 月 / 今年 / 累计多维穿透</sub>
-    </td>
-    <td width="50%" align="center" valign="top">
-      <img src="docs/images/cost-and-quotas.png" width="276" alt="AI 订阅识别、家庭组折算与 5h+Week 配额池" />
-      <br/>
-      <b>费用与订阅 · Ultra / 家庭组支持与双配额池</b><br/>
-      <sub>精准识别 <code>Google AI Pro / Ultra</code>，支持家庭组共享 / AA 拼车设置，同屏展示 <code>5h</code> 与 <code>Week</code> 余量</sub>
-    </td>
-  </tr>
-</table>
-
----
-
-## 核心特性
-
-- **官方规范插件架构，零客户端破签风险**
-  - 严格遵循 Antigravity 官方 `plugin.json` 与 `sidecar_sdk` 规范构建，**不解包修改 `Antigravity.app` 的 `app.asar`、不注入 CDP 渲染进程、不直接改写 `~/.gemini/config/config.json`**，完整保留 macOS `Developer ID` 签名校验与客户端自动升级。
-- **macOS 顶部系统菜单栏常驻看板（3 档显示定制 + 切换会话自动跟随）**
-  - 支持在 **3 种实时指标** 之间随时切换（右键菜单、面板抽屉或 CLI 双向同步）：
-    1. **当前上下文使用占比**（默认）：`◈ 86%`（高水位自动切换 `⚠` 预警）
-    2. **最新生成速度与耗时（含会话均值 / 峰值）**：`⚡ 46t/s·33s (均 39/峰 132)`
-    3. **5 小时 / Week 配额余量**：`⏳ 5h 99%·周93%`
-  - **切换对话自动跟随**：在左侧会话列表点击切换任意对话（包括未发新消息的历史静止对话）时，顶部菜单栏与右侧小窗在约 `1.5s` 内自动同步到当前浏览会话；也可在下拉框手动锁定指定会话。
-  - **四段式精简悬停卡片 & `<5ms` 秒开交互**：鼠标悬停展示「会话与模型 / 水位与速度 / 分池 `5h + 周` 配额 / 快捷操作」四段概览；**左键单击** `<5ms` 秒开或收回右侧小窗，**右键单击** 弹出原生菜单切换模式与置顶。
-- **屏幕右侧独立置顶小窗（`📌`）& AGY 侧栏直达双快捷键（`⌥⌘K` / `⌃⌥K`，零权限自定义）**
-  - 一键将看板独立钉在屏幕右侧最前，即使宿主右侧辅助栏正在查看 Artifacts、Diff 或终端也互不抢占；macOS 默认支持 **`⌥⌘K`** 一键弹出/收回独立悬浮窗，**`⌃⌥K`** 直接唤醒并切换 Antigravity 原生右侧辅助栏到上下文看板（基于 `Carbon` 热键注册，**零辅助功能权限弹窗**，默认仅在宿主或看板前台生效，可选全局生效；可在调色盘设置抽屉点击录制任意组合键，或通过 `agy-context shortcut` / `aux-shortcut` 自定义）。
-  - 支持标题栏按钮、面板内 `📌` 图标或快捷键 `Cmd+Shift+P` 实时切换置顶，按 `⌥⌘K` 或 `Cmd+W` 快速收回。
-- **真实双窗口配额池（`5h + Week`）与灵活订阅价值对标**
-  - 同时读取宿主 `GetUserStatus` 与 `RetrieveUserQuotaSummary` 只读本地接口，同屏呈现 Gemini 系列与 Claude / GPT 系列的 **5 小时滚动突发限额** 与 **Week 周度档位共享池余量** 及精确重置时间。
-  - 准确识别 `Google AI Pro` / `Google AI Ultra` 等订阅档位；针对家庭组共享免付费、多人 AA 拼车、教育优惠及跨区订阅场景，内置 **10 种获取渠道**、**22 个国家或地区定价** 与 **40+ 币种汇率** 自定义折算，并与按量 API 零售估值直观对比。
-- **桌面端 IDE + 终端 `agy` CLI 双端全覆盖，零第三方依赖**
-  - 纯 `Node.js >= 18` 标准库与系统原生 Web / Cocoa 组件编写，`0` 外部 `npm` 依赖（**macOS** 已完成实机全量验证；**Windows / Linux** 基于跨平台标准库支持内嵌辅助栏、`agy-context` CLI、`web` 模式与浏览器 `--app` 小窗回退）；终端提供 `agy-context` 彩色进度条看板、`turns` 逐轮涨跌审计、`json` 脚本导出与 `web` 独立浏览器看板。
-
----
-
-## 一键安装
-
-> **前置要求与平台能力说明**：
-> - 本机需已安装 `Node.js >= 18`。
-> - **macOS 原生菜单栏与置顶小窗**：首次编译需本机具备 Swift 编译工具链（Xcode Command Line Tools，未安装时运行 `xcode-select --install`）；**Windows / Linux** 基于跨平台标准库支持宿主内嵌辅助栏、`agy-context` 终端看板、`web` 模式与浏览器 `--app` 小窗回退（无系统菜单栏常驻图标与原生置顶层级；PowerShell 安装器、Linux 桌面端与 `Node.js 18` 最低版本尚未在对应宿主机逐一实机验收）。
-> - **脱离宿主独立运行**：在未由 Antigravity 宿主注入本地语言服务地址与凭据的纯外部终端中，实时订阅档位与 `5h / Week` 配额查询会自动降级，本地会话归档与历史统计不受影响。
-> - **双插件共存升级说明**：若本机同时安装了 `agy-finder`，两者共享 `~/.gemini/antigravity/agy_aux_pane_trigger.json` 触发锁协议。升级 `context-viewer` 时请同步将 `agy-finder` 升级至 `>= v0.2.4`（建议运行总仓全量安装），并确认旧版后台守护进程与宿主 Sidecar 实例均已退出或重载，避免旧版进程绕过新 Bakery 锁协议并发认领同一事件；仅安装单个插件的用户不受影响。
-
-### 方式 1：让 Antigravity Agent 协助安装（推荐首选）
-
-直接复制下面这段指令发给 **Antigravity Agent**，即可自动完成安装、启用与快捷键检查：
+复制下面这段话直接发给 Antigravity，即可自动完成安装并验证状态：
 
 ```text
 请帮我安装 Antigravity Context & Token Viewer 插件（来自 https://github.com/Dong-Kevin/agy-plugins ：macOS / Linux 运行 `bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.sh)"`，Windows PowerShell 运行 `irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.ps1 | iex`），安装后测试 `agy-context menubar status` 并列出快捷键说明。
 ```
 
-### 方式 2：macOS / Linux 一键脚本安装
-
-自动安装插件、编译并启动 macOS 顶部菜单栏常驻守护进程，同时注册终端 `agy-context` 命令（如需锁定特定发布版本，可在命令前加 `REF=<tag>`）：
+<details>
+<summary>手动命令行安装 / 热更新 / 卸载（macOS · Linux · Windows）</summary>
 
 ```bash
+# macOS / Linux -- 安装或原地热更新
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.sh)"
-# 或通过统一入口指定安装：
-# curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh | bash -s -- agy-context-viewer
+
+# 卸载
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.sh)" -- --uninstall
 ```
 
-### 方式 3：Windows PowerShell 一键安装
-
 ```powershell
+# Windows PowerShell -- 安装或热更新（卸载加 .\plugins\agy-context-viewer\install.ps1 -Uninstall）
 irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.ps1 | iex
 ```
 
-### 方式 4：通过官方 `agy` CLI 安装本地目录
+- 也可直接从 [Releases](https://github.com/Dong-Kevin/agy-plugins/releases) 下载 `context-viewer-v1.7.8.zip` 解压后运行 `./install.sh`（或 `agy plugin install ./plugins/agy-context-viewer`）。
+- 仅通过 `agy plugin install` 安装时，CLI 入口为 `node ~/.gemini/config/plugins/context-viewer/sidecars/dashboard/cli.mjs`。
+
+</details>
+
+---
+
+## 快捷键与自定义位置
+
+| 触发方式 | 默认按键 / 操作 | 说明 | 自定义位置 |
+| :--- | :--- | :--- | :--- |
+| **独立置顶悬浮窗（macOS）** | **`⌥⌘K`**（`⌘⇧P` 置顶 · `⌘W` 关闭） | 独立窗口呼出与隐藏，点击顶部 **`📌`** 同效 | **顶部 `📌` 右侧调色盘按钮** → **`⌥⌘K 点击修改`**（支持 **`仅宿主前台 / 全局生效`**）<br/>CLI：`agy-context shortcut [opt+cmd+l\|reset\|off]` |
+| **AGY 右侧栏直达** | **`⌃⌥K`**（Win/Linux `Ctrl+Alt+Shift+K`） | 从任何页面或跨插件直接唤醒并切到看板 | **调色盘按钮** → **`⌃⌥K 点击修改`**；标签页 **右键 → `Pin Tab`** 可跨对话常驻<br/>CLI：`agy-context aux-shortcut [ctrl+opt+l\|reset\|off]` |
+| **macOS 顶部菜单栏** | **左键 `<5ms` 显隐 · 右键切模式/置顶** | 轮切 `◈ 86%` / `⚡ 46t/s·33s` / `⏳ 5h·周` 3 种状态，悬停看完整摘要 | **调色盘按钮** → `顶部菜单栏常驻图标` / `菜单栏显示内容`<br/>CLI：`agy-context menubar [context\|speed\|quota\|off]` |
+| **宿主与对话入口** | **`⌘⇧B`**（Win/Linux `Ctrl+Shift+B`）<br/>**`/context-viewer`** | 切换 Antigravity 原生右侧辅助栏显隐；对话输入 Slash 命令直达 | 调色盘内还可切换 **浅/深色主题** 与 **5 套热力图配色**（`L0-L4` 可逐格微调） |
+| **订阅分摊与拼车折算** | -- | 支持按月费折扣、家庭组共享或 AA 拼车比例计算净成本 | **`费用与订阅`** 标签页右上角 → **`自定义订阅设置 ✎`** |
+
+<details>
+<summary>常用 <code>agy-context</code> 终端命令速查</summary>
 
 ```bash
-git clone https://github.com/Dong-Kevin/agy-plugins.git
-cd agy-plugins
-agy plugin install ./plugins/agy-context-viewer
+agy-context                  # 终端 ANSI 看板（上下文占比、生成速度、近 5 轮涨跌、双池配额）
+agy-context aux              # 唤醒 / 切至 Antigravity 右侧辅助栏看板
+agy-context float            # 显隐独立置顶小窗（close 关闭 / quit 退出守护进程）
+agy-context menubar quota    # 菜单栏切为配额剩余（可选 context / speed / quota / on / off / status）
+agy-context turns            # 查看近 20 轮上下文 Δ、缓存命中率与工具调用明细
+agy-context web              # 启动 127.0.0.1:18970 独立 Web 看板并打开浏览器
+agy-context json             # 输出结构化汇总 JSON（追加 --full 返回完整原始数据）
 ```
 
-### 方式 5：克隆仓库或下载 Release 离线包安装
-
-```bash
-git clone https://github.com/Dong-Kevin/agy-plugins.git
-cd agy-plugins
-./install.sh agy-context-viewer   # Windows PowerShell 执行：.\install.ps1 -Plugin agy-context-viewer
-```
-
-也可在 [Releases](https://github.com/Dong-Kevin/agy-plugins/releases) 页面下载 `context-viewer-v1.7.8.zip` 与对应的 `.sha256` 校验文件，通过 `shasum -a 256 -c context-viewer-v1.7.8.zip.sha256` 核验完整性后解压执行 `./context-viewer/install.sh`（或 `agy plugin install ./context-viewer`）。
+</details>
 
 ---
 
-## 快速上手
+## 核心功能与界面预览
 
-### 快捷键与快捷命令速查
+- **当前会话诊断**：自动对齐客户端上下文预算（200K / 256K / 1M），拆分系统提示、工具定义与对话历史占比，并记录 TTFT、流式 `tok/s` 与每轮工具增幅。
+- **桌面端 + `agy` CLI 汇总**：合并统计两个来源的 **53 周热力图**、日/周/月/年分布及 **Gemini / 非 Gemini（Claude · GPT）** 双配额池 5h + 周额度余量与 API 等值参考。
 
-| 触发场景 | 默认快捷键 / 命令 | 说明 |
-| :--- | :--- | :--- |
-| **独立置顶看板开关（macOS）** | **`⌥⌘K`** | 一键弹出 / 收回右侧置顶小窗（默认仅宿主或看板前台生效；面板点击录制改键或切全局生效；看板内 Win / Linux 为 **`Ctrl+Alt+K`**） |
-| **AGY 右侧辅助栏看板直达** | **`⌃⌥K`**（Win / Linux **`Ctrl+Alt+Shift+K`**） | 一键唤醒并切换 Antigravity 原生右侧辅助栏到上下文看板（面板点击录制自定义，或运行 `agy-context aux` / `aux-shortcut`） |
-| **置顶切换 / 快速收回** | **`⌘⇧P`** · **`⌘W`** | 独立小窗内切换常驻置顶状态 / 快速收回隐藏 |
-| **macOS 顶部系统菜单栏** | **左键单击** / **右键单击** | 左键 `<5ms` 显隐看板小窗；右键快速切换 3 档显示指标或置顶状态 |
-| **宿主右侧辅助栏与对话触发** | **`⌘⇧B`**（Win / Linux **`Ctrl+Shift+B`**）<br/>**`/context-viewer`** · [`sidecar://context-viewer/dashboard/`](sidecar://context-viewer/dashboard/) | 开关宿主 Aux Pane；聊天中输入斜杠命令或点击深链接直达看板 |
-| **终端 CLI 快捷命令** | **`agy-context`** · `aux` · `float` · `menubar` · `shortcut` · `aux-shortcut` · `turns` · `json` · `web` | 终端进度条总览、AGY 侧栏直达、小窗 / 菜单栏 / 双快捷键控制、逐轮审计与本地 Web 看板 |
+<p align="center">
+  <strong>macOS 顶部菜单栏常驻与悬停详情：</strong><br/>
+  <img src="docs/images/macos-menubar-badge.png" alt="macOS 菜单栏状态胶囊" width="210" />
+  &nbsp;&nbsp;
+  <img src="docs/images/macos-menubar-tooltip.png" alt="macOS 菜单栏 Tooltip" width="242" />
+</p>
 
-### 1. 在 Antigravity 桌面端 / IDE 中使用
-
-1. **顶部系统菜单栏常驻图标（macOS 默认开启）**
-   - **左键单击** 屏幕右上角图标：`<5ms` 弹出或收回右侧看板小窗；
-   - **右键单击** 菜单栏图标：直接勾选切换 **当前上下文使用占比 / 最新生成速度与耗时 / 5 小时与 Week 额度**，或切换小窗置顶、隐藏菜单栏图标；
-   - 也可点击看板右上角调色盘按钮在「快捷入口模式与外观定制」抽屉中一键切换。
-2. **屏幕右侧独立置顶小窗（`📌` `⌥⌘K`）与 AGY 侧栏直达（`⌃⌥K`）**
-   - 在 Antigravity 前台直接按下 **`⌥⌘K`**（Windows / Linux 看板内为 `Ctrl+Alt+K`）、点击看板顶栏 **`📌` 按钮** 或在终端执行 `agy-context float`，即可一键打开或关闭屏幕右侧独立小窗；
-   - 按 **`⌃⌥K`**（或运行 `agy-context aux`）可直接从 `Overview`、收起态或跨插件状态下唤醒并将 Antigravity 原生右侧辅助栏切到上下文看板（右键插件标签选择 `Pin Tab` 可跨会话常驻并防止被 `×` 关闭；首次冷启动未加载时将给出原生悬浮提示；建议搭配 `⌃⌥` / `⌥⌘` 组合以避开单 `Ctrl+<字母>` 编辑器快捷键冲突）；
-   - 点击看板右上角调色盘按钮打开「快捷入口模式与外观定制」，可在 **独立悬浮窗快捷键** 与 **AGY 侧栏看板键** 行直接点击按键录制自定义组合键、切换「仅宿主前台 / 全局生效」或停用 / 恢复默认；
-   - 点击窗口标题栏右侧 `📌 已置顶`（或按 `Cmd+Shift+P`）可切换置顶 / 普通窗口层级；再次按 `⌥⌘K`、按 `Cmd+W`、左键点击菜单栏图标或运行 `agy-context float close` 即可收回。
-3. **宿主右侧辅助栏内嵌模式**
-   - 在左侧 **Customizations → Plugins** 中确认已启用「上下文与 Token 看板」，点击右上角辅助栏图标（或按 `⌃⌥K` / 点击 `sidecar://context-viewer/dashboard/` 链接）即可内嵌分屏查看。
-
-### 2. 在终端与 `agy` CLI 中使用
-
-- **对话内直接调用技能**：在 `agy` 对话框中输入 `/context-viewer`，或直接提问「查看当前会话上下文占用、生成速度与配额余量」。
-- **终端 `agy-context` 命令速查**：
-
-```bash
-agy-context                  # 终端彩色进度条汇总（当前窗口水位、速度、近 5 轮涨跌、双维度配额池余量）
-agy-context aux              # 唤醒并将 Antigravity 右侧辅助栏切到上下文看板
-agy-context menubar context  # 菜单栏显示：当前上下文使用占比（◈ 86%）
-agy-context menubar speed    # 菜单栏显示：最新生成速度与耗时（⚡ 46t/s·33s (均 39/峰 132)）
-agy-context menubar quota    # 菜单栏显示：5 小时 / Week 额度余量（⏳ 5h 99%·周93%）
-agy-context menubar off      # 关闭顶部菜单栏常驻图标（传 on 重新开启，传 status 查看当前状态）
-agy-context float            # 弹出 / 切换屏幕右侧独立置顶小窗（传 close 收回，传 quit 退出守护进程）
-agy-context shortcut         # 查看或自定义独立悬浮窗快捷键（如 opt+cmd+l / reset / off / --global）
-agy-context aux-shortcut     # 查看或自定义 AGY 侧栏看板快捷键（如 ctrl+opt+l / reset / off / --global）
-agy-context turns            # 查看最近 20 轮上下文涨跌（±Delta）、缓存率与工具调用时间线
-agy-context json             # 输出结构化 JSON 摘要（追加 --full 输出完整原始载荷，便于脚本集成）
-agy-context web              # 在 127.0.0.1:18970 启动本地只读 Web 服务并在浏览器打开完整看板
-```
-
-> 若仅通过 `agy plugin install` 安装而未运行 `install.sh`，可直接执行：`node ~/.gemini/config/plugins/context-viewer/sidecars/dashboard/cli.mjs`（若插件目录名为 `agy-context-viewer` 则替换为对应目录名）。
+<table>
+  <tr>
+    <td align="center" width="33%">
+      <strong>当前会话 · 上下文透视</strong><br/>
+      <img src="docs/images/context-overview.png" width="245" alt="上下文窗口占比与构成" />
+    </td>
+    <td align="center" width="33%">
+      <strong>生成速度与逐轮增幅</strong><br/>
+      <img src="docs/images/speed-and-turns.png" width="245" alt="TTFT 与每轮增量明细" />
+    </td>
+    <td align="center" width="33%">
+      <strong>双池配额与 API 折算</strong><br/>
+      <img src="docs/images/cost-and-quotas.png" width="245" alt="Gemini 与非 Gemini 双池配额" />
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <strong>53 周趋势与历史热力图</strong><br/>
+      <img src="docs/images/usage-trends.png" width="245" alt="桌面端与 CLI 用量热力图" />
+    </td>
+    <td align="center">
+      <strong>快捷键与配色定制抽屉</strong><br/>
+      <img src="docs/images/customizer-drawer.png" width="250" alt="双快捷键与 5 套配色定制" />
+    </td>
+    <td align="center">
+      <strong>独立置顶小窗（<code>📌</code>）</strong><br/>
+      <img src="docs/images/pinned-float-window.png" width="245" alt="独立置顶悬浮窗" />
+    </td>
+  </tr>
+</table>
 
 ---
 
-## 核心视图与统计维度
+## 致谢与说明
 
-| 视图模块 | 核心指标与交互能力 |
-| :--- | :--- |
-| **当前会话** | 预算占比圆环、输入框待发送 Token 实时预估、窗口上限快切（`自动 / 200K / 256K / 1M`）、单轮与累计缓存读取命中率、三段上下文构成条（`系统提示词 / 工具定义与调用 / 对话与思考历史`，支持展开工具 Schema 字节明细）、四维累计吞吐、服务端精确 `tok/s`（综合 / 流式峰值 / 会话均值）与首字延迟 `TTFT`、当前模型 `5h + Week` 配额条、近 24 轮增长曲线、**近 40 轮消耗涨跌 `±Delta` 与工具调用筛选列表** 及多媒体附件审计。 |
-| **用量趋势** | 支持 **全部来源 / 桌面端 / CLI** 一键过滤；提供累计、今日、本月、年度 4 张核心汇总卡片（含活跃天数、请求数与参考折算）；内置 **每天（53 周 GitHub 风格日历热力图） / 每周 / 每月 / 今年（12 月气泡矩阵） / 累计曲线** 5 种交互图表。 |
-| **费用与订阅** | 自动识别 `Google AI Pro` / `Google AI Ultra` 等档位（登录邮箱自动脱敏）与 `Gemini / 非 Gemini` 分模型组 **`5h` 滚动限额 + `Week` 周度共享池余量**；支持 **家庭组共享（免额外付费）/ 家庭组 AA 拼车 / 赠送 / 多地区币种** 自定义设置，并提供 **本期自然月 / 全量历史** API 零售等值折算与分模型消耗排行。 |
-
----
-
-## 目录结构
-
-```text
-agy-context-viewer/
-├── plugin.json                        # Antigravity 官方插件清单
-├── install.sh                         # macOS / Linux 一键安装、热升级与卸载脚本
-├── install.ps1                        # Windows PowerShell 一键安装与卸载脚本
-├── assets/
-│   └── logo.svg                       # 插件矢量图标
-├── docs/
-│   └── images/                        # README 界面预览截图（打包 Release 时自动排除，保持运行时轻量）
-├── skills/
-│   └── context-viewer/
-│       ├── SKILL.md                   # /context-viewer 跨端技能定义
-│       └── scripts/status.mjs         # 目录名无关的便携 CLI 调用入口
-├── sidecars/
-│   └── dashboard/
-│       ├── sidecar.json               # 官方 Aux Pane UI Sidecar 声明
-│       ├── main.mjs                   # Sidecar 与本地只读 HTTP 服务入口
-│       ├── collector.mjs              # 会话归档解析、活跃对话跟随与双维度配额只读采集器
-│       ├── pricing.mjs                # 模型代际识别、API 定价、Ultra/家庭组与多币种订阅参考库
-│       ├── float_window.mjs           # 右侧置顶小窗与 macOS 顶部菜单栏守护进程控制器
-│       ├── native_float_macos.swift   # macOS 原生 NSStatusItem + WKWebView 零端口内存桥接实现
-│       ├── cli.mjs                    # agy-context 终端彩色看板与快捷控制入口
-│       ├── index.html                 # 看板前端页面结构
-│       ├── styles.css                 # --cv-* 命名空间完全隔离样式表（自适应亮暗主题）
-│       └── app.js                     # 看板前端渲染与交互逻辑
-└── scripts/
-    ├── verify.mjs                     # 清单规范、语法、敏感模式/PNG 元数据检查、CSS 隔离与行为回归测试
-    └── package-release.mjs            # 零依赖跨平台 Release ZIP 与 SHA-256 打包工具
-```
-
----
-
-## 隐私与安全机制
-
-- **100% 本地只读采集与零外部资源外链**：仅只读解析本机 `~/.gemini/antigravity/brain/`、`~/.gemini/antigravity-cli/brain/`、`~/.gemini/antigravity/annotations/` 归档元数据与本机 `127.0.0.1` 语言服务只读状态接口，前端完全使用宿主与系统本地字体栈（零外部 CDN / Google Fonts 请求），**绝不向任何外部服务器发送对话正文、文件路径、账号信息或遥测数据**。
-- **敏感信息脱敏与本地 HTTP 写保护**：界面显示的当前账号邮箱默认自动掩码脱敏，悬停提示自动剥离冗长 URL；独立 Web 模式与浏览器回退小窗严格仅绑定本机回环地址 `127.0.0.1`，并对写接口强制校验 `Host` / `Origin`、`application/json` 类型与进程级随机令牌（`X-CV-Token`）。
-- **配置隔离与安全保留**：外观、菜单栏模式与订阅自定义参数独立保存在 `~/.gemini/antigravity/sidecar_data/context-viewer/dashboard/data/settings_v1.json`，不触碰宿主 `~/.gemini/config/config.json` 核心配置；卸载插件时默认保留上述用户偏好与历史会话归档。
-
----
-
-## 更新与卸载
-
-- **就地平滑升级**：重新执行上方任一安装命令（如 `./install.sh` 或 `.\install.ps1`），脚本会先校验完整运行时文件、就地更新脚本并最后原子重命名替换 `sidecar.json` 触发平滑重载。
-- **卸载与数据清理**：
-  - 脚本卸载：macOS / Linux 运行 `./install.sh --uninstall`（或在线脚本末尾加 `-s -- --uninstall`）；Windows 运行 `.\install.ps1 -Uninstall`（移除插件目录与命令行入口，保留用户偏好设置；如需连同看板偏好一并清除，可手动删除 `~/.gemini/antigravity/sidecar_data/context-viewer`）
-  - `agy` CLI 卸载：`agy plugin uninstall context-viewer`
-  - 桌面端卸载：在 `customization://context-viewer` 插件详情页点击 **Uninstall**
-
----
-
-## 本地开发与发布校验
-
-```bash
-node scripts/verify.mjs           # 运行清单规范、JS 语法、常见敏感模式与 PNG 元数据块检查、CSS 隔离及行为回归测试
-node scripts/package-release.mjs  # 生成轻量发布包 dist/context-viewer-v1.7.8.zip 与 .sha256
-```
-
----
-
-## 致谢
-
-本项目在构思之初深受开源项目 **[elviscjn-cjn/antigravity-context-viewer](https://github.com/elviscjn-cjn/antigravity-context-viewer)** 的启发 -- 该项目率先探索了 Google Antigravity 客户端的上下文窗口构成透视、Token 活跃热力图与模型配额可视化方案，为我们梳理核心观测指标与看板呈现提供了极具价值的参考。在此向原作者的开创性探索致以诚挚感谢与敬意！
-
-站在社区先行者的肩膀上，`agy-context-viewer` 遵循 Antigravity 官方 `plugin.json` + `sidecar_sdk` 插件体系从零全新编写（免修改客户端 `app.asar`、零签名破坏），并进一步构建了 macOS 原生顶部菜单栏三档常驻徽章、切换对话自动跟随、屏幕右侧独立置顶小窗（`📌`）、`5h + Week` 双维度共享额度池、`Google AI Ultra` 与家庭组订阅折算以及 `agy` CLI 终端套件。
-
----
-
-## License
-
-基于 [MIT License](./LICENSE) 开源。
+- **致谢**：本项目灵感源自开源项目 **[elviscjn-cjn/antigravity-context-viewer](https://github.com/elviscjn-cjn/antigravity-context-viewer)**，感谢原作者在上下文构成透视、活跃热力图与配额可视化上的开创性探索。
+- **兼容与验证**：依赖 `Node.js >= 18`；macOS Apple Silicon 原生菜单栏、悬浮窗与真实宿主交互已完整实测，Windows / Linux 支持 AGY 原生 Sidecar、独立 Web UI 与 `agy-context` CLI。
+- **本地回归校验**：`node plugins/agy-context-viewer/scripts/verify.mjs`（协议为 [MIT License](../../LICENSE)）。

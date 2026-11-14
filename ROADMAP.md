@@ -1,27 +1,21 @@
 # agy-plugins ROADMAP
 
-更新时间：2026-11-14 20:49（Asia/Shanghai）。
+更新时间：2026-11-14 22:07（Asia/Shanghai）。
 
 ## 本次交付目标
 
-1. 发布 `v2026.11.14.6` 配额池语义化合并、历史步骤模型归因补全与失真 Credits 清理版（`agy-finder v0.2.7` / `context-viewer v1.7.8`）：
-   - 将受同一 Gemini 共享池约束的 `Gemini 4 Hydrogen`（含 `Low` / `Medium` / `High` / `XHigh`）及后续 Gemini 型号稳定合并进单一 **`Gemini 模型`** 配额池，与 **`非 Gemini 模型（Claude / GPT）`** 并列展示（保留成员档位悬浮明细）。
-   - 自动并发回溯宿主 `GetCascadeTrajectoryGeneratorMetadata` 并持久化零隐私步骤模型缓存，消除未点开历史会话产生的「未记录模型归档请求」，并合并同一未收录单价模型的推理强度后缀。
-   - 移除服务端恒定不变的遗留静态占位字段 `Prompt Credits` / `Flow Credits`。
+1. 优化全仓 6 份中英文 README（精简冗余篇幅约 52%，突出核心介绍、Agent 一句话安装、快捷键与 UI/CLI 自定义位置），并重制 7 张 `@2x` 脱敏高清截图与当前代码功能对齐（[README.md](./README.md)、[README_EN.md](./README_EN.md)、两款插件 README）。
 
 ## 当前阶段与状态
 
-- **已完成（`v2026.11.14.6` 发布就绪）**：
-  - **配额池统一与模型归因优化（[pricing.mjs](./plugins/agy-context-viewer/sidecars/dashboard/pricing.mjs)）**：
-    - 定义统一推理强度后缀正则 `EFFORT_SUFFIX_RE`（覆盖 `XHigh` / `Minimal` / `Low` / `Medium` / `High` / `Thinking` / `Fast`），修复 `resolveConfigSummaryGroup()`、`buildQuotaPools()` 与 `resolveModelQuota()` 中 `(XHigh)` 漏匹配导致的拆池问题。
-    - 子族标签 `extractSubfamilyTags()` 仅解析配额组标识字段（`displayName` + `bucketId`），不再被说明文案 `description` 中的示例模型列表误导；扩展 `hydrogen` 识别与品牌回退逻辑，并为单品牌总池生成语义化 `displayTitle` / `shortLabel`（`Gemini 模型` / `非 Gemini 模型（Claude / GPT）`）。
-    - 补齐 `MODEL_PLACEHOLDER_M322` -> `gemini-3.8-flash` 映射，并在 `summarizeApiCost()` 中剥离未收录单价模型的强度后缀（如 `Gemini 4 Hydrogen (XHigh)` / `(High)` 合并为单一 `Gemini 4 Hydrogen` 行），同时保持 `Gemini Flash` / `Orchestrator (Carbon)` / `Gemini 4 Hydrogen` 在 Hybrid 模式下按基准折算（满足 `S4` 约束）。
-  - **历史会话步骤模型并发回溯与离线缓存（[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs)）**：
-    - `collectTokenHistory()` 在语言服务可达时按最多 6 并发增量拉取未缓存历史会话的 `GetCascadeTrajectoryGeneratorMetadata`，并将零隐私 `{ size, mtimeMs, steps }` 映射原子写入插件数据目录 `gen_step_models_v1.json`（`scanConversation()` 同步维护，`lsGenMissCache` 60s 避免未知会话重复轮询），确保在线与离线 CLI 模式均保持 `missingModel: 0`。
-  - **界面清理、版本同步与回归测试**：
-    - [app.js](./plugins/agy-context-viewer/sidecars/dashboard/app.js) 移除 `Prompt Credits` 与 `Flow Credits` 展示行及 `fmtCredit`，[float_window.mjs](./plugins/agy-context-viewer/sidecars/dashboard/float_window.mjs) 与 [cli.mjs](./plugins/agy-context-viewer/sidecars/dashboard/cli.mjs) 适配 `shortLabel` / `displayTitle`；同步升级 `context-viewer` 版本至 `1.7.8`（`plugin.json`、`index.html`、`cli.mjs` 及根目录与插件中英文 README，并清理 `Prompt / Flow Credits` 文档提及）。
-    - [plugins/agy-context-viewer/scripts/verify.mjs](./plugins/agy-context-viewer/scripts/verify.mjs) 新增 `Q1`（`Hydrogen`/`XHigh` 并池、语义标题、Credits 移除与强度后缀合并）与 `H1`（未访问历史会话自动回溯 `GeneratorMetadata` 与离线缓存命中）回归测试。
-  - **本机热升级与实机数据验收**：执行 `LC_ALL=C node scripts/package-all.mjs && ./install.sh` 完成本地打包与热升级（`context-viewer` 1.7.8 / `agy-finder` 0.2.7，零 `[WARN]`，守护进程 PID 83044 运行正常），并通过真实 `~/.local/bin/agy-context --json --full` 验证：配额池收敛为 2 池（`Gemini 模型` 15 档 / `非 Gemini 模型（Claude / GPT）` 7 档），全量 5,505 次请求 `missingModel: 0`；macOS 桌面端看板 UI 已由用户实测确认。
+- **已完成（全仓 README 精简与高清截图更新）**：
+  - **7 张 `@2x` 脱敏截图更新**（[cost-and-quotas.png](./plugins/agy-context-viewer/docs/images/cost-and-quotas.png)、[customizer-drawer.png](./plugins/agy-context-viewer/docs/images/customizer-drawer.png)、[usage-trends.png](./plugins/agy-context-viewer/docs/images/usage-trends.png)、[macos-menubar-tooltip.png](./plugins/agy-context-viewer/docs/images/macos-menubar-tooltip.png)、[finder-tree-reveal.png](./plugins/agy-finder/docs/images/finder-tree-reveal.png)、[finder-shortcuts.png](./plugins/agy-finder/docs/images/finder-shortcuts.png)、[finder-quick-preview.png](./plugins/agy-finder/docs/images/finder-quick-preview.png)）：
+    - 基于临时隔离目录与无真实隐私的合成数据重新捕获，已剥离全部 PNG 禁用元数据块并目视确认无右侧裁剪。
+    - `cost-and-quotas.png` 与 `macos-menubar-tooltip.png` 对齐 `context-viewer v1.7.8`：展示 `Gemini 模型`（15 档）与 `非 Gemini 模型（Claude / GPT）`（7 档）双池配额，移除静态 `Prompt / Flow Credits` 并消除未记录模型残留；`agy-finder` 截图更新至 `v0.2.7` 清单版本、完整工具栏、对话提及与快捷键录制面板。
+  - **6 份 README 实用化精简（共 1,364 行 -> 650 行）**：
+    - 保留双语切换与相对 `docs/images/` 路径（兼容独立 ZIP 发布包 URL 重写），顶部直接给出核心介绍与 **Agent 一句话安装**，使用折叠区块收纳手动安装 / 卸载与 CLI 速查，并重点标出 **快捷键触发方式** 与 **UI 自定义位置**（Finder `⌨` 按钮、`context-viewer` `📌` 右侧调色盘、`自定义订阅设置 ✎` 与右键 `Pin Tab`）。
+- **已发布基线**：
+  - `v2026.11.14.6`：`agy-finder v0.2.7` / `context-viewer v1.7.8`（配额池语义化合并 `Gemini 模型` / `非 Gemini 模型`、历史步骤模型并发回溯与离线缓存、清理静态 `Prompt / Flow Credits`、`Q1`/`H1` 回归测试与本机热升级验收）。
 - **历史基线**：
   - `v2026.11.14.5`（`8ac2d50`）：`agy-finder v0.2.7` / `context-viewer v1.7.7`（守护进程精确 `argv[1]` 入口边界核验、`isDirectDaemonEntry` 自启动防护、`install.ps1` `$VerifyJs` 同构校验及 README 平台验证范围客观校准）。
   - `v2026.11.14.4`（`71ec790`）：`agy-finder v0.2.6` / `context-viewer v1.7.6`（实现守护进程跨平台 PID 身份核验、修复安装升级 `$STAGE_DIR` 预退出调用边界与 `float_window.mjs` `quit` 状态清理顺序并完成本机热升级发布；注：身份核验在该版本基于命令行子串匹配，已于 `v0.2.7` / `v1.7.7` 收紧至精确 `argv[1]` 入口边界）。
@@ -41,6 +35,5 @@
 
 ## 最近验证
 
-- `node scripts/verify.mjs --strict-git-identity`：通过（含 `context-viewer v1.7.8` 6/6 自检、`Q1` 配额池语义合并与 Credits 清理、`H1` 历史步骤模型回溯与离线缓存持久化、`agy-finder` 自检、隐私扫描与 Git noreply 身份门禁），时间：`2026-11-14 20:49`（Asia/Shanghai）。
-- `RELEASE_REF=v2026.11.14.6 LC_ALL=C node scripts/package-all.mjs && (cd dist && ls -lh agy-finder-v0.2.7.zip context-viewer-v1.7.8.zip && unzip -t agy-finder-v0.2.7.zip >/dev/null && unzip -t context-viewer-v1.7.8.zip >/dev/null && LC_ALL=C shasum -a 256 -c agy-finder-v0.2.7.zip.sha256 context-viewer-v1.7.8.zip.sha256)`：通过，生成 `dist/agy-finder-v0.2.7.zip`（94.0 KB，20 个文件）与 `dist/context-viewer-v1.7.8.zip`（179.3 KB，20 个文件），ZIP 完整性与 SHA-256 校验均 `OK`，时间：`2026-11-14 20:49`（Asia/Shanghai）。
-- `./install.sh && ~/.local/bin/agy-context float status --json && ~/.local/bin/agy-context --json --full`：通过，零 `[WARN]` 完成本机热升级（`daemonRunning: true`，PID `83044`），`quotasCount=2`（`Gemini 模型` 15 档、`非 Gemini 模型（Claude / GPT）` 7 档），`unpricedReasons={"missingModel":0,"unsupportedModel":3343,"missingUsage":0}`，时间：`2026-11-14 20:34`（Asia/Shanghai）。
+- `node scripts/verify.mjs --strict-git-identity && node scripts/package-all.mjs`：通过（含全仓隐私扫描、PNG 元数据块 audit、`context-viewer v1.7.8` 6/6 自检、`agy-finder v0.2.7` 全套自检、跨插件锁校验与双插件 ZIP 发布包生成 `agy-finder-v0.2.7.zip` 90.4 KB / `context-viewer-v1.7.8.zip` 167.3 KB），时间：`2026-11-14 22:07`（Asia/Shanghai）。
+- `RELEASE_REF=v2026.11.14.6` 实机发布验收（`./install.sh` 热升级、双池与 5,505 次请求实机数据）：见历史提交 `v2026.11.14.6`，时间：`2026-11-14 20:49`（Asia/Shanghai）。
