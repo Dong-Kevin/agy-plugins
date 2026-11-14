@@ -109,8 +109,15 @@ agy-context json             # Output structured JSON summary (append --full for
 
 ---
 
-## Credits & Notes
+## Acknowledgements
 
-- **Attribution**: Originally inspired by **[elviscjn-cjn/antigravity-context-viewer](https://github.com/elviscjn-cjn/antigravity-context-viewer)** -- sincere thanks to its author for pioneering Antigravity context breakdown and quota visualization.
+This project was originally inspired by **[elviscjn-cjn/antigravity-context-viewer](https://github.com/elviscjn-cjn/antigravity-context-viewer)** -- the pioneering open-source project that first explored context window breakdown, token activity heatmaps, and model quota visualization for Google Antigravity. Its thoughtful metric dimensions and visual clarity served as a valuable reference when we began designing our workflow. Huge thanks and respect to the original author!
+
+Building upon that inspiration, `agy-context-viewer` was engineered from scratch as a clean-room, official-spec Antigravity Plugin (`plugin.json` + `sidecar_sdk`) -- requiring zero `app.asar` modification and preserving native app code-signing -- while introducing a native macOS Menu Bar 3-mode live badge, automatic conversation-switch follow, a right-side pinned floating window (`📌`), dual `5h + Weekly` shared quota pools, `Google AI Ultra` & Family Sharing cost modeling, and a full `agy` CLI terminal suite.
+
+---
+
+## Compatibility & License
+
 - **Compatibility**: Requires `Node.js >= 18`. Native Menu Bar and floating window are verified on Apple Silicon macOS; Windows & Linux support the native AGY Aux Pane Sidecar, standalone web UI, and `agy-context` CLI.
-- **Local Verification**: Run `node plugins/agy-context-viewer/scripts/verify.mjs`. Licensed under [MIT License](../../LICENSE).
+- **Verification & License**: Run `node plugins/agy-context-viewer/scripts/verify.mjs`. Released under the [MIT License](./LICENSE).

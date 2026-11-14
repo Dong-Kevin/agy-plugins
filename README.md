@@ -110,6 +110,12 @@ $env:AGY_PLUGIN="agy-finder"; irm https://raw.githubusercontent.com/Dong-Kevin/a
 
 ---
 
+## 致谢
+
+- `plugins/agy-context-viewer` 在构思之初深受开源项目 **[elviscjn-cjn/antigravity-context-viewer](https://github.com/elviscjn-cjn/antigravity-context-viewer)** 的启发 -- 该项目率先探索了 Google Antigravity 上下文构成透视、Token 活跃热力图与配额可视化方案，谨向原作者的开创性探索致以诚挚感谢与敬意！
+
+---
+
 ## 本地校验与许可证
 
 ```bash

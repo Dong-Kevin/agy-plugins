@@ -110,6 +110,12 @@ $env:AGY_PLUGIN="agy-finder"; irm https://raw.githubusercontent.com/Dong-Kevin/a
 
 ---
 
+## Acknowledgements
+
+- `plugins/agy-context-viewer` was originally inspired by **[elviscjn-cjn/antigravity-context-viewer](https://github.com/elviscjn-cjn/antigravity-context-viewer)** -- the pioneering open-source project that first explored context breakdown, token activity heatmaps, and model quota visualization for Google Antigravity. Sincere thanks and respect to the original author!
+
+---
+
 ## Local Verification & License
 
 ```bash

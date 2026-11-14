@@ -86,4 +86,4 @@ agy-finder quit                 # 停止后台抽屉守护进程
 ## 兼容与说明
 
 - **插件协同**：与 `context-viewer` 同机安装时共用 `~/.gemini/antigravity/agy_aux_pane_trigger.json` 互斥锁，建议同步升级 `context-viewer >= v1.7.4` 并重启已有后台进程。
-- **验证与协议**：依赖 `Node.js >= 18`；macOS 抽屉与真实宿主交互已实测，Windows / Linux 支持 AGY 原生 Sidecar 与 `agy-finder` CLI。本地校验：`node plugins/agy-finder/scripts/verify.mjs`（[MIT License](../../LICENSE)）。
+- **验证与协议**：依赖 `Node.js >= 18`；macOS 抽屉与真实宿主交互已实测，Windows / Linux 支持 AGY 原生 Sidecar 与 `agy-finder` CLI。本地校验：`node plugins/agy-finder/scripts/verify.mjs`（[MIT License](./LICENSE)）。

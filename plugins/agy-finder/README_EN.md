@@ -86,4 +86,4 @@ agy-finder quit                 # Stop the background drawer daemon
 ## Notes & License
 
 - **Coexisting Plugin Lock**: When installed alongside `context-viewer`, both share `~/.gemini/antigravity/agy_aux_pane_trigger.json`. Keep `context-viewer >= v1.7.4` and restart existing daemons cleanly.
-- **Verification**: Requires `Node.js >= 18`. Verified on Apple Silicon macOS with live host interaction; Windows & Linux support the native AGY Aux Pane Sidecar and `agy-finder` CLI. Local test suite: `node plugins/agy-finder/scripts/verify.mjs` ([MIT License](../../LICENSE)).
+- **Verification**: Requires `Node.js >= 18`. Verified on Apple Silicon macOS with live host interaction; Windows & Linux support the native AGY Aux Pane Sidecar and `agy-finder` CLI. Local test suite: `node plugins/agy-finder/scripts/verify.mjs` ([MIT License](./LICENSE)).

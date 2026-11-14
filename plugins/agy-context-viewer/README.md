@@ -109,8 +109,15 @@ agy-context json             # 输出结构化汇总 JSON（追加 --full 返回
 
 ---
 
-## 致谢与说明
+## 致谢
 
-- **致谢**：本项目灵感源自开源项目 **[elviscjn-cjn/antigravity-context-viewer](https://github.com/elviscjn-cjn/antigravity-context-viewer)**，感谢原作者在上下文构成透视、活跃热力图与配额可视化上的开创性探索。
-- **兼容与验证**：依赖 `Node.js >= 18`；macOS Apple Silicon 原生菜单栏、悬浮窗与真实宿主交互已完整实测，Windows / Linux 支持 AGY 原生 Sidecar、独立 Web UI 与 `agy-context` CLI。
-- **本地回归校验**：`node plugins/agy-context-viewer/scripts/verify.mjs`（协议为 [MIT License](../../LICENSE)）。
+本项目在构思之初深受开源项目 **[elviscjn-cjn/antigravity-context-viewer](https://github.com/elviscjn-cjn/antigravity-context-viewer)** 的启发 -- 该项目率先探索了 Google Antigravity 客户端的上下文窗口构成透视、Token 活跃热力图与模型配额可视化方案，为我们梳理核心观测指标与看板呈现提供了极具价值的参考。在此向原作者的开创性探索致以诚挚感谢与敬意！
+
+站在社区先行者的肩膀上，`agy-context-viewer` 遵循 Antigravity 官方 `plugin.json` + `sidecar_sdk` 插件体系从零全新编写（免修改客户端 `app.asar`、零签名破坏），并进一步构建了 macOS 原生顶部菜单栏三档常驻徽章、切换对话自动跟随、屏幕右侧独立置顶小窗（`📌`）、`5h + Week` 双维度共享额度池、`Google AI Ultra` 与家庭组订阅折算以及 `agy` CLI 终端套件。
+
+---
+
+## 兼容与校验
+
+- **运行环境**：依赖 `Node.js >= 18`；macOS Apple Silicon 原生菜单栏、悬浮窗与真实宿主交互已完整实测，Windows / Linux 支持 AGY 原生 Sidecar、独立 Web UI 与 `agy-context` CLI。
+- **本地校验与协议**：`node plugins/agy-context-viewer/scripts/verify.mjs`；基于 [MIT License](./LICENSE) 开源。
