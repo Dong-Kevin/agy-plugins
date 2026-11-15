@@ -1580,6 +1580,35 @@
     };
 
     window.addEventListener('message', (event) => {
+      if (!event || !window.parent || window.parent === window || event.source !== window.parent) {
+        return;
+      }
+      if (!window.sidecar || window.__AF_DRAWER_MODE__ || (typeof state !== 'undefined' && state?.isDrawerMode)) {
+        return;
+      }
+      const rawOrigin = typeof event.origin === 'string' ? event.origin.trim() : '';
+      if (!rawOrigin || rawOrigin === 'null') return;
+      const lowerOrigin = rawOrigin.toLowerCase();
+      let isTrustedOrigin = lowerOrigin === 'file://';
+      if (!isTrustedOrigin) {
+        const match = /^([a-z][a-z0-9+.-]*):\/\/([^/?#@]+)$/.exec(lowerOrigin);
+        if (!match) return;
+        const [, scheme, authority] = match;
+        if (scheme === 'http' || scheme === 'https') {
+          isTrustedOrigin = /^(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/.test(authority);
+        } else {
+          isTrustedOrigin = (
+            scheme.startsWith('vscode-') ||
+            scheme === 'antigravity' ||
+            scheme.startsWith('antigravity-') ||
+            scheme === 'sidecar' ||
+            scheme === 'app' ||
+            scheme === 'electron'
+          );
+        }
+      }
+      if (!isTrustedOrigin) return;
+
       if (event.data?.type === 'theme-change') {
         setTimeout(applyTheme, 20);
         return;
@@ -1751,6 +1780,7 @@
     auxVisibilityCallbacks.add(handleVisibilityChange);
     document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('message', (ev) => {
+      if (!ev || !window.parent || window.parent === window || ev.source !== window.parent) return;
       if (ev.data?.type === 'theme-change' || ev.data?.type === 'workspace-change') {
         handleVisibilityChange();
       }

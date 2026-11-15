@@ -2799,12 +2799,17 @@ async function fetchGeneratorMetadataForConv(convId, force = false, options = {}
 
   const nowMs = Number(options.nowMs) || Date.now();
   const bypassMemTtl = Boolean(options.bypassMemTtl);
+  const hasLogSig = options.logSize !== undefined && options.logMtimeMs !== undefined;
   const cached = convGenMetaCache.get(convId);
-  if (!force && !bypassMemTtl && cached && cached.lsKey === lsKey && (nowMs - cached.at) < 15_000) {
+  const cachedMatchesLogSig = !hasLogSig || (
+    cached?.logSize === options.logSize &&
+    cached?.logMtimeMs === options.logMtimeMs
+  );
+  if (!force && !bypassMemTtl && cached && cached.lsKey === lsKey && cachedMatchesLogSig && (nowMs - cached.at) < 15_000) {
     return cached;
   }
 
-  const flightKey = `${lsKey}|${convId}`;
+  const flightKey = `${lsKey}|${convId}|${hasLogSig ? `${options.logSize}:${options.logMtimeMs}` : ''}`;
   const canCoalesce = !force && !options.signal && !bypassMemTtl;
   if (canCoalesce && inFlightGenMeta.has(flightKey)) {
     return inFlightGenMeta.get(flightKey);
@@ -2826,33 +2831,42 @@ async function fetchGeneratorMetadataForConv(convId, force = false, options = {}
       }
     );
     if (res === null) {
-      return cached?.lsKey === lsKey ? { ...cached, fromFallbackCache: true, rpcFailed: true } : null;
+      return (cached?.lsKey === lsKey && cachedMatchesLogSig)
+        ? { ...cached, fromFallbackCache: true, rpcFailed: true }
+        : { at: nowMs, lsKey, generatorList: [], callsByStep: new Map(), rpcFailed: true };
     }
     if (!Array.isArray(res.generatorMetadata)) {
-      return cached?.lsKey === lsKey
+      return (cached?.lsKey === lsKey && cachedMatchesLogSig)
         ? { ...cached, fromFallbackCache: true, rpcFailed: false }
         : { at: nowMs, lsKey, generatorList: [], callsByStep: new Map(), emptyFromHost: true, rpcFailed: false };
     }
     if (res.generatorMetadata.length === 0) {
-      return cached?.lsKey === lsKey && cached?.callsByStep?.size
+      return (cached?.lsKey === lsKey && cachedMatchesLogSig && cached?.callsByStep?.size)
         ? { ...cached, fromFallbackCache: true, rpcFailed: false }
         : { at: nowMs, lsKey, generatorList: [], callsByStep: new Map(), emptyFromHost: true, rpcFailed: false };
     }
 
-    const callsByStep = new Map(cached?.lsKey === lsKey ? (cached?.callsByStep || []) : []);
+    const callsByStep = new Map(
+      (cached?.lsKey === lsKey && cachedMatchesLogSig) ? (cached?.callsByStep || []) : []
+    );
     const generatorList = res.generatorMetadata;
     for (const entry of generatorList) {
-      const hasModel = Boolean(extractStepModel(null, entry, ''));
       const indices = entry.stepIndices || (entry.stepIndex != null ? [entry.stepIndex] : []);
       for (const idx of indices) {
         const stepNum = Number(idx);
         if (!Number.isFinite(stepNum)) continue;
-        if (hasModel || !callsByStep.has(stepNum)) {
+        if (shouldReplaceGenStepEntry(callsByStep.get(stepNum), entry)) {
           callsByStep.set(stepNum, entry);
         }
       }
     }
-    const value = { at: nowMs, lsKey, generatorList, callsByStep };
+    const value = {
+      at: nowMs,
+      lsKey,
+      generatorList,
+      callsByStep,
+      ...(hasLogSig ? { logSize: options.logSize, logMtimeMs: options.logMtimeMs } : {})
+    };
     if (callsByStep.size > 0) {
       convGenMetaCache.set(convId, value);
     }
@@ -2924,22 +2938,22 @@ function slimGeneratorListForCache(generatorList = []) {
   });
 }
 
-function buildCallsByStepFromList(generatorList = []) {
-  const callsByStep = new Map();
-  if (!Array.isArray(generatorList)) return callsByStep;
-  for (const entry of generatorList) {
-    if (!entry || typeof entry !== 'object') continue;
-    const hasModel = Boolean(extractStepModel(null, entry, ''));
-    const indices = entry.stepIndices || (entry.stepIndex != null ? [entry.stepIndex] : []);
-    for (const idx of indices) {
-      const stepNum = Number(idx);
-      if (!Number.isFinite(stepNum)) continue;
-      if (hasModel || !callsByStep.has(stepNum)) {
-        callsByStep.set(stepNum, entry);
-      }
-    }
-  }
-  return callsByStep;
+function getGenStepServerUsage(entry) {
+  const cm = entry?.chatModel;
+  if (!cm || typeof cm !== 'object') return null;
+  const lastRetry = Array.isArray(cm.retryInfos) && cm.retryInfos.length
+    ? cm.retryInfos[cm.retryInfos.length - 1]
+    : null;
+  return lastRetry?.usage || cm.usage || null;
+}
+
+function getGenStepServerError(entry) {
+  const cm = entry?.chatModel;
+  if (!cm || typeof cm !== 'object') return '';
+  const lastRetry = Array.isArray(cm.retryInfos) && cm.retryInfos.length
+    ? cm.retryInfos[cm.retryInfos.length - 1]
+    : null;
+  return String(lastRetry?.error || cm.error || '');
 }
 
 function hasValidGenStepEntry(entry) {
@@ -2948,6 +2962,60 @@ function hasValidGenStepEntry(entry) {
     entry?.chatModel?.usage ||
     entry?.chatModel?.chatStartMetadata?.contextWindowMetadata
   ));
+}
+
+function hasCompleteGenStepMetrics(entry, sMeta = null) {
+  if (!entry || typeof entry !== 'object') return false;
+  const errText = getGenStepServerError(entry);
+  if (errText || sMeta?.isError) {
+    return hasValidGenStepEntry(entry) || Boolean(errText);
+  }
+  const hasModel = Boolean(extractStepModel(null, entry, ''));
+  const usage = getGenStepServerUsage(entry);
+  const srvTotal = usage
+    ? (Number(usage.inputTokens || 0) + Number(usage.cacheReadTokens || 0) + Number(usage.outputTokens || 0))
+    : 0;
+  return hasModel && srvTotal > 0;
+}
+
+function shouldReplaceGenStepEntry(prevEntry, nextEntry) {
+  if (!prevEntry) return true;
+  const prevComplete = hasCompleteGenStepMetrics(prevEntry);
+  const nextComplete = hasCompleteGenStepMetrics(nextEntry);
+  if (nextComplete && !prevComplete) return true;
+  if (!nextComplete && prevComplete) return false;
+  return Boolean(extractStepModel(null, nextEntry, ''));
+}
+
+function estimateStepDuration(rawSteps, arrayIdx, logMtimeMs) {
+  if (!Array.isArray(rawSteps) || arrayIdx < 0 || arrayIdx >= rawSteps.length) return null;
+  const s = rawSteps[arrayIdx];
+  const startMs = s?.created_at ? Date.parse(s.created_at) : NaN;
+  const nextStep = rawSteps[arrayIdx + 1];
+  const endMs = nextStep?.created_at
+    ? Date.parse(nextStep.created_at)
+    : (arrayIdx === rawSteps.length - 1 && logMtimeMs > startMs ? logMtimeMs : NaN);
+  if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs && (endMs - startMs) < 300_000) {
+    return Number(((endMs - startMs) / 1000).toFixed(2));
+  }
+  return null;
+}
+
+function buildCallsByStepFromList(generatorList = []) {
+  const callsByStep = new Map();
+  if (!Array.isArray(generatorList)) return callsByStep;
+  for (const entry of generatorList) {
+    if (!entry || typeof entry !== 'object') continue;
+    const indices = entry.stepIndices || (entry.stepIndex != null ? [entry.stepIndex] : []);
+    for (const idx of indices) {
+      const stepNum = Number(idx);
+      if (!Number.isFinite(stepNum)) continue;
+      if (shouldReplaceGenStepEntry(callsByStep.get(stepNum), entry)) {
+        callsByStep.set(stepNum, entry);
+      }
+    }
+  }
+  return callsByStep;
 }
 
 function getMaxGenStepIdx(generatorList = []) {
@@ -3201,14 +3269,16 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         toolCallsCount += step.tool_calls.length;
         addMeasure(groups.tools, measureText(JSON.stringify(step.tool_calls)));
       }
+      const stepUsage = extractStepUsage(step);
       stepMetaMap.set(sIdx, {
         arrayIdx: i,
         createdAt: step.created_at || '',
         tools: toolBadges,
         stepModel: extractStepModel(step, null, ''),
-        runningSettingModel: activeSettingModel
+        runningSettingModel: activeSettingModel,
+        stepUsage,
+        isError: step.status === 'ERROR'
       });
-      const stepUsage = extractStepUsage(step);
       if ((stepUsage.input || stepUsage.cache || stepUsage.output) && step.status !== 'ERROR') {
         lastTranscriptPlannerArrayIdx = i;
       }
@@ -3259,8 +3329,10 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     const memCovers = Boolean(
       memGen &&
       memGen.lsKey === lsKey &&
+      memGen.logSize === logStatSize &&
+      memGen.logMtimeMs === logStatMtime &&
       memGen.generatorList?.length &&
-      requiredModelSteps.every((stepNum) => hasValidGenStepEntry(memGen.callsByStep?.get(stepNum))) &&
+      requiredModelSteps.every((stepNum) => hasCompleteGenStepMetrics(memGen.callsByStep?.get(stepNum), stepMetaMap.get(stepNum))) &&
       (latestErrorStepIdx < 0 || getMaxGenStepIdx(memGen.generatorList) >= latestErrorStepIdx)
     );
     if (memCovers) {
@@ -3283,6 +3355,8 @@ export async function scanConversation(requestedConvId = '', options = {}) {
           convGenMetaCache.set(convId, {
             at: Number(diskEntry.fetchedAt || nowMs),
             lsKey,
+            logSize: diskEntry.size,
+            logMtimeMs: diskEntry.mtimeMs,
             generatorList: diskList,
             callsByStep
           });
@@ -3290,6 +3364,8 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         genMetaBundle = {
           at: Number(diskEntry.fetchedAt || nowMs),
           lsKey,
+          logSize: diskEntry.size,
+          logMtimeMs: diskEntry.mtimeMs,
           generatorList: diskList,
           callsByStep,
           emptyFromHost: Boolean(diskEntry.empty),
@@ -3304,17 +3380,28 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   if (!genFromCache && hasLsConfig && (rawSteps.length > 0 || force)) {
     genMetaBundle = await fetchGeneratorMetadataForConv(convId, force, {
       bypassMemTtl: isRetryCheck,
-      nowMs
+      nowMs,
+      logSize: logStatSize,
+      logMtimeMs: logStatMtime
     });
   }
 
   const ageMs = logStatMtime > 0 ? Math.max(0, nowMs - logStatMtime) : 0;
   const maxGenStepIdx = getMaxGenStepIdx(genMetaBundle?.generatorList);
-  const allRequiredCovered = requiredModelSteps.every((stepNum) => hasValidGenStepEntry(genMetaBundle?.callsByStep?.get(stepNum)));
+  const genRpcSucceeded = Boolean(genMetaBundle && !genMetaBundle.rpcFailed);
+  const allRequiredCovered = requiredModelSteps.every((stepNum) => (
+    hasCompleteGenStepMetrics(genMetaBundle?.callsByStep?.get(stepNum), stepMetaMap.get(stepNum))
+  ));
   const errorCovered = (
     latestErrorStepIdx < 0 ||
     maxGenStepIdx >= latestErrorStepIdx ||
-    Boolean(genMetaBundle?.generatorList?.some((e) => e?.chatModel?.error || e?.chatModel?.retryInfos?.some((r) => r?.error)))
+    Boolean(genMetaBundle?.generatorList?.some((e) => Boolean(getGenStepServerError(e))))
+  );
+  const diskSettledEligible = Boolean(
+    genRpcSucceeded && (
+      (allRequiredCovered && errorCovered && (requiredModelSteps.length > 0 || latestErrorStepIdx >= 0 || ageMs >= 10_000)) ||
+      ageMs >= CONV_META_SETTLE_AGE_MS
+    )
   );
   const nextRetryCount = isRetryCheck ? (prevRetryCount + 1) : (sameBaseKey ? prevRetryCount : 0);
   let metaSettled = false;
@@ -3324,14 +3411,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     metaSettled = true;
   } else if (genMetaBundle?.fromDiskCache) {
     metaSettled = true;
-  } else if (
-    !genMetaBundle?.rpcFailed &&
-    allRequiredCovered &&
-    errorCovered &&
-    (requiredModelSteps.length > 0 || latestErrorStepIdx >= 0 || ageMs >= 10_000)
-  ) {
-    metaSettled = true;
-  } else if (!genMetaBundle?.rpcFailed && ageMs >= CONV_META_SETTLE_AGE_MS) {
+  } else if (diskSettledEligible) {
     metaSettled = true;
   } else if (nextRetryCount >= CONV_META_RETRY_DELAYS_MS.length) {
     metaSettled = true;
@@ -3341,7 +3421,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     nextMetaCheckAt = nowMs + delayMs;
   }
 
-  if (!genFromCache && hasLsConfig && !genMetaBundle?.rpcFailed) {
+  if (!genFromCache && hasLsConfig && genRpcSucceeded) {
     if (genMetaBundle?.generatorList?.length) {
       maybePersistConvStepModels(
         convId,
@@ -3349,13 +3429,13 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         genMetaBundle.generatorList
       );
     }
-    if (metaSettled || genMetaBundle?.generatorList?.length) {
+    if (diskSettledEligible || genMetaBundle?.generatorList?.length) {
       saveActiveConvGenDiskEntry(convId, {
         lsKeyHash: lsDiskHash,
         size: logStatSize,
         mtimeMs: logStatMtime,
         fetchedAt: nowMs,
-        settled: metaSettled,
+        settled: diskSettledEligible,
         empty: !(genMetaBundle?.generatorList?.length),
         generatorList: slimGeneratorListForCache(genMetaBundle?.generatorList || [])
       });
@@ -3366,29 +3446,122 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   const turns = [];
   let sessionCostUSD = 0;
 
+  const appendFallbackTurnFromTranscriptStep = (s, arrayIdx, fallbackModel, fallbackState) => {
+    const { input, cache, output, thinking, response: responseTokens } = extractStepUsage(s);
+    const total = input + cache + output;
+    if (total <= 0) return;
+
+    const duration = estimateStepDuration(rawSteps, arrayIdx, logMtimeMs);
+    const tps = output > 0 && duration && duration > 0.1 ? Number((output / duration).toFixed(1)) : null;
+    const rawModel = extractStepModel(s, null, fallbackModel);
+    const modelKey = normalizeModelId(rawModel, host.dynamicModelMap);
+    const displayModel = rawModel ? formatModelDisplayName(rawModel, modelKey) : '';
+    const costInfo = calculateRequestApiCost(
+      {
+        model: rawModel,
+        modelKey,
+        inputTokens: input,
+        cacheTokens: cache,
+        outputTokens: output,
+        thinkingTokens: thinking,
+        date: s.created_at
+      },
+      host.dynamicModelMap
+    );
+    if (costInfo.isPriced && costInfo.costUSD) {
+      sessionCostUSD += costInfo.costUSD;
+    }
+    const sIdx = Number(s.step_index ?? arrayIdx);
+    const sMeta = stepMetaMap.get(sIdx);
+    const deltaTokens = fallbackState.prevTotal > 0 ? total - fallbackState.prevTotal : total;
+    fallbackState.prevTotal = total;
+    const promptSum = input + cache;
+    const turnCachePct = promptSum > 0 ? Number(((cache / promptSum) * 100).toFixed(1)) : 0;
+
+    turns.push({
+      turnIndex: turns.length + 1,
+      stepIndex: sIdx,
+      _arrayIdx: arrayIdx,
+      createdAt: s.created_at || '',
+      tools: sMeta?.tools || [],
+      model: displayModel || '未记录模型',
+      hasRecordedModel: Boolean(rawModel),
+      modelKey,
+      inputTokens: input,
+      cacheTokens: cache,
+      outputTokens: output,
+      thinkingTokens: thinking,
+      responseTokens,
+      totalTokens: total,
+      deltaTokens,
+      cacheHitPercent: turnCachePct,
+      budget: null,
+      estimate: null,
+      ttft: null,
+      streamingSec: null,
+      duration,
+      tps,
+      streamingTps: null,
+      costUSD: costInfo.costUSD ?? 0,
+      isPriced: costInfo.isPriced,
+      error: s.status === 'ERROR' ? String(s.content || '请求报错') : '',
+      contextBreakdown: null,
+      _isServerExact: false
+    });
+  };
+
   if (genMetaBundle?.generatorList?.length) {
-    let prevTotal = 0;
+    const fallbackState = { prevTotal: 0 };
+    const coveredStepNums = new Set();
     for (let idx = 0; idx < genMetaBundle.generatorList.length; idx++) {
       const gm = genMetaBundle.generatorList[idx];
       const cm = gm.chatModel || {};
-      const lastRetry = Array.isArray(cm.retryInfos) && cm.retryInfos.length ? cm.retryInfos[cm.retryInfos.length - 1] : null;
-      const usage = lastRetry?.usage || cm.usage || {};
-      const input = Number(usage.inputTokens || 0);
-      const cache = Number(usage.cacheReadTokens || 0);
-      const output = Number(usage.outputTokens || 0);
-      const thinking = Number(usage.thinkingOutputTokens || 0);
-      const responseTokens = Number(usage.responseOutputTokens ?? Math.max(0, output - thinking));
+      const gmIndices = Array.isArray(gm.stepIndices) && gm.stepIndices.length
+        ? gm.stepIndices
+        : (gm.stepIndex != null ? [gm.stepIndex] : []);
+      let matchedLocalMeta = null;
+      for (const rawIdx of gmIndices) {
+        const n = Number(rawIdx);
+        if (!Number.isFinite(n)) continue;
+        coveredStepNums.add(n);
+        const m = stepMetaMap.get(n);
+        if (m && (!matchedLocalMeta || (m.stepUsage && (m.stepUsage.input + m.stepUsage.cache + m.stepUsage.output) > 0))) {
+          matchedLocalMeta = m;
+        }
+      }
+      const stepIdx = gmIndices[0] ?? null;
+      const sMeta = (stepIdx !== null ? stepMetaMap.get(Number(stepIdx)) : null) || matchedLocalMeta;
+      const srvUsage = getGenStepServerUsage(gm);
+      const srvInput = Number(srvUsage?.inputTokens || 0);
+      const srvCache = Number(srvUsage?.cacheReadTokens || 0);
+      const srvOutput = Number(srvUsage?.outputTokens || 0);
+      const hasServerUsage = Boolean(srvUsage && (srvInput + srvCache + srvOutput) > 0);
+      const localUsage = matchedLocalMeta?.stepUsage || sMeta?.stepUsage || null;
+      const hasLocalUsage = Boolean(localUsage && (localUsage.input + localUsage.cache + localUsage.output) > 0);
+      const input = hasServerUsage ? srvInput : (hasLocalUsage ? localUsage.input : 0);
+      const cache = hasServerUsage ? srvCache : (hasLocalUsage ? localUsage.cache : 0);
+      const output = hasServerUsage ? srvOutput : (hasLocalUsage ? localUsage.output : 0);
+      const thinking = hasServerUsage
+        ? Number(srvUsage?.thinkingOutputTokens || 0)
+        : (hasLocalUsage ? localUsage.thinking : 0);
+      const responseTokens = hasServerUsage
+        ? Number(srvUsage?.responseOutputTokens ?? Math.max(0, output - thinking))
+        : (hasLocalUsage ? localUsage.response : 0);
       const total = input + cache + output;
-      const stepIdx = gm.stepIndices?.[0] ?? null;
-      const sMeta = stepIdx !== null ? stepMetaMap.get(Number(stepIdx)) : null;
-      const rawModel = extractStepModel(null, gm, sMeta?.stepModel || sMeta?.runningSettingModel || activeSettingModel);
+      const timingMeta = matchedLocalMeta || sMeta;
+      const rawModel = extractStepModel(null, gm, timingMeta?.stepModel || timingMeta?.runningSettingModel || activeSettingModel);
       const modelKey = normalizeModelId(rawModel, host.dynamicModelMap);
       const displayModel = rawModel ? formatModelDisplayName(rawModel, modelKey) : '';
 
       const ttft = parseDurationSec(cm.timeToFirstToken);
       const streamingSec = parseDurationSec(cm.streamingDuration);
-      const duration = ttft !== null && streamingSec !== null ? ttft + streamingSec : (ttft ?? streamingSec ?? null);
-      const tps = output > 0 && duration && duration > 0 ? Number((output / duration).toFixed(1)) : null;
+      const hasServerTiming = ttft !== null || streamingSec !== null;
+      const duration = hasServerTiming
+        ? (ttft !== null && streamingSec !== null ? ttft + streamingSec : (ttft ?? streamingSec ?? null))
+        : (timingMeta?.arrayIdx >= 0 ? estimateStepDuration(rawSteps, timingMeta.arrayIdx, logMtimeMs) : null);
+      const tps = hasServerTiming
+        ? (output > 0 && duration && duration > 0 ? Number((output / duration).toFixed(1)) : null)
+        : (output > 0 && duration && duration > 0.1 ? Number((output / duration).toFixed(1)) : null);
       const streamTokBase = thinking > 0 && responseTokens > 0 ? responseTokens : output;
       const streamingTps = streamTokBase > 0 && streamingSec && streamingSec >= 0.4
         ? Number((streamTokBase / streamingSec).toFixed(1))
@@ -3402,7 +3575,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
           cacheTokens: cache,
           outputTokens: output,
           thinkingTokens: thinking,
-          date: sMeta?.createdAt
+          date: timingMeta?.createdAt
         },
         host.dynamicModelMap
       );
@@ -3410,18 +3583,18 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         sessionCostUSD += costInfo.costUSD;
       }
 
-      const deltaTokens = total > 0 ? (prevTotal > 0 ? total - prevTotal : total) : 0;
-      if (total > 0) prevTotal = total;
+      const deltaTokens = total > 0 ? (fallbackState.prevTotal > 0 ? total - fallbackState.prevTotal : total) : 0;
+      if (total > 0) fallbackState.prevTotal = total;
       const promptSum = input + cache;
       const turnCachePct = promptSum > 0 ? Number(((cache / promptSum) * 100).toFixed(1)) : 0;
 
       const ctxMeta = cm.chatStartMetadata?.contextWindowMetadata || null;
       turns.push({
-        turnIndex: idx + 1,
+        turnIndex: turns.length + 1,
         stepIndex: stepIdx,
-        _arrayIdx: sMeta?.arrayIdx ?? -1,
-        createdAt: sMeta?.createdAt || '',
-        tools: sMeta?.tools || [],
+        _arrayIdx: timingMeta?.arrayIdx ?? -1,
+        createdAt: timingMeta?.createdAt || '',
+        tools: timingMeta?.tools || [],
         model: displayModel || '未记录模型',
         hasRecordedModel: Boolean(rawModel),
         modelKey,
@@ -3442,14 +3615,23 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         streamingTps,
         costUSD: costInfo.costUSD ?? 0,
         isPriced: costInfo.isPriced,
-        error: String(lastRetry?.error || cm.error || ''),
-        contextBreakdown: idx === genMetaBundle.generatorList.length - 1 ? extractContextBreakdown(ctxMeta) : null
+        error: getGenStepServerError(gm),
+        contextBreakdown: idx === genMetaBundle.generatorList.length - 1 ? extractContextBreakdown(ctxMeta) : null,
+        _isServerExact: Boolean(hasServerUsage && hasServerTiming)
       });
+    }
+    for (const reqStepIdx of requiredModelSteps) {
+      if (coveredStepNums.has(reqStepIdx)) continue;
+      const sMeta = stepMetaMap.get(reqStepIdx);
+      const stepObj = sMeta && sMeta.arrayIdx >= 0 ? rawSteps[sMeta.arrayIdx] : null;
+      if (stepObj) {
+        appendFallbackTurnFromTranscriptStep(stepObj, sMeta.arrayIdx, sMeta.runningSettingModel || activeSettingModel, fallbackState);
+      }
     }
   } else {
     // Pure transcript fallback when Language Server GeneratorMetadata is unavailable
     let runningModel = '';
-    let prevTotal = 0;
+    const fallbackState = { prevTotal: 0 };
     for (let i = 0; i < rawSteps.length; i++) {
       const s = rawSteps[i];
       if (s.type === 'USER_INPUT' && s.content) {
@@ -3457,75 +3639,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         if (m) runningModel = m;
       }
       if (isModelTurnStep(s)) {
-        const { input, cache, output, thinking, response: responseTokens } = extractStepUsage(s);
-        const total = input + cache + output;
-        if (total <= 0) continue;
-
-        // Estimate duration from next step timestamp delta or log mtime on final step
-        let duration = null;
-        const startMs = s.created_at ? Date.parse(s.created_at) : NaN;
-        const nextStep = rawSteps[i + 1];
-        const endMs = nextStep?.created_at
-          ? Date.parse(nextStep.created_at)
-          : (i === rawSteps.length - 1 && logMtimeMs > startMs ? logMtimeMs : NaN);
-        if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs && (endMs - startMs) < 300_000) {
-          duration = Number(((endMs - startMs) / 1000).toFixed(2));
-        }
-        const tps = output > 0 && duration && duration > 0.1 ? Number((output / duration).toFixed(1)) : null;
-        const rawModel = extractStepModel(s, null, runningModel);
-        const modelKey = normalizeModelId(rawModel, host.dynamicModelMap);
-        const displayModel = rawModel ? formatModelDisplayName(rawModel, modelKey) : '';
-        const costInfo = calculateRequestApiCost(
-          {
-            model: rawModel,
-            modelKey,
-            inputTokens: input,
-            cacheTokens: cache,
-            outputTokens: output,
-            thinkingTokens: thinking,
-            date: s.created_at
-          },
-          host.dynamicModelMap
-        );
-        if (costInfo.isPriced && costInfo.costUSD) {
-          sessionCostUSD += costInfo.costUSD;
-        }
-        const sIdx = Number(s.step_index ?? i);
-        const sMeta = stepMetaMap.get(sIdx);
-        const deltaTokens = prevTotal > 0 ? total - prevTotal : total;
-        prevTotal = total;
-        const promptSum = input + cache;
-        const turnCachePct = promptSum > 0 ? Number(((cache / promptSum) * 100).toFixed(1)) : 0;
-
-        turns.push({
-          turnIndex: turns.length + 1,
-          stepIndex: sIdx,
-          _arrayIdx: i,
-          createdAt: s.created_at || '',
-          tools: sMeta?.tools || [],
-          model: displayModel || '未记录模型',
-          hasRecordedModel: Boolean(rawModel),
-          modelKey,
-          inputTokens: input,
-          cacheTokens: cache,
-          outputTokens: output,
-          thinkingTokens: thinking,
-          responseTokens,
-          totalTokens: total,
-          deltaTokens,
-          cacheHitPercent: turnCachePct,
-          budget: null,
-          estimate: null,
-          ttft: null,
-          streamingSec: null,
-          duration,
-          tps,
-          streamingTps: null,
-          costUSD: costInfo.costUSD ?? 0,
-          isPriced: costInfo.isPriced,
-          error: s.status === 'ERROR' ? String(s.content || '请求报错') : '',
-          contextBreakdown: null
-        });
+        appendFallbackTurnFromTranscriptStep(s, i, runningModel, fallbackState);
       }
     }
   }
@@ -3726,7 +3840,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     outputTokens: latestValidTurn.outputTokens,
     thinkingTokens: latestValidTurn.thinkingTokens,
     responseTokens: latestValidTurn.responseTokens,
-    isServerExact: Boolean(genMetaBundle?.generatorList?.length)
+    isServerExact: Boolean(latestValidTurn?._isServerExact)
   } : null;
   const sparklinePayload = turns.slice(-24).map((t) => ({
     turn: t.turnIndex,
@@ -3737,7 +3851,13 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     tps: t.tps,
     costUSD: t.costUSD
   }));
-  const turnsPayload = turns.slice(-40).reverse().map(({ contextBreakdown: _cb, hasRecordedModel: _hrm, _arrayIdx: _ai, ...rest }) => ({
+  const turnsPayload = turns.slice(-40).reverse().map(({
+    contextBreakdown: _cb,
+    hasRecordedModel: _hrm,
+    _arrayIdx: _ai,
+    _isServerExact: _ise,
+    ...rest
+  }) => ({
     ...rest,
     error: rest.error ? sanitizeDiagnosticText(rest.error, 200) : ''
   }));
@@ -3980,13 +4100,20 @@ function ensureGenBackfillWorkers(wave) {
               || Boolean(existingGen && existingGen.at < item.st.mtimeMs)
               || Boolean(
                 existingGen &&
+                existingGen.logSize !== undefined &&
+                (existingGen.logSize !== item.st?.size || existingGen.logMtimeMs !== item.st?.mtimeMs)
+              )
+              || Boolean(
+                existingGen &&
                 !item.stepsNeedingGen.every((k) => Boolean(extractStepModel(null, existingGen.callsByStep?.get(Number(k)), '')))
               );
             const gm = await fetchGeneratorMetadataForConv(item.convId, genFetchForce, {
               timeoutMs: GEN_BACKFILL_RPC_TIMEOUT_MS,
               signal: ac.signal,
               unrefSocket: true,
-              nowMs: reqNowMs
+              nowMs: reqNowMs,
+              logSize: item.st?.size,
+              logMtimeMs: item.st?.mtimeMs
             });
 
             if (gm && !gm.fromFallbackCache && Array.isArray(gm.generatorList) && gm.generatorList.length > 0) {

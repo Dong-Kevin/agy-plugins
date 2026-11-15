@@ -2453,6 +2453,9 @@ async function main() {
     const i1ConvA = '00000000-0000-4000-8000-000000000301';
     const i1ConvB = '00000000-0000-4000-8000-000000000302';
     const i1ConvC = '00000000-0000-4000-8000-000000000303';
+    const i1ConvD = '00000000-0000-4000-8000-000000000304';
+    const i1ConvE = '00000000-0000-4000-8000-000000000305';
+    const i1ConvF = '00000000-0000-4000-8000-000000000306';
     const i1Csrf = 'i1-ls-csrf-secret-tok';
     const i1ChildCsrf = 'i1-ls-csrf-child-scoped-tok';
     const i1RawEmail = ['i1test', 'example.com'].join('@');
@@ -2463,6 +2466,9 @@ async function main() {
     let i1MetaMode = 'full';
     let i1ConvCMetaMode = 'empty';
     let i1ConvCMetaCalls = 0;
+    const i1ConvModes = {};
+    const i1ConvMetaCalls = {};
+    const i1ConvUsage = {};
     const i1Counts = {
       GetUserStatus: 0,
       RetrieveUserQuotaSummary: 0,
@@ -2517,6 +2523,10 @@ async function main() {
           i1Counts.GetCascadeTrajectoryGeneratorMetadata += 1;
           let cascadeId = '';
           try { cascadeId = JSON.parse(rawBody || '{}').cascadeId || ''; } catch {}
+          if (cascadeId) {
+            i1ConvMetaCalls[cascadeId] = (i1ConvMetaCalls[cascadeId] || 0) + 1;
+          }
+          const customMode = i1ConvModes[cascadeId];
           if (cascadeId === i1ConvC) {
             i1ConvCMetaCalls += 1;
             if (i1ConvCMetaMode === '503') {
@@ -2530,11 +2540,32 @@ async function main() {
               return;
             }
           }
+          if (customMode === '503') {
+            res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end('{"error":"unavailable"}');
+            return;
+          }
+          if (customMode === 'partial') {
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({
+              generatorMetadata: [
+                {
+                  stepIndices: [2],
+                  chatModel: {
+                    modelDisplayName: 'Gemini 3.8 Flash',
+                    responseModel: 'gemini-3.8-flash'
+                  }
+                }
+              ]
+            }));
+            return;
+          }
           if (cascadeId === i1ConvB && i1MetaMode === 'empty') {
             res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
             res.end(JSON.stringify({ generatorMetadata: [] }));
             return;
           }
+          const customUsage = i1ConvUsage[cascadeId] || { input: 2000, output: 200 };
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({
             generatorMetadata: [
@@ -2543,16 +2574,16 @@ async function main() {
                 chatModel: {
                   modelDisplayName: 'Gemini 3.8 Flash',
                   responseModel: 'gemini-3.8-flash',
-                  usage: { inputTokens: 2000, outputTokens: 200 },
+                  usage: { inputTokens: customUsage.input, outputTokens: customUsage.output },
                   timeToFirstToken: '0.4s',
                   streamingDuration: '1.0s',
                   error: cascadeId === i1ConvB ? `upstream failed with ${i1FakeBearer}` : '',
                   chatStartMetadata: {
                     contextWindowMetadata: {
                       maxContextTokens: 200000,
-                      estimatedTokensUsed: 2200,
+                      estimatedTokensUsed: customUsage.input + customUsage.output,
                       tokenBreakdown: {
-                        totalTokens: 2200,
+                        totalTokens: customUsage.input + customUsage.output,
                         groups: [{ name: 'System Prompt', numTokens: 1200 }]
                       }
                     }
@@ -2580,7 +2611,7 @@ async function main() {
       process.env.ANTIGRAVITY_LS_ADDRESS = i1LsAddr;
       process.env.ANTIGRAVITY_CSRF_TOKEN = i1Csrf;
 
-      const writeI1Transcript = (id, mtimeMs, contentSuffix = '') => {
+      const writeI1Transcript = (id, mtimeMs, contentSuffix = '', outputTokens = 200) => {
         const d = join(isolatedAgDir, 'brain', id, '.system_generated', 'logs');
         mkdirSync(d, { recursive: true });
         const tp = join(d, 'transcript.jsonl');
@@ -2589,7 +2620,7 @@ async function main() {
           tp,
           [
             { step_index: 1, type: 'USER_INPUT', created_at: iso, content: `i1 task ${id}` },
-            { step_index: 2, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: iso, input_tokens: 2000, output_tokens: 200, content: `ok${contentSuffix}` }
+            { step_index: 2, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: iso, input_tokens: 2000, output_tokens: outputTokens, content: `ok${contentSuffix}` }
           ].map((r) => JSON.stringify(r)).join('\n') + '\n',
           'utf-8'
         );
@@ -2850,6 +2881,128 @@ async function main() {
         i1ConvCMetaCalls === 6,
         `I1 Case E 文件 (size, mtimeMs) 变更后应打破静默收敛并补齐模型：calls=${i1ConvCMetaCalls}`
       );
+
+      // Case F (Z1): Failed metadata RPC on quiet (>=180s) session must NOT write settled empty cache and must auto-recover
+      const tF0 = mtimeC + 720_000;
+      writeI1Transcript(i1ConvD, tF0 - 300_000);
+      i1ConvModes[i1ConvD] = '503';
+      i1ConvMetaCalls[i1ConvD] = 0;
+      const snapDFail = await scanConversation(i1ConvD, { background: true, nowMs: tF0 });
+      const diskAfterDFail = existsSync(convDiskFile) ? JSON.parse(readFileSync(convDiskFile, 'utf-8')) : { convs: {} };
+      assert(
+        i1ConvMetaCalls[i1ConvD] === 1 &&
+          snapDFail.context?.budget === null &&
+          snapDFail.speed?.isServerExact === false &&
+          !diskAfterDFail.convs?.[i1ConvD]?.settled,
+        `I1 Case F (Z1) 503 失败不得写入已收敛空缓存：calls=${i1ConvMetaCalls[i1ConvD]}, entry=${JSON.stringify(diskAfterDFail.convs?.[i1ConvD])}`
+      );
+
+      i1ConvModes[i1ConvD] = 'full';
+      const snapDRecovered = await scanConversation(i1ConvD, { background: true, nowMs: tF0 + 20_000 });
+      const diskAfterDRec = JSON.parse(readFileSync(convDiskFile, 'utf-8'));
+      assert(
+        i1ConvMetaCalls[i1ConvD] === 2 &&
+          snapDRecovered.context?.budget === 200000 &&
+          snapDRecovered.context?.inputTokens === 2000 &&
+          snapDRecovered.context?.outputTokens === 200 &&
+          snapDRecovered.speed?.isServerExact === true &&
+          diskAfterDRec.convs?.[i1ConvD]?.settled === true,
+        `I1 Case F (Z1) 宿主恢复后常规扫描应自动补齐并收敛：calls=${i1ConvMetaCalls[i1ConvD]}, budget=${snapDRecovered.context?.budget}, exact=${snapDRecovered.speed?.isServerExact}`
+      );
+      const coldDOut = await runI1Child(
+        `const m = await import(${JSON.stringify(i1CollectorUrl)});
+         const s = await m.scanConversation(${JSON.stringify(i1ConvD)}, { background: true, nowMs: ${tF0 + 21_000} });
+         console.log(JSON.stringify({ budget: s.context?.budget, exact: s.speed?.isServerExact, output: s.context?.outputTokens }));`
+      );
+      assert(
+        i1ConvMetaCalls[i1ConvD] === 2 &&
+          coldDOut.budget === 200000 &&
+          coldDOut.exact === true &&
+          coldDOut.output === 200,
+        `I1 Case F (Z1) 冷子进程应零 RPC 读取恢复后的收敛缓存：calls=${i1ConvMetaCalls[i1ConvD]}, out=${JSON.stringify(coldDOut)}`
+      );
+
+      // Case G (Z2): Model-only partial metadata preserves local non-zero tokens, marks isServerExact:false, and retries until full metrics settle
+      const tG0 = writeI1Transcript(i1ConvE, tF0 + 30_000);
+      i1ConvModes[i1ConvE] = 'partial';
+      i1ConvMetaCalls[i1ConvE] = 0;
+      const snapEPartial = await scanConversation(i1ConvE, { background: true, nowMs: tG0 });
+      const diskAfterEPartial = JSON.parse(readFileSync(convDiskFile, 'utf-8'));
+      assert(
+        i1ConvMetaCalls[i1ConvE] === 1 &&
+          snapEPartial.context?.inputTokens === 2000 &&
+          snapEPartial.context?.outputTokens === 200 &&
+          snapEPartial.context?.budget === null &&
+          snapEPartial.speed?.isServerExact === false &&
+          diskAfterEPartial.convs?.[i1ConvE]?.settled === false,
+        `I1 Case G (Z2) 部分响应应保留本地用量、不标精确且不收敛：calls=${i1ConvMetaCalls[i1ConvE]}, ctx=${JSON.stringify(snapEPartial.context)}, exact=${snapEPartial.speed?.isServerExact}, disk=${JSON.stringify(diskAfterEPartial.convs?.[i1ConvE]?.settled)}`
+      );
+
+      i1ConvModes[i1ConvE] = 'full';
+      const snapEFull = await scanConversation(i1ConvE, { background: true, nowMs: tG0 + 20_000 });
+      const diskAfterEFull = JSON.parse(readFileSync(convDiskFile, 'utf-8'));
+      assert(
+        i1ConvMetaCalls[i1ConvE] === 2 &&
+          snapEFull.context?.budget === 200000 &&
+          snapEFull.context?.inputTokens === 2000 &&
+          snapEFull.context?.outputTokens === 200 &&
+          snapEFull.speed?.isServerExact === true &&
+          diskAfterEFull.convs?.[i1ConvE]?.settled === true,
+        `I1 Case G (Z2) 宿主补齐后常规扫描应更新为精确完整指标并收敛：calls=${i1ConvMetaCalls[i1ConvE]}, ctx=${JSON.stringify(snapEFull.context)}`
+      );
+      const coldEOut = await runI1Child(
+        `const m = await import(${JSON.stringify(i1CollectorUrl)});
+         const s = await m.scanConversation(${JSON.stringify(i1ConvE)}, { background: true, nowMs: ${tG0 + 21_000} });
+         console.log(JSON.stringify({ budget: s.context?.budget, exact: s.speed?.isServerExact, output: s.context?.outputTokens }));`
+      );
+      assert(
+        i1ConvMetaCalls[i1ConvE] === 2 &&
+          coldEOut.budget === 200000 &&
+          coldEOut.exact === true &&
+          coldEOut.output === 200,
+        `I1 Case G (Z2) 冷子进程应零 RPC 读取补齐后收敛缓存：calls=${i1ConvMetaCalls[i1ConvE]}, out=${JSON.stringify(coldEOut)}`
+      );
+
+      // Case H (Z3): In-place update on same step_index invalidates in-memory convGenMetaCache even inside 15s TTL while staying 0-RPC when unchanged
+      const tH0 = writeI1Transcript(i1ConvF, tG0 + 30_000);
+      i1ConvModes[i1ConvF] = 'full';
+      i1ConvUsage[i1ConvF] = { input: 2000, output: 200 };
+      i1ConvMetaCalls[i1ConvF] = 0;
+      const snapF0 = await scanConversation(i1ConvF, { background: true, nowMs: tH0 });
+      assert(
+        i1ConvMetaCalls[i1ConvF] === 1 &&
+          snapF0.context?.inputTokens === 2000 &&
+          snapF0.context?.outputTokens === 200,
+        `I1 Case H (Z3) 初始收敛异常：calls=${i1ConvMetaCalls[i1ConvF]}, ctx=${JSON.stringify(snapF0.context)}`
+      );
+
+      // Unchanged file within & beyond 15s keeps 0 extra RPCs
+      await scanConversation(i1ConvF, { background: true, nowMs: tH0 + 2_000 });
+      assert(i1ConvMetaCalls[i1ConvF] === 1, 'I1 Case H (Z3) 未变更文件不应重复请求 metadata');
+
+      // Update same step_index=2 in place -> triggers refresh even within 15s window (tH0 + 3000)
+      i1ConvUsage[i1ConvF] = { input: 6000, output: 300 };
+      writeI1Transcript(i1ConvF, tH0 + 1_000, ' step2-updated', 300);
+      const snapFUpdated = await scanConversation(i1ConvF, { background: true, nowMs: tH0 + 3_000 });
+      assert(
+        i1ConvMetaCalls[i1ConvF] === 2 &&
+          snapFUpdated.context?.inputTokens === 6000 &&
+          snapFUpdated.context?.outputTokens === 300,
+        `I1 Case H (Z3) 同一步骤日志更新后内存缓存未失效：calls=${i1ConvMetaCalls[i1ConvF]}, input=${snapFUpdated.context?.inputTokens}, output=${snapFUpdated.context?.outputTokens}`
+      );
+      await scanConversation(i1ConvF, { background: true, nowMs: tH0 + 20_000 });
+      const coldFOut = await runI1Child(
+        `const m = await import(${JSON.stringify(i1CollectorUrl)});
+         const s = await m.scanConversation(${JSON.stringify(i1ConvF)}, { background: true, nowMs: ${tH0 + 21_000} });
+         console.log(JSON.stringify({ input: s.context?.inputTokens, output: s.context?.outputTokens, budget: s.context?.budget }));`
+      );
+      assert(
+        i1ConvMetaCalls[i1ConvF] === 2 &&
+          coldFOut.input === 6000 &&
+          coldFOut.output === 300 &&
+          coldFOut.budget === 200000,
+        `I1 Case H (Z3) 更新后静默零额外 RPC 且与冷子进程一致：calls=${i1ConvMetaCalls[i1ConvF]}, cold=${JSON.stringify(coldFOut)}`
+      );
     } finally {
       if (prevI1StateDir === undefined) delete process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR; else process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR = prevI1StateDir;
       if (prevI1Ls === undefined) delete process.env.ANTIGRAVITY_LS_ADDRESS; else process.env.ANTIGRAVITY_LS_ADDRESS = prevI1Ls;
@@ -2859,6 +3012,9 @@ async function main() {
       rmSync(join(isolatedAgDir, 'brain', i1ConvA), { recursive: true, force: true });
       rmSync(join(isolatedAgDir, 'brain', i1ConvB), { recursive: true, force: true });
       rmSync(join(isolatedAgDir, 'brain', i1ConvC), { recursive: true, force: true });
+      rmSync(join(isolatedAgDir, 'brain', i1ConvD), { recursive: true, force: true });
+      rmSync(join(isolatedAgDir, 'brain', i1ConvE), { recursive: true, force: true });
+      rmSync(join(isolatedAgDir, 'brain', i1ConvF), { recursive: true, force: true });
       rmSync(i1StateDir, { recursive: true, force: true });
       rmSync(join(isolatedStateDir, 'gen_step_models_v1.json'), { force: true });
       rmSync(join(isolatedStateDir, 'host_status_cache_v1.json'), { force: true });

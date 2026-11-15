@@ -878,6 +878,7 @@ async function verifyFinderFrontendBehavior() {
   const treeFetches = [];
   const openBrowserCalls = [];
   const previewApiCalls = [];
+  const resolveApiCalls = [];
   let searchMode = 'truncated';
   const pendingSearchQueue = [];
   const intervalCbs = [];
@@ -995,6 +996,7 @@ async function verifyFinderFrontendBehavior() {
       }
       if (u.pathname === '/api/resolve') {
         const p = u.searchParams.get('path') || '';
+        resolveApiCalls.push(p);
         const name = p.split('/').pop();
         const isHtml = p.includes('preview/index.html');
         const relPath = isHtml ? 'preview/index.html' : `src/${name}`;
@@ -1446,7 +1448,87 @@ async function verifyFinderFrontendBehavior() {
   assert.equal(previewApiCalls.at(-1), `${wsRoot}/src/alpha.js`);
   assert.equal(getEl('btn-preview-browser').classList.contains('hidden'), true, 'Non-HTML source preview modal must hide browser button');
 
-  pass('VM behavioral checks: R3 reveal cache refresh, UX #1 visible sync, UX #3 search states, T2 multi-root search switch & HTML browser launch');
+  // Z4: postMessage source, host-context & origin boundary checks
+  const dispatchWindowMessage = async (ev) => {
+    for (const fn of winListeners.get('message') || []) {
+      fn(ev);
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  };
+
+  // Negative 1: Standalone top-level window (!window.sidecar, window.parent === null) must reject postMessage actions
+  const resolveCountBeforeMsg = resolveApiCalls.length;
+  await dispatchWindowMessage({
+    origin: 'http://127.0.0.1:8080',
+    source: sandbox.window,
+    data: { path: htmlTargetAbs, open: 'browser' }
+  });
+  assert.equal(openBrowserCalls.length, 3, 'Standalone window without sidecar/parent must reject postMessage open=browser');
+  assert.equal(resolveApiCalls.length, resolveCountBeforeMsg, 'Standalone window without sidecar/parent must reject postMessage reveal');
+
+  // Switch mock window to embedded Antigravity Sidecar iframe context
+  const trustedHostParent = { name: 'host-parent' };
+  sandbox.window.parent = trustedHostParent;
+  sandbox.window.sidecar = { getWorkspaceUris: async () => [`file://${wsRoot}`] };
+
+  // Negative 2: Untrusted origins from any window (even if source matches parent) must be rejected
+  for (const badOrigin of ['https://untrusted.example', 'http://localhost.evil.example', 'http://evil@127.0.0.1:8080', 'null', '']) {
+    await dispatchWindowMessage({
+      origin: badOrigin,
+      source: trustedHostParent,
+      data: { path: htmlTargetAbs, open: 'browser' }
+    });
+    assert.equal(openBrowserCalls.length, 3, `Untrusted origin "${badOrigin}" must NOT trigger openInBrowser`);
+    assert.equal(resolveApiCalls.length, resolveCountBeforeMsg, `Untrusted origin "${badOrigin}" must NOT trigger revealPathInTree`);
+  }
+
+  // Negative 3: Trusted origin with non-parent source (e.g. opener / sibling window) must be rejected
+  await dispatchWindowMessage({
+    origin: 'vscode-file://vscode-app',
+    source: { name: 'unrelated-opener' },
+    data: { path: htmlTargetAbs, open: 'browser' }
+  });
+  assert.equal(openBrowserCalls.length, 3, 'Non-parent event.source must NOT trigger openInBrowser');
+  assert.equal(resolveApiCalls.length, resolveCountBeforeMsg, 'Non-parent event.source must NOT trigger revealPathInTree');
+
+  // Positive 1: Trusted host parent reveal-only message reveals path without launching browser
+  await dispatchWindowMessage({
+    origin: 'vscode-file://vscode-app',
+    source: trustedHostParent,
+    data: { path: `${wsRoot}/src/alpha.js` }
+  });
+  assert.equal(openBrowserCalls.length, 3, 'Trusted reveal-only message must NOT launch browser');
+  assert.equal(resolveApiCalls.length, resolveCountBeforeMsg + 1, 'Trusted host parent reveal message must resolve path');
+  assert.equal(resolveApiCalls.at(-1), `${wsRoot}/src/alpha.js`);
+
+  // Positive 2: Trusted host parent with vscode-file:// or loopback http origin allows open=browser
+  await dispatchWindowMessage({
+    origin: 'vscode-file://vscode-app',
+    source: trustedHostParent,
+    data: { path: htmlTargetAbs, open: 'browser' }
+  });
+  assert.equal(openBrowserCalls.length, 4, 'Trusted host parent vscode-file:// origin must allow open=browser');
+  assert.equal(openBrowserCalls.at(-1).body.path, htmlTargetAbs);
+
+  await dispatchWindowMessage({
+    origin: 'http://127.0.0.1:54321',
+    source: trustedHostParent,
+    data: { path: htmlTargetAbs, open: 'browser' }
+  });
+  assert.equal(openBrowserCalls.length, 5, 'Trusted host parent loopback http origin must allow open=browser');
+  assert.equal(openBrowserCalls.at(-1).body.path, htmlTargetAbs);
+
+  // Negative 4: Drawer mode must reject postMessage bridge even from parent/loopback origin
+  sandbox.window.__AF_DRAWER_MODE__ = true;
+  await dispatchWindowMessage({
+    origin: 'http://127.0.0.1:54321',
+    source: trustedHostParent,
+    data: { path: htmlTargetAbs, open: 'browser' }
+  });
+  assert.equal(openBrowserCalls.length, 5, 'Drawer mode must reject postMessage actions');
+  sandbox.window.__AF_DRAWER_MODE__ = false;
+
+  pass('VM behavioral checks: R3 reveal cache refresh, UX #1 visible sync, UX #3 search states, T2 multi-root search switch, HTML browser launch & Z4 message origin/source guard');
 }
 
 async function verifyFinderAuxBridgeBehavior() {

@@ -1,6 +1,6 @@
 # agy-plugins ROADMAP
 
-更新时间：2026-11-15 13:20（Asia/Shanghai）。
+更新时间：2026-11-15 14:01（Asia/Shanghai）。
 
 ## 本次交付目标
 
@@ -10,11 +10,16 @@
 
 ## 当前阶段与状态
 
-- **已完成 `context-viewer v1.7.10` 跨进程磁盘缓存键去 CSRF 与 `lsGenMissCache` 静默收敛本地收口（已本地提交，待确认推送／打 tag）**：
+- **已完成第十一轮代码审查 4 项 P2（Z1–Z4）收口、全仓校验、打包与本机 `./install.sh` 热同步（已提交推送 `main`，待确认打 tag／创建 GitHub Release）**：
+  - **Z1 · RPC 失败状态与收敛落盘隔离**（[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs)）：`fetchGeneratorMetadataForConv` 在 `res === null` 且无匹配缓存时返回明确 `{ ..., rpcFailed: true }` 对象（不再返回 `null`）；`scanConversation` 新增 `genRpcSucceeded` 与 `diskSettledEligible` 门禁，防止静默 `>= 180s` 会话因首次 `503`／超时被误标 `settled: true` 并向 `active_conv_gen_cache_v1.json` 写入空缓存，宿主恢复后常规扫描与冷启动均可自动补齐并收敛。
+  - **Z2 · 区分步骤模型归因与完整指标、禁止 0 值覆盖本地用量**：新增 `hasCompleteGenStepMetrics`、`getGenStepServerUsage`、`getGenStepServerError` 与 `shouldReplaceGenStepEntry`；仅有模型名而无非零服务端 `usage` 的部分响应不再通过 `memCovers` 或写入 `settled: true`；在服务端 `usage` 缺失／为 0 时保留本地 `stepMetaMap` 中非零 `stepUsage` 并补充未覆盖步骤，`speed.isServerExact` 改为仅在当前有效轮次同时具备服务端 `usage` 与服务端计时时为 `true`。
+  - **Z3 · 同一步骤日志原地更新按文件签名失效内存缓存**：`fetchGeneratorMetadataForConv`、`convGenMetaCache`、`memCovers`、`ensureGenBackfillWorkers` 与并发合流键均绑定 `transcript` `(logSize, logMtimeMs)`，同一 `step_index` 原地更新后即使在 `15s` TTL 内也立即失效重查并与冷进程保持一致，未变化静默文件保持 `0` 次额外 RPC。
+  - **Z4 · `agy-finder` `postMessage` 宿主上下文、父窗口与来源协议门禁**（[app.js](./plugins/agy-finder/sidecars/tree/app.js)）：`message` 监听要求处于 `window.sidecar` 嵌入宿主环境、非原生 Drawer 模式、`window.parent !== window` 且 `event.source === window.parent`，并严格校验 `event.origin`（仅允许 `vscode-*`、`antigravity*`、`sidecar`、`app`、`electron`、`file://` 或精确回环 `http/https`，拒绝 `https://untrusted.example`、独立浏览器顶层窗口、userinfo 欺骗与 `'null'` 源）。
+  - **双侧回归测试与本机热同步**：[context-viewer/scripts/verify.mjs](./plugins/agy-context-viewer/scripts/verify.mjs) 在 `I1` 新增 `Cases F / G / H`（覆盖 Z1/Z2/Z3 与冷子进程一致性），[agy-finder/scripts/verify.mjs](./plugins/agy-finder/scripts/verify.mjs) 在 `verifyFinderFrontendBehavior` 新增 Z4 正反例 VM 断言；已完成全仓门禁、重新打包与 `./install.sh` 本机热同步，并已随 `2b8508f` 一并提交推送 `origin/main`（未打 tag／发布 Release，等待确认）。
+- **已完成 `context-viewer v1.7.10` 跨进程磁盘缓存键去 CSRF 与 `lsGenMissCache` 静默收敛收口（已随 `2b8508f` 提交推送 `origin/main`，待确认打 tag／创建 GitHub Release）**：
   - **跨进程磁盘缓存键剥离 Scoped `ANTIGRAVITY_CSRF_TOKEN`**：[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs) 新增 `normalizeLsAddr()`（统一 `localhost` -> `127.0.0.1` 与小写 `host:port`）与 `hashLsAddr()`；内存态、RPC 调用与请求鉴权保留含 `csrf` 的 `lsKey`，而落盘共享缓存 `host_status_cache_v1.json` 与 `active_conv_gen_cache_v1.json` 改用 `hashLsAddr(lsAddr)` 计算哈希键（仍严禁将明文 `lsAddr`、`csrf` 或未脱敏邮箱写入磁盘），消除宿主对 `sidecar` / `run_command` / CLI 签发不同 Scoped `ANTIGRAVITY_CSRF_TOKEN` 导致的缓存分裂与单槽互相覆盖失效。
   - **`collectTokenHistory` 的 `lsGenMissCache` 静默文件收敛**：`lsGenMissCache` 改用规范化 `lsAddr` 标识（不绑 `csrf`），并透传合成/实际 `nowMs`；当历史桌面会话满足 `nowMs - st.mtimeMs >= CONV_META_SETTLE_AGE_MS`（`180_000` ms）且 `GetCascadeTrajectoryGeneratorMetadata` 正常返回（`gm && !gm.rpcFailed`）仍无法补全 `stepsNeedingGen` 时标记 `settled: true`，在 `(size, mtimeMs)` 未变且非 `force: true` 时不再每 60 秒重复请求 LS（RPC 失败如 `503` 不误标收敛）。
-  - **回归断言与本机热同步**：[verify.mjs](./plugins/agy-context-viewer/scripts/verify.mjs) 升级 `I1 Case D`（冷子进程注入不同 `ANTIGRAVITY_CSRF_TOKEN` 与 `localhost:<port>` 均零额外 RPC 命中且 `force: true` 同槽覆盖）并新增 `I1 Case E`（验证 `<180s` 60s TTL 重试、`503` 不误收敛、`>=180s` 正常响应后静默收敛、跨 `csrf`/`localhost` 复用及 `force: true` / 文件签名变更唤醒）；全仓校验、打包及 `./install.sh` 本机热同步已通过，已完成本地提交（待确认 `git push` / 打 tag）。
-- **第十一轮审查完成，4 项 P2 待处理**：`2d0f11e` 的全仓校验与打包通过；独立探针确认 Context Viewer 的失败响应误写已收敛空缓存（Z1）、部分 metadata 被当作完整用量（Z2）、同一步骤日志更新后内存指标不失效（Z3），以及 Finder 未校验消息来源便触发浏览器打开请求（Z4）。建议修复后再打 tag／创建 Release，尚未实施修复。本轮核实远端 main 已更新，最新 Release 仍为 `v2026.11.15`。
+  - **回归断言与本机热同步**：[verify.mjs](./plugins/agy-context-viewer/scripts/verify.mjs) 升级 `I1 Case D`（冷子进程注入不同 `ANTIGRAVITY_CSRF_TOKEN` 与 `localhost:<port>` 均零额外 RPC 命中且 `force: true` 同槽覆盖）并新增 `I1 Case E`（验证 `<180s` 60s TTL 重试、`503` 不误收敛、`>=180s` 正常响应后静默收敛、跨 `csrf`/`localhost` 复用及 `force: true` / 文件签名变更唤醒）；全仓校验、打包及 `./install.sh` 本机热同步已通过，已提交推送 `origin/main`（待确认打 tag）。
 - **已完成本地实现、回归验证、打包与本机热升级（`agy-finder v0.2.8` 与 `context-viewer v1.7.10`，已提交推送 `main`，待确认打 tag／发布 GitHub Release）**：
   - **双插件 Aux Pane 折叠态唤醒修复与桥接优化（`agy-finder v0.2.8` & `context-viewer v1.7.10`）**：
     - 宿主消息边界核查（只读排查宿主前端主包与 `sidecar_sdk/preload.js`）：`Dyc` 仅在 `visible === true` 时挂载 `Cyc`（注册 `toggle-aux-pane` 监听），隐藏态下直接调用 `toggleAuxPane` 会被宿主静默丢弃；唯有无条件挂载在根组件 `P6c` 的 `epc()` 会接收 `toggle-conversation` 并展开已折叠的 Aux Pane。若会话停留在 `Overview` 且从未打开／固定任一 Sidecar 标签，展开后会保持 `Overview` 并弹出一次“请点开一次并右键 Pin Tab”提示引导。
@@ -55,6 +60,7 @@
 
 ## 最近验证
 
+- 第十一轮审查 4 项 P2（Z1–Z4）收口验收：`node plugins/agy-context-viewer/scripts/verify.mjs` 6/6 通过（含 `I1 Cases F/G/H`），`node plugins/agy-finder/scripts/verify.mjs` 全部通过（含 Z4 消息来源与宿主上下文正反例 VM 断言）；面向 Z1–Z4 复现场景的独立对照运行全通过（Z4 不可信来源请求数 `0`，Z1 `503` 后不写 `settled:true` 且 +20s 自动恢复 `200000` 预算，Z2 部分响应保留 `2000/200` 且 `isServerExact:false` 并在补齐后恢复 `200000`/`exact:true`，Z3 同一步骤更新后原进程与冷进程一致收敛为 `6000/300`）；`node scripts/verify.mjs --strict-git-identity && node scripts/package-all.mjs` 全仓门禁与打包通过，生成 `dist/agy-finder-v0.2.8.zip`（94.7 KB / SHA-256 `aaade01f4ed8855015acb071136b5dff3b1896f6cc818256e313f4b683e5c58d`）与 `dist/context-viewer-v1.7.10.zip`（177.9 KB / SHA-256 `c5f80dd1725dcd9d9f2470b65268c5170d738ab6e4562a028f1e76f886b5e4b6`）；`./install.sh` 完成双插件本机热同步，`diff -q` 核对已安装 `collector.mjs` 与 `agy-finder` `app.js` 与仓库源码一致，`~/.local/bin/agy-context --help` 输出 `v1.7.10` 且 `~/.local/bin/agy-finder status` 返回就绪。时间：`2026-11-15 13:47`（Asia/Shanghai）。
 - `context-viewer v1.7.10` 跨进程缓存去 CSRF 与 `lsGenMissCache` 静默收敛收口：`node plugins/agy-context-viewer/scripts/verify.mjs` 6/6 通过（含 `I1 Case D/E` 回归断言）；`node scripts/verify.mjs --strict-git-identity && node scripts/package-all.mjs` 通过（全仓隐私扫描、PNG 元数据块 audit、双插件自检、跨插件锁与严格 Git 身份门禁全部通过，生成 `dist/agy-finder-v0.2.8.zip` 94.3 KB / SHA-256 `9b5aa2cb9687d802def5659f6cf72f9e02672f7ddaea994dbbae15e4613d5052` 与 `dist/context-viewer-v1.7.10.zip` 176.9 KB / SHA-256 `5bf6f7aa893f677fbefe29fda09e99147b5e8bf5efeb659096ca518a5eadefd8`）；`./install.sh` 完成本机双插件热同步，`~/.local/bin/agy-context --help` 输出 `v1.7.10` 且 `diff -q` 确认已安装 `collector.mjs` 与仓库源码一致。时间：`2026-11-15 13:05`（Asia/Shanghai）。
 - 第十一轮复查：`node scripts/verify.mjs --strict-git-identity` 一次完整运行通过；HEAD 临时副本 `RELEASE_REF=main LC_ALL=C node scripts/package-all.mjs`、双 ZIP 完整性及校验和通过。独立采集器与消息 VM 探针复现 Z1／Z2／Z3／Z4；没有实际启动浏览器或操作真实宿主。时间：`2026-11-15 12:42`（Asia/Shanghai）。
 - 双插件 Aux Pane 折叠态唤醒修复与本机统一热升级：`bash ./install.sh` 成功热升级 `~/.gemini/config/plugins/{context-viewer,agy-finder}`（`agy-context --help` 输出 `v1.7.10`、`agy-finder status` 返回就绪、`diff -q` 确认双侧已安装 `app.js` 与仓库源码一致，双侧守护进程与 `main.mjs` 已平滑重启接入）；macOS 实机 `⌃K` / `⌃E` 折叠态唤醒验证通过；`node scripts/verify.mjs --strict-git-identity && node scripts/package-all.mjs` 通过（含 `currentIoVisible === true` 门禁下双插件 Aux Pane VM 行为回归、跨插件锁测试、全仓隐私扫描与 `dist/agy-finder-v0.2.8.zip` / `dist/context-viewer-v1.7.10.zip` 重新打包）。时间：`2026-11-15 12:27`（Asia/Shanghai）。
