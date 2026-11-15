@@ -2923,10 +2923,12 @@ function getActiveConvGenCachePath() {
   return join(getPluginStateDir(), 'active_conv_gen_cache_v1.json');
 }
 
-function slimGeneratorListForCache(generatorList = []) {
+function slimGeneratorListForCache(generatorList = [], keepBreakdownEntry = undefined) {
   if (!Array.isArray(generatorList) || !generatorList.length) return [];
-  const lastIdx = generatorList.length - 1;
-  return generatorList.map((entry, idx) => {
+  const targetEntry = keepBreakdownEntry !== undefined
+    ? keepBreakdownEntry
+    : generatorList[generatorList.length - 1];
+  return generatorList.map((entry) => {
     if (!entry || typeof entry !== 'object') return entry;
     const cm = entry.chatModel && typeof entry.chatModel === 'object' ? entry.chatModel : null;
     if (!cm) {
@@ -2939,11 +2941,12 @@ function slimGeneratorListForCache(generatorList = []) {
       };
     }
     const ctxMeta = cm.chatStartMetadata?.contextWindowMetadata;
+    const keepBreakdown = Boolean(targetEntry && entry === targetEntry && ctxMeta?.tokenBreakdown);
     const slimCtxMeta = ctxMeta ? {
       maxContextTokens: ctxMeta.maxContextTokens,
       estimatedTokensUsed: ctxMeta.estimatedTokensUsed,
       totalTokens: ctxMeta.totalTokens,
-      ...(idx === lastIdx && ctxMeta.tokenBreakdown ? { tokenBreakdown: ctxMeta.tokenBreakdown } : {})
+      ...(keepBreakdown ? { tokenBreakdown: ctxMeta.tokenBreakdown } : {})
     } : undefined;
     const slimRetryInfos = Array.isArray(cm.retryInfos)
       ? cm.retryInfos.map((r) => (r && typeof r === 'object' ? {
@@ -3071,17 +3074,34 @@ function mergeSingleGenEntry(prevEntry, nextEntry) {
   const nextModel = extractStepModel(null, nextEntry, '');
   const prevCtxMeta = prevEntry.chatModel?.chatStartMetadata?.contextWindowMetadata;
   const nextCtxMeta = nextEntry.chatModel?.chatStartMetadata?.contextWindowMetadata;
-  if (prevModel && nextModel && prevModel === nextModel && prevCtxMeta && !nextCtxMeta && nextEntry.chatModel) {
-    return {
-      ...nextEntry,
-      chatModel: {
-        ...nextEntry.chatModel,
-        chatStartMetadata: {
-          ...(nextEntry.chatModel.chatStartMetadata || {}),
-          contextWindowMetadata: prevCtxMeta
+  if (prevModel && nextModel && prevModel === nextModel && prevCtxMeta && nextEntry.chatModel) {
+    if (!nextCtxMeta) {
+      return {
+        ...nextEntry,
+        chatModel: {
+          ...nextEntry.chatModel,
+          chatStartMetadata: {
+            ...(nextEntry.chatModel.chatStartMetadata || {}),
+            contextWindowMetadata: prevCtxMeta
+          }
         }
-      }
-    };
+      };
+    }
+    if (prevCtxMeta.tokenBreakdown && !nextCtxMeta.tokenBreakdown) {
+      return {
+        ...nextEntry,
+        chatModel: {
+          ...nextEntry.chatModel,
+          chatStartMetadata: {
+            ...(nextEntry.chatModel.chatStartMetadata || {}),
+            contextWindowMetadata: {
+              ...nextCtxMeta,
+              tokenBreakdown: prevCtxMeta.tokenBreakdown
+            }
+          }
+        }
+      };
+    }
   }
   return nextEntry;
 }
@@ -3100,11 +3120,74 @@ function buildCallsByStepFromList(generatorList = []) {
   return callsByStep;
 }
 
+function computeChronoSortKey(minArrayIdx, minStepIdx, orderSeq, stepArrayIdxByStepNum = null) {
+  if (minArrayIdx >= 0) {
+    return { primary: minArrayIdx, secondary: 0, seq: orderSeq };
+  }
+  if (Number.isFinite(minStepIdx)) {
+    let predStep = -Infinity;
+    let predArr = -1;
+    let succStep = Infinity;
+    let succArr = -1;
+    if (stepArrayIdxByStepNum instanceof Map) {
+      for (const [sNum, arrIdx] of stepArrayIdxByStepNum.entries()) {
+        if (sNum <= minStepIdx && sNum > predStep) {
+          predStep = sNum;
+          predArr = arrIdx;
+        }
+        if (sNum > minStepIdx && sNum < succStep) {
+          succStep = sNum;
+          succArr = arrIdx;
+        }
+      }
+    }
+    let primary = 0;
+    if (predArr >= 0 && succArr >= 0) {
+      primary = (predArr + succArr) / 2;
+    } else if (predArr >= 0) {
+      primary = predArr + 0.5;
+    } else if (succArr >= 0) {
+      primary = succArr - 0.5;
+    }
+    return { primary, secondary: minStepIdx, seq: orderSeq };
+  }
+  return { primary: Number.MAX_SAFE_INTEGER, secondary: orderSeq, seq: orderSeq };
+}
+
+function compareChronoSortKeys(a, b) {
+  return a.primary - b.primary || a.secondary - b.secondary || a.seq - b.seq;
+}
+
+function orderGeneratorListChronologically(generatorList = [], stepArrayIdxByStepNum = null, stepMetaMap = null) {
+  const valid = Array.isArray(generatorList) ? generatorList.filter((e) => e && typeof e === 'object') : [];
+  if (valid.length <= 1) return valid.slice();
+  return valid
+    .map((entry, idx) => {
+      const numericSteps = getGenEntryStepNums(entry);
+      let minMatchedArrayIdx = -1;
+      for (const n of numericSteps) {
+        const matchedArr = stepArrayIdxByStepNum?.has(n)
+          ? stepArrayIdxByStepNum.get(n)
+          : (stepMetaMap?.get(n)?.arrayIdx ?? -1);
+        if (matchedArr >= 0 && (minMatchedArrayIdx < 0 || matchedArr < minMatchedArrayIdx)) {
+          minMatchedArrayIdx = matchedArr;
+        }
+      }
+      const minStepIdx = numericSteps.length ? Math.min(...numericSteps) : null;
+      return {
+        entry,
+        key: computeChronoSortKey(minMatchedArrayIdx, minStepIdx, idx, stepArrayIdxByStepNum)
+      };
+    })
+    .sort((a, b) => compareChronoSortKeys(a.key, b.key))
+    .map((item) => item.entry);
+}
+
 function mergeGeneratorMetadataLists(baseList = [], incomingList = []) {
   const base = Array.isArray(baseList) ? baseList.filter((e) => e && typeof e === 'object') : [];
   const incoming = Array.isArray(incomingList) ? incomingList.filter((e) => e && typeof e === 'object') : [];
-  if (!base.length) return incoming;
-  if (!incoming.length) return base;
+  if (!base.length) return orderGeneratorListChronologically(incoming);
+  if (!incoming.length) return orderGeneratorListChronologically(base);
 
   const baseByStep = buildCallsByStepFromList(base);
   const accepted = [];
@@ -3529,7 +3612,8 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     });
   }
 
-  const bundleList = Array.isArray(genMetaBundle?.generatorList) ? genMetaBundle.generatorList : [];
+  const rawBundleList = Array.isArray(genMetaBundle?.generatorList) ? genMetaBundle.generatorList : [];
+  const bundleList = orderGeneratorListChronologically(rawBundleList, stepArrayIdxByStepNum, stepMetaMap);
   const bundleCallsByStep = buildCallsByStepFromList(bundleList);
   const maxGenStepIdx = getMaxGenStepIdx(bundleList);
   const genRpcSucceeded = Boolean(genMetaBundle && !genMetaBundle.rpcFailed);
@@ -3563,27 +3647,6 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     metaSettled = false;
     const delayMs = CONV_META_RETRY_DELAYS_MS[Math.min(nextRetryCount, CONV_META_RETRY_DELAYS_MS.length - 1)];
     nextMetaCheckAt = nowMs + delayMs;
-  }
-
-  if (!genFromCache && hasLsConfig && genRpcSucceeded) {
-    if (bundleList.length) {
-      maybePersistConvStepModels(
-        convId,
-        existsSync(compactPath) ? compactPath : targetLogPath,
-        bundleList
-      );
-    }
-    if (diskSettledEligible || bundleList.length) {
-      saveActiveConvGenDiskEntry(convId, {
-        lsKeyHash: lsDiskHash,
-        size: logStatSize,
-        mtimeMs: logStatMtime,
-        fetchedAt: nowMs,
-        settled: diskSettledEligible,
-        empty: !bundleList.length,
-        generatorList: slimGeneratorListForCache(bundleList)
-      });
-    }
   }
 
   // Build turn-by-turn metrics combining GeneratorMetadata + Transcript steps
@@ -3629,6 +3692,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       _minStepIdx: Number.isFinite(sIdx) ? sIdx : null,
       _orderSeq: turnCandidateSeq++,
       _rawCtxMeta: null,
+      _sourceGm: null,
       createdAt: s.created_at || '',
       tools: sMeta?.tools || [],
       model: displayModel || '未记录模型',
@@ -3745,6 +3809,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         _minStepIdx: minGmStepIdx,
         _orderSeq: turnCandidateSeq++,
         _rawCtxMeta: ctxMeta || null,
+        _sourceGm: gm,
         createdAt: timingMeta?.createdAt || '',
         tools: timingMeta?.tools || [],
         model: displayModel || '未记录模型',
@@ -3795,43 +3860,14 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     }
   }
 
-  // Restore chronological transcript order before computing sequential turnIndex, deltaTokens, contextBreakdown & latestTurn
+  // Restore chronological transcript order before computing sequential turnIndex, deltaTokens, contextBreakdown, cache persistence & latestTurn
+  let latestTurnSourceGm = null;
   if (turns.length > 0) {
     for (const t of turns) {
-      if (t._minArrayIdx >= 0) {
-        t._sortPrimary = t._minArrayIdx;
-        t._sortSecondary = 0;
-      } else if (Number.isFinite(t._minStepIdx)) {
-        let predStep = -Infinity;
-        let predArr = -1;
-        let succStep = Infinity;
-        let succArr = -1;
-        for (const [sNum, arrIdx] of stepArrayIdxByStepNum.entries()) {
-          if (sNum <= t._minStepIdx && sNum > predStep) {
-            predStep = sNum;
-            predArr = arrIdx;
-          }
-          if (sNum > t._minStepIdx && sNum < succStep) {
-            succStep = sNum;
-            succArr = arrIdx;
-          }
-        }
-        if (predArr >= 0 && succArr >= 0) {
-          t._sortPrimary = (predArr + succArr) / 2;
-        } else if (predArr >= 0) {
-          t._sortPrimary = predArr + 0.5;
-        } else if (succArr >= 0) {
-          t._sortPrimary = succArr - 0.5;
-        } else {
-          t._sortPrimary = 0;
-        }
-        t._sortSecondary = t._minStepIdx;
-      } else {
-        t._sortPrimary = Number.MAX_SAFE_INTEGER;
-        t._sortSecondary = t._orderSeq;
-      }
+      t._sortKey = computeChronoSortKey(t._minArrayIdx, t._minStepIdx, t._orderSeq, stepArrayIdxByStepNum);
     }
-    turns.sort((a, b) => a._sortPrimary - b._sortPrimary || a._sortSecondary - b._sortSecondary || a._orderSeq - b._orderSeq);
+    turns.sort((a, b) => compareChronoSortKeys(a._sortKey, b._sortKey));
+    latestTurnSourceGm = turns[turns.length - 1]._sourceGm || null;
     let prevTotalTokens = 0;
     for (let idx = 0; idx < turns.length; idx++) {
       const t = turns[idx];
@@ -3845,8 +3881,39 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       delete t._minStepIdx;
       delete t._orderSeq;
       delete t._rawCtxMeta;
-      delete t._sortPrimary;
-      delete t._sortSecondary;
+      delete t._sortKey;
+      delete t._sourceGm;
+    }
+  }
+
+  if (!genFromCache && hasLsConfig && genRpcSucceeded) {
+    if (bundleCallsByStep.size > 0) {
+      convGenMetaCache.set(convId, {
+        at: Number(genMetaBundle?.at || nowMs),
+        lsKey,
+        logSize: logStatSize,
+        logMtimeMs: logStatMtime,
+        generatorList: bundleList,
+        callsByStep: bundleCallsByStep
+      });
+    }
+    if (bundleList.length) {
+      maybePersistConvStepModels(
+        convId,
+        existsSync(compactPath) ? compactPath : targetLogPath,
+        bundleList
+      );
+    }
+    if (diskSettledEligible || bundleList.length) {
+      saveActiveConvGenDiskEntry(convId, {
+        lsKeyHash: lsDiskHash,
+        size: logStatSize,
+        mtimeMs: logStatMtime,
+        fetchedAt: nowMs,
+        settled: diskSettledEligible,
+        empty: !bundleList.length,
+        generatorList: slimGeneratorListForCache(bundleList, latestTurnSourceGm)
+      });
     }
   }
 

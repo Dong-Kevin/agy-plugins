@@ -2458,6 +2458,7 @@ async function main() {
     const i1ConvF = '00000000-0000-4000-8000-000000000306';
     const i1ConvG = '00000000-0000-4000-8000-000000000307';
     const i1ConvH = '00000000-0000-4000-8000-000000000308';
+    const i1ConvI = '00000000-0000-4000-8000-000000000309';
     const i1Csrf = 'i1-ls-csrf-secret-tok';
     const i1ChildCsrf = 'i1-ls-csrf-child-scoped-tok';
     const i1RawEmail = ['i1test', 'example.com'].join('@');
@@ -3013,7 +3014,7 @@ async function main() {
       );
 
       // Case I (AA1): Partial generatorMetadata missing older OR newer steps still preserves chronological turn order, deltaTokens, sessionTotals & latestTurn
-      const makeFullMetaEntry = (stepIndices, input, output) => ({
+      const makeFullMetaEntry = (stepIndices, input, output, sysTokens = 1200) => ({
         stepIndices: Array.isArray(stepIndices) ? stepIndices : [stepIndices],
         chatModel: {
           modelDisplayName: 'Gemini 3.8 Flash',
@@ -3027,7 +3028,7 @@ async function main() {
               estimatedTokensUsed: input + output,
               tokenBreakdown: {
                 totalTokens: input + output,
-                groups: [{ name: 'System Prompt', numTokens: 1200 }]
+                groups: [{ name: 'System Prompt', numTokens: sysTokens }]
               }
             }
           }
@@ -3220,6 +3221,109 @@ async function main() {
           diskAfterHeal?.generatorList?.[0]?.chatModel?.usage?.outputTokens === 300,
         `I1 Case J (AA2) 遗留退化磁盘 settled 缓存未自愈恢复：calls=${i1ConvMetaCalls[i1ConvH]}, healed=${JSON.stringify(healedColdH)}, disk=${JSON.stringify(diskAfterHeal)}`
       );
+
+      // Case K (AB1): Non-chronological generatorMetadata retains latest turn's tokenBreakdown identically across warm, fresh-module & cold-child reads
+      const verifyAb1WarmFreshCold = async (convId, nowTs, expectedSysTokens, expectedStepsOrder, expectedTotal, label) => {
+        i1ConvMetaCalls[convId] = 0;
+        const warmSnap = await scanConversation(convId, { force: true, nowMs: nowTs });
+        const diskEntry = JSON.parse(readFileSync(convDiskFile, 'utf-8')).convs?.[convId];
+        const callsAfterWarm = i1ConvMetaCalls[convId];
+        const freshMod = await import(`${i1CollectorUrl}?ab1=${convId}-${nowTs}`);
+        const freshSnap = await freshMod.scanConversation(convId, { background: true, nowMs: nowTs + 200 });
+        const coldOut = await runI1Child(
+          `const m = await import(${JSON.stringify(i1CollectorUrl)});
+           const s = await m.scanConversation(${JSON.stringify(convId)}, { background: true, nowMs: ${nowTs + 400} });
+           console.log(JSON.stringify({ input: s.context?.inputTokens, output: s.context?.outputTokens, budget: s.context?.budget, total: s.context?.sessionTotals?.totalTokens, steps: s.turns?.map(t => t.stepIndex), breakdown: s.context?.breakdown }));`
+        );
+        const breakdownFlags = (diskEntry?.generatorList || []).map(
+          (e) => Boolean(e?.chatModel?.chatStartMetadata?.contextWindowMetadata?.tokenBreakdown)
+        );
+        assert(
+          callsAfterWarm === 1 &&
+            i1ConvMetaCalls[convId] === 1 &&
+            warmSnap.context?.breakdown?.groups?.[0]?.tokens === expectedSysTokens &&
+            freshSnap.context?.breakdown?.groups?.[0]?.tokens === expectedSysTokens &&
+            coldOut.breakdown?.groups?.[0]?.tokens === expectedSysTokens &&
+            JSON.stringify(warmSnap.context?.breakdown) === JSON.stringify(coldOut.breakdown) &&
+            coldOut.input === 6000 &&
+            coldOut.output === 300 &&
+            coldOut.budget === 200000 &&
+            coldOut.total === expectedTotal &&
+            JSON.stringify(warmSnap.turns?.map((t) => t.stepIndex)) === expectedStepsOrder &&
+            JSON.stringify(coldOut.steps) === expectedStepsOrder &&
+            diskEntry?.settled === true &&
+            breakdownFlags.filter(Boolean).length === 1 &&
+            breakdownFlags[breakdownFlags.length - 1] === true,
+          `I1 Case K (${label}) AB1 暖/冷分组明细或缓存一致性失败：calls=${i1ConvMetaCalls[convId]}, warm=${warmSnap.context?.breakdown?.groups?.[0]?.tokens}, fresh=${freshSnap.context?.breakdown?.groups?.[0]?.tokens}, cold=${JSON.stringify(coldOut)}, breakdownFlags=${JSON.stringify(breakdownFlags)}`
+        );
+        return { warmSnap, coldOut };
+      };
+
+      const tK0 = writeMultiTurnTranscript(i1ConvI, tJ0 + 10_000, twoTurnSpecs);
+      i1ConvCustomList[i1ConvI] = [
+        makeFullMetaEntry(3, 6000, 300, 1600),
+        makeFullMetaEntry(2, 2000, 200, 1200)
+      ];
+      const { coldOut: ab1ReversedCold } = await verifyAb1WarmFreshCold(i1ConvI, tK0, 1600, '[3,2]', 8500, '完整倒序');
+
+      const tK1 = writeMultiTurnTranscript(i1ConvI, tK0 + 2000, twoTurnSpecs);
+      i1ConvCustomList[i1ConvI] = [
+        makeFullMetaEntry(2, 2000, 200, 1200),
+        makeFullMetaEntry(3, 6000, 300, 1600)
+      ];
+      const { coldOut: ab1OrderedCold } = await verifyAb1WarmFreshCold(i1ConvI, tK1, 1600, '[3,2]', 8500, '完整顺序对照');
+      assert(
+        JSON.stringify(ab1ReversedCold.breakdown) === JSON.stringify(ab1OrderedCold.breakdown),
+        'I1 Case K 倒序与顺序对照冷读取 breakdown 不一致'
+      );
+
+      // K.2: Partial [step 2] -> retry completion with reversed [step 3, step 2] -> fresh/cold reads retain breakdown=1600 with 0 extra RPCs
+      const tK2 = writeMultiTurnTranscript(i1ConvI, tK1 + 2000, twoTurnSpecs);
+      i1ConvMetaCalls[i1ConvI] = 0;
+      i1ConvCustomList[i1ConvI] = [makeFullMetaEntry(2, 2000, 200, 1200)];
+      await scanConversation(i1ConvI, { background: true, nowMs: tK2 });
+      i1ConvCustomList[i1ConvI] = [
+        makeFullMetaEntry(3, 6000, 300, 1600),
+        makeFullMetaEntry(2, 2000, 200, 1200)
+      ];
+      const k2RetryWarm = await scanConversation(i1ConvI, { background: true, nowMs: tK2 + 4500 });
+      const k2Fresh = await (await import(`${i1CollectorUrl}?ab1-k2=${Date.now()}`)).scanConversation(i1ConvI, { background: true, nowMs: tK2 + 4700 });
+      const k2Cold = await runI1Child(
+        `const m = await import(${JSON.stringify(i1CollectorUrl)});
+         const s = await m.scanConversation(${JSON.stringify(i1ConvI)}, { background: true, nowMs: ${tK2 + 4900} });
+         console.log(JSON.stringify({ breakdown: s.context?.breakdown, steps: s.turns?.map(t => t.stepIndex) }));`
+      );
+      assert(
+        i1ConvMetaCalls[i1ConvI] === 2 &&
+          k2RetryWarm.context?.breakdown?.groups?.[0]?.tokens === 1600 &&
+          k2Fresh.context?.breakdown?.groups?.[0]?.tokens === 1600 &&
+          k2Cold.breakdown?.groups?.[0]?.tokens === 1600 &&
+          JSON.stringify(k2Cold.steps) === '[3,2]',
+        `I1 Case K (部分补齐倒序恢复) 失败：calls=${i1ConvMetaCalls[i1ConvI]}, warm=${k2RetryWarm.context?.breakdown?.groups?.[0]?.tokens}, fresh=${k2Fresh.context?.breakdown?.groups?.[0]?.tokens}, cold=${JSON.stringify(k2Cold)}`
+      );
+
+      // K.3: Multi-step reversed [4,5] then [2,3], plus non-monotonic transcript step_index [10, 5]
+      const tK3 = writeMultiTurnTranscript(i1ConvI, tK2 + 6000, [
+        { stepIndex: 2, input: 1500, output: 100 },
+        { stepIndex: 3, input: 2000, output: 150 },
+        { stepIndex: 4, input: 3000, output: 200 },
+        { stepIndex: 5, input: 6000, output: 300 }
+      ]);
+      i1ConvCustomList[i1ConvI] = [
+        makeFullMetaEntry([4, 5], 6000, 300, 1800),
+        makeFullMetaEntry([2, 3], 3500, 250, 1100)
+      ];
+      await verifyAb1WarmFreshCold(i1ConvI, tK3, 1800, '[4,2]', 10050, '多步骤倒序');
+
+      const tK4 = writeMultiTurnTranscript(i1ConvI, tK3 + 2000, [
+        { stepIndex: 10, input: 2000, output: 200 },
+        { stepIndex: 5, input: 6000, output: 300 }
+      ]);
+      i1ConvCustomList[i1ConvI] = [
+        makeFullMetaEntry(5, 6000, 300, 1900),
+        makeFullMetaEntry(10, 2000, 200, 1100)
+      ];
+      await verifyAb1WarmFreshCold(i1ConvI, tK4, 1900, '[5,10]', 8500, '非单调 transcript 顺序');
     } finally {
       if (prevI1StateDir === undefined) delete process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR; else process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR = prevI1StateDir;
       if (prevI1Ls === undefined) delete process.env.ANTIGRAVITY_LS_ADDRESS; else process.env.ANTIGRAVITY_LS_ADDRESS = prevI1Ls;
@@ -3234,6 +3338,7 @@ async function main() {
       rmSync(join(isolatedAgDir, 'brain', i1ConvF), { recursive: true, force: true });
       rmSync(join(isolatedAgDir, 'brain', i1ConvG), { recursive: true, force: true });
       rmSync(join(isolatedAgDir, 'brain', i1ConvH), { recursive: true, force: true });
+      rmSync(join(isolatedAgDir, 'brain', i1ConvI), { recursive: true, force: true });
       rmSync(i1StateDir, { recursive: true, force: true });
       rmSync(join(isolatedStateDir, 'gen_step_models_v1.json'), { force: true });
       rmSync(join(isolatedStateDir, 'host_status_cache_v1.json'), { force: true });
