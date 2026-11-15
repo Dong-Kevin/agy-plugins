@@ -2452,13 +2452,17 @@ async function main() {
     // I1: Idle RPC elimination, quota resetTime boundary wake, delayed commit settle, cross-process disk cache & redaction
     const i1ConvA = '00000000-0000-4000-8000-000000000301';
     const i1ConvB = '00000000-0000-4000-8000-000000000302';
+    const i1ConvC = '00000000-0000-4000-8000-000000000303';
     const i1Csrf = 'i1-ls-csrf-secret-tok';
+    const i1ChildCsrf = 'i1-ls-csrf-child-scoped-tok';
     const i1RawEmail = ['i1test', 'example.com'].join('@');
     const i1FakeBearer = ['Bea', 'rer', ' ', 'i1_secret_token_xyz'].join('');
     const i1BaseMs = Date.now();
     const i1ResetIso = new Date(i1BaseMs + 28 * 60_000).toISOString();
     let i1QuotaRemaining = 0.8;
     let i1MetaMode = 'full';
+    let i1ConvCMetaMode = 'empty';
+    let i1ConvCMetaCalls = 0;
     const i1Counts = {
       GetUserStatus: 0,
       RetrieveUserQuotaSummary: 0,
@@ -2468,9 +2472,15 @@ async function main() {
       let rawBody = '';
       req.on('data', (c) => { rawBody += c; });
       req.on('end', () => {
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        const reqCsrf = String(req.headers['x-codeium-csrf-token'] || '');
+        if (reqCsrf !== i1Csrf && reqCsrf !== i1ChildCsrf) {
+          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end('{"error":"forbidden"}');
+          return;
+        }
         if (req.url?.includes('GetUserStatus')) {
           i1Counts.GetUserStatus += 1;
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({
             userStatus: {
               email: i1RawEmail,
@@ -2490,6 +2500,7 @@ async function main() {
         }
         if (req.url?.includes('RetrieveUserQuotaSummary')) {
           i1Counts.RetrieveUserQuotaSummary += 1;
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({
             groups: [
               {
@@ -2506,10 +2517,25 @@ async function main() {
           i1Counts.GetCascadeTrajectoryGeneratorMetadata += 1;
           let cascadeId = '';
           try { cascadeId = JSON.parse(rawBody || '{}').cascadeId || ''; } catch {}
+          if (cascadeId === i1ConvC) {
+            i1ConvCMetaCalls += 1;
+            if (i1ConvCMetaMode === '503') {
+              res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
+              res.end('{"error":"unavailable"}');
+              return;
+            }
+            if (i1ConvCMetaMode === 'empty') {
+              res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+              res.end(JSON.stringify({ generatorMetadata: [] }));
+              return;
+            }
+          }
           if (cascadeId === i1ConvB && i1MetaMode === 'empty') {
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
             res.end(JSON.stringify({ generatorMetadata: [] }));
             return;
           }
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({
             generatorMetadata: [
               {
@@ -2537,6 +2563,7 @@ async function main() {
           }));
           return;
         }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end('{}');
       });
     });
@@ -2553,7 +2580,7 @@ async function main() {
       process.env.ANTIGRAVITY_LS_ADDRESS = i1LsAddr;
       process.env.ANTIGRAVITY_CSRF_TOKEN = i1Csrf;
 
-      const writeI1Transcript = (id, mtimeMs) => {
+      const writeI1Transcript = (id, mtimeMs, contentSuffix = '') => {
         const d = join(isolatedAgDir, 'brain', id, '.system_generated', 'logs');
         mkdirSync(d, { recursive: true });
         const tp = join(d, 'transcript.jsonl');
@@ -2562,7 +2589,7 @@ async function main() {
           tp,
           [
             { step_index: 1, type: 'USER_INPUT', created_at: iso, content: `i1 task ${id}` },
-            { step_index: 2, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: iso, input_tokens: 2000, output_tokens: 200, content: 'ok' }
+            { step_index: 2, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: iso, input_tokens: 2000, output_tokens: 200, content: `ok${contentSuffix}` }
           ].map((r) => JSON.stringify(r)).join('\n') + '\n',
           'utf-8'
         );
@@ -2656,9 +2683,9 @@ async function main() {
         `I1 Case C 已收敛对话在 +10m/+25m 不应再发 GetCascadeTrajectoryGeneratorMetadata：before=${metaAfterSettle}, after=${i1Counts.GetCascadeTrajectoryGeneratorMetadata}`
       );
 
-      // Case D: Cross-process cold child reuses disk caches with 0 RPCs, redacts secrets, and force:true bypasses caches
+      // Case D: Cross-process cold child (with a different Scoped CSRF & normalized localhost) reuses disk caches with 0 RPCs, redacts secrets, and force:true overwrites the same cache slot
       const i1CollectorUrl = pathToFileURL(join(ROOT, 'sidecars', 'dashboard', 'collector.mjs')).href;
-      const runI1Child = (code) => new Promise((resolveChild, rejectChild) => {
+      const runI1Child = (code, envOverrides = {}) => new Promise((resolveChild, rejectChild) => {
         const child = spawn(process.execPath, ['--input-type=module', '-e', code], {
           env: {
             ...process.env,
@@ -2666,7 +2693,8 @@ async function main() {
             AG_CLI_DIR: isolatedCliDir,
             ANTIGRAVITY_EXECUTABLE_DATA_DIR: i1StateDir,
             ANTIGRAVITY_LS_ADDRESS: i1LsAddr,
-            ANTIGRAVITY_CSRF_TOKEN: i1Csrf
+            ANTIGRAVITY_CSRF_TOKEN: i1ChildCsrf,
+            ...envOverrides
           },
           stdio: ['ignore', 'pipe', 'pipe']
         });
@@ -2695,7 +2723,25 @@ async function main() {
           i1Counts.GetUserStatus === beforeChildCounts.GetUserStatus &&
           i1Counts.RetrieveUserQuotaSummary === beforeChildCounts.RetrieveUserQuotaSummary &&
           i1Counts.GetCascadeTrajectoryGeneratorMetadata === beforeChildCounts.GetCascadeTrajectoryGeneratorMetadata,
-        `I1 Case D 跨进程冷启动未零 RPC 命中磁盘缓存：out=${JSON.stringify(childCachedOut)}, before=${JSON.stringify(beforeChildCounts)}, after=${JSON.stringify(i1Counts)}`
+        `I1 Case D 不同 CSRF 跨进程冷启动未零 RPC 命中磁盘缓存：out=${JSON.stringify(childCachedOut)}, before=${JSON.stringify(beforeChildCounts)}, after=${JSON.stringify(i1Counts)}`
+      );
+
+      const childLocalhostOut = await runI1Child(
+        `const m = await import(${JSON.stringify(i1CollectorUrl)});
+         const s = await m.scanConversation(${JSON.stringify(i1ConvB)}, { background: true, nowMs: ${tB0 + 4500} });
+         console.log(JSON.stringify({ etag: s.etag, budget: s.context?.budget }));`,
+        {
+          ANTIGRAVITY_LS_ADDRESS: `localhost:${i1Port}`,
+          ANTIGRAVITY_CSRF_TOKEN: i1ChildCsrf
+        }
+      );
+      assert(
+        childLocalhostOut.etag === snapBSettled.etag &&
+          childLocalhostOut.budget === 200000 &&
+          i1Counts.GetUserStatus === beforeChildCounts.GetUserStatus &&
+          i1Counts.RetrieveUserQuotaSummary === beforeChildCounts.RetrieveUserQuotaSummary &&
+          i1Counts.GetCascadeTrajectoryGeneratorMetadata === beforeChildCounts.GetCascadeTrajectoryGeneratorMetadata,
+        `I1 Case D localhost 规范化地址冷启动未零 RPC 命中磁盘缓存：out=${JSON.stringify(childLocalhostOut)}, before=${JSON.stringify(beforeChildCounts)}, after=${JSON.stringify(i1Counts)}`
       );
 
       const hostDiskFile = join(i1StateDir, 'host_status_cache_v1.json');
@@ -2703,10 +2749,16 @@ async function main() {
       assert(existsSync(hostDiskFile) && existsSync(convDiskFile), 'I1 Case D 共享磁盘缓存文件未生成');
       const hostDiskRaw = readFileSync(hostDiskFile, 'utf-8');
       const convDiskRaw = readFileSync(convDiskFile, 'utf-8');
-      for (const forbidden of [i1Csrf, i1LsAddr, i1RawEmail, 'i1_secret_token_xyz']) {
+      for (const forbidden of [i1Csrf, i1ChildCsrf, i1LsAddr, `localhost:${i1Port}`, i1RawEmail, 'i1_secret_token_xyz']) {
         assert(!hostDiskRaw.includes(forbidden), `I1 host_status_cache_v1.json 泄露敏感字段: ${forbidden}`);
         assert(!convDiskRaw.includes(forbidden), `I1 active_conv_gen_cache_v1.json 泄露敏感字段: ${forbidden}`);
       }
+      const hostEntriesKeys = Object.keys(JSON.parse(hostDiskRaw).entries || {});
+      const convHashBefore = JSON.parse(convDiskRaw).convs?.[i1ConvB]?.lsKeyHash || '';
+      assert(
+        hostEntriesKeys.length === 1 && /^ls_[0-9a-f]{16}$/.test(convHashBefore),
+        `I1 Case D 磁盘缓存哈希槽结构异常：hostKeys=${JSON.stringify(hostEntriesKeys)}, convHash=${convHashBefore}`
+      );
 
       await runI1Child(
         `const m = await import(${JSON.stringify(i1CollectorUrl)});
@@ -2719,6 +2771,85 @@ async function main() {
           i1Counts.GetCascadeTrajectoryGeneratorMetadata === beforeChildCounts.GetCascadeTrajectoryGeneratorMetadata + 1,
         `I1 Case D force:true 必须穿透所有缓存直连 LS：before=${JSON.stringify(beforeChildCounts)}, after=${JSON.stringify(i1Counts)}`
       );
+      const hostDiskAfterRaw = readFileSync(hostDiskFile, 'utf-8');
+      const convDiskAfterRaw = readFileSync(convDiskFile, 'utf-8');
+      const hostKeysAfter = Object.keys(JSON.parse(hostDiskAfterRaw).entries || {});
+      const convHashAfter = JSON.parse(convDiskAfterRaw).convs?.[i1ConvB]?.lsKeyHash || '';
+      assert(
+        hostKeysAfter.length === 1 &&
+          hostKeysAfter[0] === hostEntriesKeys[0] &&
+          convHashAfter === convHashBefore &&
+          !hostDiskAfterRaw.includes(i1ChildCsrf) &&
+          !convDiskAfterRaw.includes(i1ChildCsrf),
+        `I1 Case D 子进程 force:true 应同槽覆盖而非分裂新 CSRF 键：before=${hostEntriesKeys[0]}/${convHashBefore}, after=${JSON.stringify(hostKeysAfter)}/${convHashAfter}`
+      );
+
+      // Case E: collectTokenHistory lsGenMissCache settles quiet files >= 180s on clean LS responses, binds normalized lsAddr, and wakes on force or file change
+      const tE0 = Date.parse(i1ResetIso) + 10 * 60_000;
+      const mtimeC = writeI1Transcript(i1ConvC, tE0);
+      i1ConvCMetaMode = 'empty';
+      i1ConvCMetaCalls = 0;
+
+      await collectTokenHistory({ background: true, nowMs: mtimeC + 10_000 });
+      assert(
+        i1ConvCMetaCalls === 1,
+        `I1 Case E 首次缺模型历史扫描应触发 1 次 metadata RPC，实际：${i1ConvCMetaCalls}`
+      );
+      await collectTokenHistory({ background: true, nowMs: mtimeC + 35_000 });
+      assert(
+        i1ConvCMetaCalls === 1,
+        `I1 Case E 60s miss TTL 内不应重查：calls=${i1ConvCMetaCalls}`
+      );
+      await collectTokenHistory({ background: true, nowMs: mtimeC + 75_000 });
+      assert(
+        i1ConvCMetaCalls === 2,
+        `I1 Case E 年轻文件 (<180s) 过 60s TTL 后应重试 1 次：calls=${i1ConvCMetaCalls}`
+      );
+
+      i1ConvCMetaMode = '503';
+      await collectTokenHistory({ background: true, nowMs: mtimeC + 190_000 });
+      assert(
+        i1ConvCMetaCalls === 3,
+        `I1 Case E 过 TTL 后应触发第 3 次查询（返回 503）：calls=${i1ConvCMetaCalls}`
+      );
+
+      i1ConvCMetaMode = 'empty';
+      await collectTokenHistory({ background: true, nowMs: mtimeC + 260_000 });
+      assert(
+        i1ConvCMetaCalls === 4,
+        `I1 Case E 此前 503 失败不应误收敛，应继续查询并在此轮（>=180s 正常响应）收敛：calls=${i1ConvCMetaCalls}`
+      );
+
+      await collectTokenHistory({ background: true, nowMs: mtimeC + 330_000 });
+      await collectTokenHistory({ background: true, nowMs: mtimeC + 480_000 });
+      assert(
+        i1ConvCMetaCalls === 4,
+        `I1 Case E 已静默收敛会话在 +330s/+480s 不应再发 metadata RPC：calls=${i1ConvCMetaCalls}`
+      );
+
+      process.env.ANTIGRAVITY_CSRF_TOKEN = i1ChildCsrf;
+      process.env.ANTIGRAVITY_LS_ADDRESS = `localhost:${i1Port}`;
+      await collectTokenHistory({ background: true, nowMs: mtimeC + 600_000 });
+      assert(
+        i1ConvCMetaCalls === 4,
+        `I1 Case E 切换 CSRF 与 localhost 后 lsGenMissCache 仍应命中已收敛条目：calls=${i1ConvCMetaCalls}`
+      );
+
+      await collectTokenHistory({ force: true, nowMs: mtimeC + 610_000 });
+      assert(
+        i1ConvCMetaCalls === 5,
+        `I1 Case E force:true 必须穿透已收敛的 lsGenMissCache：calls=${i1ConvCMetaCalls}`
+      );
+
+      process.env.ANTIGRAVITY_LS_ADDRESS = i1LsAddr;
+      process.env.ANTIGRAVITY_CSRF_TOKEN = i1Csrf;
+      i1ConvCMetaMode = 'full';
+      writeI1Transcript(i1ConvC, mtimeC + 620_000, ' updated');
+      await collectTokenHistory({ background: true, nowMs: mtimeC + 680_000 });
+      assert(
+        i1ConvCMetaCalls === 6,
+        `I1 Case E 文件 (size, mtimeMs) 变更后应打破静默收敛并补齐模型：calls=${i1ConvCMetaCalls}`
+      );
     } finally {
       if (prevI1StateDir === undefined) delete process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR; else process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR = prevI1StateDir;
       if (prevI1Ls === undefined) delete process.env.ANTIGRAVITY_LS_ADDRESS; else process.env.ANTIGRAVITY_LS_ADDRESS = prevI1Ls;
@@ -2727,6 +2858,7 @@ async function main() {
       await new Promise((r) => i1Server.close(r));
       rmSync(join(isolatedAgDir, 'brain', i1ConvA), { recursive: true, force: true });
       rmSync(join(isolatedAgDir, 'brain', i1ConvB), { recursive: true, force: true });
+      rmSync(join(isolatedAgDir, 'brain', i1ConvC), { recursive: true, force: true });
       rmSync(i1StateDir, { recursive: true, force: true });
       rmSync(join(isolatedStateDir, 'gen_step_models_v1.json'), { force: true });
       rmSync(join(isolatedStateDir, 'host_status_cache_v1.json'), { force: true });

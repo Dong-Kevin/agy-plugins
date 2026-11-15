@@ -70,7 +70,7 @@ const TEXT_EXTENSIONS = new Set([
 const fileAuditCache = new Map();       // "realPath|size|mtimeMs" -> attachment result
 const transcriptHistCache = new Map();  // filePath -> { size, mtimeMs, firstDate, rawRecords, stepsNeedingGen }
 const convGenMetaCache = new Map();     // convId -> { at, generatorList, callsByStep }
-const lsGenMissCache = new Map();       // convId -> { lsKey, size, mtimeMs, at }
+const lsGenMissCache = new Map();       // convId -> { lsAddr, size, mtimeMs, at, settled }
 const recentConvMetaCache = new Map();  // logPath -> { key, title, lastContextTokens, turnsCount }
 let genStepModelsCache = { path: '', mtimeMs: -1, size: -1, data: null };
 let hostDiskCacheMeta = { path: '', mtimeMs: -1, size: -1, data: null };
@@ -524,9 +524,32 @@ function hashAccountKey(email) {
   return 'acct_' + createHash('sha256').update(email.trim().toLowerCase()).digest('hex').slice(0, 12);
 }
 
+function normalizeLsAddr(rawAddr) {
+  const trimmed = String(rawAddr || '').trim();
+  if (!trimmed) return '';
+  try {
+    const withProto = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+    const u = new URL(withProto);
+    const host = u.hostname.toLowerCase() === 'localhost' ? '127.0.0.1' : u.hostname.toLowerCase();
+    return u.port ? `${host}:${u.port}` : host;
+  } catch {
+    return trimmed
+      .toLowerCase()
+      .replace(/^https?:\/\//, '')
+      .replace(/\/+$/, '')
+      .replace(/^localhost(?=:|$)/, '127.0.0.1');
+  }
+}
+
 function hashLsKey(lsKey) {
   if (!lsKey || typeof lsKey !== 'string') return '';
   return 'ls_' + createHash('sha256').update(lsKey).digest('hex').slice(0, 16);
+}
+
+function hashLsAddr(rawAddr) {
+  const norm = normalizeLsAddr(rawAddr);
+  if (!norm) return '';
+  return 'ls_' + createHash('sha256').update(norm).digest('hex').slice(0, 16);
 }
 
 function getActivityRootKey() {
@@ -814,7 +837,7 @@ async function getHostUserStatus(force = false, options = {}) {
     };
   }
   const lsKey = `${lsAddr}|${csrf}`;
-  const lsKeyHash = hashLsKey(lsKey);
+  const lsKeyHash = hashLsAddr(lsAddr);
 
   if (
     !force &&
@@ -3036,7 +3059,8 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   const lsCsrf = process.env.ANTIGRAVITY_CSRF_TOKEN || '';
   const hasLsConfig = Boolean(lsAddr && lsCsrf);
   const lsKey = hasLsConfig ? `${lsAddr}|${lsCsrf}` : '';
-  const lsKeyHash = hashLsKey(lsKey);
+  const lsMemHash = hashLsKey(lsKey);
+  const lsDiskHash = hasLsConfig ? hashLsAddr(lsAddr) : '';
   if (force) {
     fileAuditCache.clear();
     scanSnapCache.clear();
@@ -3087,7 +3111,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     latestTranscriptMtimeMs: logStatMtime
   });
 
-  const baseSnapKey = `${convId}|${logStatMtime}|${logStatSize}|${host.sig}|${lsKeyHash}|${agDir}|${stateDir}`;
+  const baseSnapKey = `${convId}|${logStatMtime}|${logStatSize}|${host.sig}|${lsMemHash}|${agDir}|${stateDir}`;
   const prevHit = scanSnapCache.get(convId);
   const sameBaseKey = Boolean(prevHit && prevHit.baseKey === baseSnapKey);
   if (!force && sameBaseKey) {
@@ -3247,7 +3271,8 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       const diskEntry = diskCache?.convs?.[convId];
       if (
         diskEntry &&
-        diskEntry.lsKeyHash === lsKeyHash &&
+        lsDiskHash &&
+        diskEntry.lsKeyHash === lsDiskHash &&
         diskEntry.size === logStatSize &&
         diskEntry.mtimeMs === logStatMtime &&
         diskEntry.settled === true
@@ -3326,7 +3351,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     }
     if (metaSettled || genMetaBundle?.generatorList?.length) {
       saveActiveConvGenDiskEntry(convId, {
-        lsKeyHash,
+        lsKeyHash: lsDiskHash,
         size: logStatSize,
         mtimeMs: logStatMtime,
         fetchedAt: nowMs,
@@ -3949,6 +3974,7 @@ function ensureGenBackfillWorkers(wave) {
           wave.queuedById.delete(item.convId);
           wave.inFlightIds.add(item.convId);
           try {
+            const reqNowMs = item.explicitNow ? Number(item.nowMs) : Date.now();
             const existingGen = convGenMetaCache.get(item.convId);
             const genFetchForce = item.force
               || Boolean(existingGen && existingGen.at < item.st.mtimeMs)
@@ -3959,7 +3985,8 @@ function ensureGenBackfillWorkers(wave) {
             const gm = await fetchGeneratorMetadataForConv(item.convId, genFetchForce, {
               timeoutMs: GEN_BACKFILL_RPC_TIMEOUT_MS,
               signal: ac.signal,
-              unrefSocket: true
+              unrefSocket: true,
+              nowMs: reqNowMs
             });
 
             if (gm && !gm.fromFallbackCache && Array.isArray(gm.generatorList) && gm.generatorList.length > 0) {
@@ -3992,11 +4019,15 @@ function ensureGenBackfillWorkers(wave) {
             if (isConvStepsCovered(item.convId, item.stepsNeedingGen, wave.persistPath)) {
               lsGenMissCache.delete(item.convId);
             } else {
+              const evalNowMs = item.explicitNow ? Number(item.nowMs) : Date.now();
+              const ageMs = Math.max(0, evalNowMs - Number(item.st?.mtimeMs || 0));
+              const settled = Boolean(gm && !gm.rpcFailed && ageMs >= CONV_META_SETTLE_AGE_MS);
               lsGenMissCache.set(item.convId, {
-                lsKey: wave.lsKey,
+                lsAddr: wave.lsAddr,
                 size: item.st.size,
                 mtimeMs: item.st.mtimeMs,
-                at: Date.now()
+                at: evalNowMs,
+                settled
               });
             }
           } finally {
@@ -4019,7 +4050,7 @@ function ensureGenBackfillWorkers(wave) {
 
 async function enqueueAndWaitGenBackfill(
   candidates,
-  { force = false, lsKey = '', agDir = findAppDataDir(), persistPath = getGenStepModelsPath(), budgetMs = GEN_BACKFILL_SYNC_BUDGET_MS } = {}
+  { force = false, lsKey = '', lsAddr = '', agDir = findAppDataDir(), persistPath = getGenStepModelsPath(), budgetMs = GEN_BACKFILL_SYNC_BUDGET_MS } = {}
 ) {
   if (!candidates.length) return;
   const oldWave = genBackfillState.wave;
@@ -4034,6 +4065,7 @@ async function enqueueAndWaitGenBackfill(
     wave = {
       id: ++genBackfillWaveSeq,
       lsKey,
+      lsAddr,
       agDir,
       persistPath,
       abortController: new AbortController(),
@@ -4059,6 +4091,8 @@ async function enqueueAndWaitGenBackfill(
       queued.st = item.st;
       queued.stepsNeedingGen = item.stepsNeedingGen;
       queued.force = queued.force || item.force;
+      queued.nowMs = item.nowMs;
+      queued.explicitNow = item.explicitNow;
     } else {
       const entry = { ...item };
       wave.queue.push(entry);
@@ -4077,13 +4111,16 @@ async function enqueueAndWaitGenBackfill(
 
 export async function collectTokenHistory(options = {}) {
   const force = Boolean(options.force);
-  const nowMs = Number(options.nowMs) || Date.now();
+  const hasExplicitNow = Number.isFinite(Number(options.nowMs)) && Number(options.nowMs) > 0;
+  const nowMs = hasExplicitNow ? Number(options.nowMs) : Date.now();
   const background = Boolean(options.background);
   const menubarMode = String(options.menubarMode || 'context');
   const curPersistPath = getGenStepModelsPath();
   const curLsAddr = process.env.ANTIGRAVITY_LS_ADDRESS || '';
   const curLsCsrf = process.env.ANTIGRAVITY_CSRF_TOKEN || '';
-  const curLsKey = (curLsAddr && curLsCsrf) ? `${curLsAddr}|${curLsCsrf}` : '';
+  const hasLsConfig = Boolean(curLsAddr && curLsCsrf);
+  const curLsKey = hasLsConfig ? `${curLsAddr}|${curLsCsrf}` : '';
+  const normLsAddr = hasLsConfig ? normalizeLsAddr(curLsAddr) : '';
   const existingWave = genBackfillState.wave;
   if (
     existingWave &&
@@ -4153,10 +4190,6 @@ export async function collectTokenHistory(options = {}) {
 
   const persistedModels = loadPersistedStepModels();
   const persistedConvs = persistedModels.convs;
-  const lsAddr = process.env.ANTIGRAVITY_LS_ADDRESS || '';
-  const lsCsrf = process.env.ANTIGRAVITY_CSRF_TOKEN || '';
-  const hasLsConfig = Boolean(lsAddr && lsCsrf);
-  const lsKey = hasLsConfig ? `${lsAddr}|${lsCsrf}` : '';
 
   const parsedJobs = [];
   const backfillCandidates = [];
@@ -4259,10 +4292,11 @@ export async function collectTokenHistory(options = {}) {
       if (
         !force &&
         miss &&
-        miss.lsKey === lsKey &&
+        normLsAddr &&
+        miss.lsAddr === normLsAddr &&
         miss.size === st.size &&
         miss.mtimeMs === st.mtimeMs &&
-        (nowMs - miss.at) < GEN_MISS_TTL_MS
+        (miss.settled === true || (nowMs - miss.at) < GEN_MISS_TTL_MS)
       ) {
         continue;
       }
@@ -4270,7 +4304,9 @@ export async function collectTokenHistory(options = {}) {
         convId: job.convId,
         st,
         stepsNeedingGen: cached.stepsNeedingGen,
-        force
+        force,
+        nowMs,
+        explicitNow: hasExplicitNow
       });
     } catch {}
   }
@@ -4283,7 +4319,8 @@ export async function collectTokenHistory(options = {}) {
     backfillCandidates.sort((a, b) => Number(b.st.mtimeMs || 0) - Number(a.st.mtimeMs || 0));
     await enqueueAndWaitGenBackfill(backfillCandidates, {
       force,
-      lsKey,
+      lsKey: curLsKey,
+      lsAddr: normLsAddr,
       agDir,
       persistPath: curPersistPath,
       budgetMs: GEN_BACKFILL_SYNC_BUDGET_MS
