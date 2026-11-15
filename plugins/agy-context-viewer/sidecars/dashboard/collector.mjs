@@ -2800,6 +2800,7 @@ async function fetchGeneratorMetadataForConv(convId, force = false, options = {}
   const nowMs = Number(options.nowMs) || Date.now();
   const bypassMemTtl = Boolean(options.bypassMemTtl);
   const hasLogSig = options.logSize !== undefined && options.logMtimeMs !== undefined;
+  const lsDiskHash = hashLsAddr(lsAddr);
   const cached = convGenMetaCache.get(convId);
   const cachedMatchesLogSig = !hasLogSig || (
     cached?.logSize === options.logSize &&
@@ -2808,6 +2809,34 @@ async function fetchGeneratorMetadataForConv(convId, force = false, options = {}
   if (!force && !bypassMemTtl && cached && cached.lsKey === lsKey && cachedMatchesLogSig && (nowMs - cached.at) < 15_000) {
     return cached;
   }
+
+  const cachedDiskHash = cached?.lsKey ? hashLsAddr(cached.lsKey.split('|')[0] || '') : '';
+  const hasMemBase = Boolean(
+    cached &&
+    lsDiskHash &&
+    cachedDiskHash === lsDiskHash &&
+    cachedMatchesLogSig &&
+    Array.isArray(cached.generatorList) &&
+    cached.generatorList.length > 0
+  );
+  const resolveBaseList = () => {
+    if (hasMemBase) return cached.generatorList;
+    if (hasLogSig && lsDiskHash) {
+      const diskCache = loadActiveConvGenDiskCache();
+      const diskEntry = diskCache?.convs?.[convId];
+      if (
+        diskEntry &&
+        diskEntry.lsKeyHash === lsDiskHash &&
+        diskEntry.size === options.logSize &&
+        diskEntry.mtimeMs === options.logMtimeMs &&
+        Array.isArray(diskEntry.generatorList) &&
+        diskEntry.generatorList.length > 0
+      ) {
+        return diskEntry.generatorList;
+      }
+    }
+    return [];
+  };
 
   const flightKey = `${lsKey}|${convId}|${hasLogSig ? `${options.logSize}:${options.logMtimeMs}` : ''}`;
   const canCoalesce = !force && !options.signal && !bypassMemTtl;
@@ -2830,36 +2859,41 @@ async function fetchGeneratorMetadataForConv(convId, force = false, options = {}
         unrefSocket: Boolean(options.unrefSocket)
       }
     );
+    const baseList = resolveBaseList();
     if (res === null) {
-      return (cached?.lsKey === lsKey && cachedMatchesLogSig)
-        ? { ...cached, fromFallbackCache: true, rpcFailed: true }
-        : { at: nowMs, lsKey, generatorList: [], callsByStep: new Map(), rpcFailed: true };
+      if (baseList.length > 0) {
+        return {
+          at: nowMs,
+          lsKey,
+          generatorList: baseList,
+          callsByStep: buildCallsByStepFromList(baseList),
+          ...(hasLogSig ? { logSize: options.logSize, logMtimeMs: options.logMtimeMs } : {}),
+          fromFallbackCache: true,
+          rpcFailed: true
+        };
+      }
+      return { at: nowMs, lsKey, generatorList: [], callsByStep: new Map(), rpcFailed: true };
     }
-    if (!Array.isArray(res.generatorMetadata)) {
-      return (cached?.lsKey === lsKey && cachedMatchesLogSig)
-        ? { ...cached, fromFallbackCache: true, rpcFailed: false }
-        : { at: nowMs, lsKey, generatorList: [], callsByStep: new Map(), emptyFromHost: true, rpcFailed: false };
-    }
-    if (res.generatorMetadata.length === 0) {
-      return (cached?.lsKey === lsKey && cachedMatchesLogSig && cached?.callsByStep?.size)
-        ? { ...cached, fromFallbackCache: true, rpcFailed: false }
-        : { at: nowMs, lsKey, generatorList: [], callsByStep: new Map(), emptyFromHost: true, rpcFailed: false };
+    if (!Array.isArray(res.generatorMetadata) || res.generatorMetadata.length === 0) {
+      if (baseList.length > 0) {
+        const callsByStep = buildCallsByStepFromList(baseList);
+        const value = {
+          at: nowMs,
+          lsKey,
+          generatorList: baseList,
+          callsByStep,
+          ...(hasLogSig ? { logSize: options.logSize, logMtimeMs: options.logMtimeMs } : {})
+        };
+        if (callsByStep.size > 0) {
+          convGenMetaCache.set(convId, value);
+        }
+        return { ...value, fromFallbackCache: true, rpcFailed: false };
+      }
+      return { at: nowMs, lsKey, generatorList: [], callsByStep: new Map(), emptyFromHost: true, rpcFailed: false };
     }
 
-    const callsByStep = new Map(
-      (cached?.lsKey === lsKey && cachedMatchesLogSig) ? (cached?.callsByStep || []) : []
-    );
-    const generatorList = res.generatorMetadata;
-    for (const entry of generatorList) {
-      const indices = entry.stepIndices || (entry.stepIndex != null ? [entry.stepIndex] : []);
-      for (const idx of indices) {
-        const stepNum = Number(idx);
-        if (!Number.isFinite(stepNum)) continue;
-        if (shouldReplaceGenStepEntry(callsByStep.get(stepNum), entry)) {
-          callsByStep.set(stepNum, entry);
-        }
-      }
-    }
+    const generatorList = mergeGeneratorMetadataLists(baseList, res.generatorMetadata);
+    const callsByStep = buildCallsByStepFromList(generatorList);
     const value = {
       at: nowMs,
       lsKey,
@@ -3001,15 +3035,63 @@ function estimateStepDuration(rawSteps, arrayIdx, logMtimeMs) {
   return null;
 }
 
+function getGenEntryStepNums(entry) {
+  if (!entry || typeof entry !== 'object') return [];
+  const raw = Array.isArray(entry.stepIndices) && entry.stepIndices.length
+    ? entry.stepIndices
+    : (entry.stepIndex != null ? [entry.stepIndex] : []);
+  const out = [];
+  const seen = new Set();
+  for (const idx of raw) {
+    const n = Number(idx);
+    if (!Number.isFinite(n) || seen.has(n)) continue;
+    seen.add(n);
+    out.push(n);
+  }
+  return out;
+}
+
+function withNarrowedGenStepIndices(entry, steps) {
+  if (!entry || typeof entry !== 'object' || !Array.isArray(steps) || !steps.length) return entry;
+  const copy = { ...entry };
+  if (Array.isArray(entry.stepIndices) || entry.stepIndex == null || steps.length > 1) {
+    copy.stepIndices = [...steps];
+    if (entry.stepIndex != null) copy.stepIndex = steps[0];
+  } else {
+    copy.stepIndex = steps[0];
+  }
+  return copy;
+}
+
+function mergeSingleGenEntry(prevEntry, nextEntry) {
+  if (!prevEntry || !nextEntry || typeof prevEntry !== 'object' || typeof nextEntry !== 'object') {
+    return nextEntry;
+  }
+  const prevModel = extractStepModel(null, prevEntry, '');
+  const nextModel = extractStepModel(null, nextEntry, '');
+  const prevCtxMeta = prevEntry.chatModel?.chatStartMetadata?.contextWindowMetadata;
+  const nextCtxMeta = nextEntry.chatModel?.chatStartMetadata?.contextWindowMetadata;
+  if (prevModel && nextModel && prevModel === nextModel && prevCtxMeta && !nextCtxMeta && nextEntry.chatModel) {
+    return {
+      ...nextEntry,
+      chatModel: {
+        ...nextEntry.chatModel,
+        chatStartMetadata: {
+          ...(nextEntry.chatModel.chatStartMetadata || {}),
+          contextWindowMetadata: prevCtxMeta
+        }
+      }
+    };
+  }
+  return nextEntry;
+}
+
 function buildCallsByStepFromList(generatorList = []) {
   const callsByStep = new Map();
   if (!Array.isArray(generatorList)) return callsByStep;
   for (const entry of generatorList) {
     if (!entry || typeof entry !== 'object') continue;
-    const indices = entry.stepIndices || (entry.stepIndex != null ? [entry.stepIndex] : []);
-    for (const idx of indices) {
-      const stepNum = Number(idx);
-      if (!Number.isFinite(stepNum)) continue;
+    for (const stepNum of getGenEntryStepNums(entry)) {
       if (shouldReplaceGenStepEntry(callsByStep.get(stepNum), entry)) {
         callsByStep.set(stepNum, entry);
       }
@@ -3018,15 +3100,56 @@ function buildCallsByStepFromList(generatorList = []) {
   return callsByStep;
 }
 
+function mergeGeneratorMetadataLists(baseList = [], incomingList = []) {
+  const base = Array.isArray(baseList) ? baseList.filter((e) => e && typeof e === 'object') : [];
+  const incoming = Array.isArray(incomingList) ? incomingList.filter((e) => e && typeof e === 'object') : [];
+  if (!base.length) return incoming;
+  if (!incoming.length) return base;
+
+  const baseByStep = buildCallsByStepFromList(base);
+  const accepted = [];
+  const coveredSteps = new Set();
+  let seq = 0;
+
+  for (const entry of incoming) {
+    const steps = getGenEntryStepNums(entry);
+    if (!steps.length) {
+      accepted.push({ entry, minStep: Number.MAX_SAFE_INTEGER, seq: seq++ });
+      continue;
+    }
+    const keptSteps = steps.filter((s) => shouldReplaceGenStepEntry(baseByStep.get(s), entry));
+    if (!keptSteps.length) continue;
+    const prevSample = keptSteps.map((s) => baseByStep.get(s)).find(Boolean);
+    let mergedEntry = prevSample ? mergeSingleGenEntry(prevSample, entry) : entry;
+    if (keptSteps.length < steps.length) {
+      mergedEntry = withNarrowedGenStepIndices(mergedEntry, keptSteps);
+    }
+    for (const s of keptSteps) coveredSteps.add(s);
+    accepted.push({ entry: mergedEntry, minStep: Math.min(...keptSteps), seq: seq++ });
+  }
+
+  for (const baseEntry of base) {
+    const bSteps = getGenEntryStepNums(baseEntry);
+    if (!bSteps.length) continue;
+    const uncovered = bSteps.filter((s) => !coveredSteps.has(s));
+    if (!uncovered.length) continue;
+    const keptBase = uncovered.length < bSteps.length
+      ? withNarrowedGenStepIndices(baseEntry, uncovered)
+      : baseEntry;
+    for (const s of uncovered) coveredSteps.add(s);
+    accepted.push({ entry: keptBase, minStep: Math.min(...uncovered), seq: seq++ });
+  }
+
+  accepted.sort((a, b) => a.minStep - b.minStep || a.seq - b.seq);
+  return accepted.map((item) => item.entry);
+}
+
 function getMaxGenStepIdx(generatorList = []) {
   let maxIdx = -1;
   if (!Array.isArray(generatorList)) return maxIdx;
   for (const entry of generatorList) {
-    if (!entry || typeof entry !== 'object') continue;
-    const indices = entry.stepIndices || (entry.stepIndex != null ? [entry.stepIndex] : []);
-    for (const idx of indices) {
-      const n = Number(idx);
-      if (Number.isFinite(n) && n > maxIdx) maxIdx = n;
+    for (const n of getGenEntryStepNums(entry)) {
+      if (n > maxIdx) maxIdx = n;
     }
   }
   return maxIdx;
@@ -3227,6 +3350,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
 
   totalSteps = rawSteps.length;
   const stepMetaMap = new Map();
+  const stepArrayIdxByStepNum = new Map();
   const requiredModelSteps = [];
   let latestErrorStepIdx = -1;
   let lastTranscriptPlannerArrayIdx = -1;
@@ -3245,6 +3369,9 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   for (let i = 0; i < rawSteps.length; i++) {
     const step = rawSteps[i];
     const sIdx = Number(step.step_index ?? i);
+    if (Number.isFinite(sIdx) && !stepArrayIdxByStepNum.has(sIdx)) {
+      stepArrayIdxByStepNum.set(sIdx, i);
+    }
     const type = step.type || '';
     const contentStr = typeof step.content === 'string' ? step.content : '';
 
@@ -3320,6 +3447,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     }
   }
 
+  const ageMs = logStatMtime > 0 ? Math.max(0, nowMs - logStatMtime) : 0;
   const isRetryCheck = Boolean(!force && sameBaseKey && !prevHit?.metaSettled);
   const prevRetryCount = sameBaseKey ? Number(prevHit?.retryCount || 0) : 0;
   let genMetaBundle = null;
@@ -3351,28 +3479,43 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       ) {
         const diskList = Array.isArray(diskEntry.generatorList) ? diskEntry.generatorList : [];
         const callsByStep = buildCallsByStepFromList(diskList);
-        if (callsByStep.size > 0) {
-          convGenMetaCache.set(convId, {
+        const diskAllRequiredCovered = requiredModelSteps.every((stepNum) => (
+          hasCompleteGenStepMetrics(callsByStep.get(stepNum), stepMetaMap.get(stepNum))
+        ));
+        const diskMaxGenStepIdx = getMaxGenStepIdx(diskList);
+        const diskErrorCovered = (
+          latestErrorStepIdx < 0 ||
+          diskMaxGenStepIdx >= latestErrorStepIdx ||
+          Boolean(diskList.some((e) => Boolean(getGenStepServerError(e))))
+        );
+        const diskSettledValid = Boolean(
+          (diskAllRequiredCovered && diskErrorCovered && (requiredModelSteps.length > 0 || latestErrorStepIdx >= 0 || ageMs >= 10_000)) ||
+          ageMs >= CONV_META_SETTLE_AGE_MS
+        );
+        if (diskSettledValid) {
+          if (callsByStep.size > 0) {
+            convGenMetaCache.set(convId, {
+              at: Number(diskEntry.fetchedAt || nowMs),
+              lsKey,
+              logSize: diskEntry.size,
+              logMtimeMs: diskEntry.mtimeMs,
+              generatorList: diskList,
+              callsByStep
+            });
+          }
+          genMetaBundle = {
             at: Number(diskEntry.fetchedAt || nowMs),
             lsKey,
             logSize: diskEntry.size,
             logMtimeMs: diskEntry.mtimeMs,
             generatorList: diskList,
-            callsByStep
-          });
+            callsByStep,
+            emptyFromHost: Boolean(diskEntry.empty),
+            rpcFailed: false,
+            fromDiskCache: true
+          };
+          genFromCache = true;
         }
-        genMetaBundle = {
-          at: Number(diskEntry.fetchedAt || nowMs),
-          lsKey,
-          logSize: diskEntry.size,
-          logMtimeMs: diskEntry.mtimeMs,
-          generatorList: diskList,
-          callsByStep,
-          emptyFromHost: Boolean(diskEntry.empty),
-          rpcFailed: false,
-          fromDiskCache: true
-        };
-        genFromCache = true;
       }
     }
   }
@@ -3386,16 +3529,17 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     });
   }
 
-  const ageMs = logStatMtime > 0 ? Math.max(0, nowMs - logStatMtime) : 0;
-  const maxGenStepIdx = getMaxGenStepIdx(genMetaBundle?.generatorList);
+  const bundleList = Array.isArray(genMetaBundle?.generatorList) ? genMetaBundle.generatorList : [];
+  const bundleCallsByStep = buildCallsByStepFromList(bundleList);
+  const maxGenStepIdx = getMaxGenStepIdx(bundleList);
   const genRpcSucceeded = Boolean(genMetaBundle && !genMetaBundle.rpcFailed);
   const allRequiredCovered = requiredModelSteps.every((stepNum) => (
-    hasCompleteGenStepMetrics(genMetaBundle?.callsByStep?.get(stepNum), stepMetaMap.get(stepNum))
+    hasCompleteGenStepMetrics(bundleCallsByStep.get(stepNum), stepMetaMap.get(stepNum))
   ));
   const errorCovered = (
     latestErrorStepIdx < 0 ||
     maxGenStepIdx >= latestErrorStepIdx ||
-    Boolean(genMetaBundle?.generatorList?.some((e) => Boolean(getGenStepServerError(e))))
+    Boolean(bundleList.some((e) => Boolean(getGenStepServerError(e))))
   );
   const diskSettledEligible = Boolean(
     genRpcSucceeded && (
@@ -3422,22 +3566,22 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   }
 
   if (!genFromCache && hasLsConfig && genRpcSucceeded) {
-    if (genMetaBundle?.generatorList?.length) {
+    if (bundleList.length) {
       maybePersistConvStepModels(
         convId,
         existsSync(compactPath) ? compactPath : targetLogPath,
-        genMetaBundle.generatorList
+        bundleList
       );
     }
-    if (diskSettledEligible || genMetaBundle?.generatorList?.length) {
+    if (diskSettledEligible || bundleList.length) {
       saveActiveConvGenDiskEntry(convId, {
         lsKeyHash: lsDiskHash,
         size: logStatSize,
         mtimeMs: logStatMtime,
         fetchedAt: nowMs,
         settled: diskSettledEligible,
-        empty: !(genMetaBundle?.generatorList?.length),
-        generatorList: slimGeneratorListForCache(genMetaBundle?.generatorList || [])
+        empty: !bundleList.length,
+        generatorList: slimGeneratorListForCache(bundleList)
       });
     }
   }
@@ -3445,8 +3589,9 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   // Build turn-by-turn metrics combining GeneratorMetadata + Transcript steps
   const turns = [];
   let sessionCostUSD = 0;
+  let turnCandidateSeq = 0;
 
-  const appendFallbackTurnFromTranscriptStep = (s, arrayIdx, fallbackModel, fallbackState) => {
+  const appendFallbackTurnFromTranscriptStep = (s, arrayIdx, fallbackModel) => {
     const { input, cache, output, thinking, response: responseTokens } = extractStepUsage(s);
     const total = input + cache + output;
     if (total <= 0) return;
@@ -3473,15 +3618,17 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     }
     const sIdx = Number(s.step_index ?? arrayIdx);
     const sMeta = stepMetaMap.get(sIdx);
-    const deltaTokens = fallbackState.prevTotal > 0 ? total - fallbackState.prevTotal : total;
-    fallbackState.prevTotal = total;
     const promptSum = input + cache;
     const turnCachePct = promptSum > 0 ? Number(((cache / promptSum) * 100).toFixed(1)) : 0;
 
     turns.push({
-      turnIndex: turns.length + 1,
+      turnIndex: 0,
       stepIndex: sIdx,
       _arrayIdx: arrayIdx,
+      _minArrayIdx: arrayIdx,
+      _minStepIdx: Number.isFinite(sIdx) ? sIdx : null,
+      _orderSeq: turnCandidateSeq++,
+      _rawCtxMeta: null,
       createdAt: s.created_at || '',
       tools: sMeta?.tools || [],
       model: displayModel || '未记录模型',
@@ -3493,7 +3640,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       thinkingTokens: thinking,
       responseTokens,
       totalTokens: total,
-      deltaTokens,
+      deltaTokens: 0,
       cacheHitPercent: turnCachePct,
       budget: null,
       estimate: null,
@@ -3510,27 +3657,30 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     });
   };
 
-  if (genMetaBundle?.generatorList?.length) {
-    const fallbackState = { prevTotal: 0 };
+  if (bundleList.length) {
     const coveredStepNums = new Set();
-    for (let idx = 0; idx < genMetaBundle.generatorList.length; idx++) {
-      const gm = genMetaBundle.generatorList[idx];
+    for (let idx = 0; idx < bundleList.length; idx++) {
+      const gm = bundleList[idx];
       const cm = gm.chatModel || {};
-      const gmIndices = Array.isArray(gm.stepIndices) && gm.stepIndices.length
-        ? gm.stepIndices
-        : (gm.stepIndex != null ? [gm.stepIndex] : []);
+      const numericGmSteps = getGenEntryStepNums(gm);
       let matchedLocalMeta = null;
-      for (const rawIdx of gmIndices) {
-        const n = Number(rawIdx);
-        if (!Number.isFinite(n)) continue;
+      let minMatchedArrayIdx = -1;
+      let maxMatchedArrayIdx = -1;
+      for (const n of numericGmSteps) {
         coveredStepNums.add(n);
         const m = stepMetaMap.get(n);
         if (m && (!matchedLocalMeta || (m.stepUsage && (m.stepUsage.input + m.stepUsage.cache + m.stepUsage.output) > 0))) {
           matchedLocalMeta = m;
         }
+        const matchedArr = stepArrayIdxByStepNum.has(n) ? stepArrayIdxByStepNum.get(n) : (m?.arrayIdx ?? -1);
+        if (matchedArr >= 0) {
+          if (minMatchedArrayIdx < 0 || matchedArr < minMatchedArrayIdx) minMatchedArrayIdx = matchedArr;
+          if (matchedArr > maxMatchedArrayIdx) maxMatchedArrayIdx = matchedArr;
+        }
       }
-      const stepIdx = gmIndices[0] ?? null;
-      const sMeta = (stepIdx !== null ? stepMetaMap.get(Number(stepIdx)) : null) || matchedLocalMeta;
+      const stepIdx = numericGmSteps[0] ?? null;
+      const minGmStepIdx = numericGmSteps.length ? Math.min(...numericGmSteps) : null;
+      const sMeta = (stepIdx !== null ? stepMetaMap.get(stepIdx) : null) || matchedLocalMeta;
       const srvUsage = getGenStepServerUsage(gm);
       const srvInput = Number(srvUsage?.inputTokens || 0);
       const srvCache = Number(srvUsage?.cacheReadTokens || 0);
@@ -3583,16 +3733,18 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         sessionCostUSD += costInfo.costUSD;
       }
 
-      const deltaTokens = total > 0 ? (fallbackState.prevTotal > 0 ? total - fallbackState.prevTotal : total) : 0;
-      if (total > 0) fallbackState.prevTotal = total;
       const promptSum = input + cache;
       const turnCachePct = promptSum > 0 ? Number(((cache / promptSum) * 100).toFixed(1)) : 0;
 
       const ctxMeta = cm.chatStartMetadata?.contextWindowMetadata || null;
       turns.push({
-        turnIndex: turns.length + 1,
+        turnIndex: 0,
         stepIndex: stepIdx,
-        _arrayIdx: timingMeta?.arrayIdx ?? -1,
+        _arrayIdx: maxMatchedArrayIdx >= 0 ? maxMatchedArrayIdx : (timingMeta?.arrayIdx ?? -1),
+        _minArrayIdx: minMatchedArrayIdx,
+        _minStepIdx: minGmStepIdx,
+        _orderSeq: turnCandidateSeq++,
+        _rawCtxMeta: ctxMeta || null,
         createdAt: timingMeta?.createdAt || '',
         tools: timingMeta?.tools || [],
         model: displayModel || '未记录模型',
@@ -3604,7 +3756,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         thinkingTokens: thinking,
         responseTokens,
         totalTokens: total,
-        deltaTokens,
+        deltaTokens: 0,
         cacheHitPercent: turnCachePct,
         budget: Number(ctxMeta?.maxContextTokens || 0) || null,
         estimate: Number(ctxMeta?.estimatedTokensUsed || 0) || null,
@@ -3616,7 +3768,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         costUSD: costInfo.costUSD ?? 0,
         isPriced: costInfo.isPriced,
         error: getGenStepServerError(gm),
-        contextBreakdown: idx === genMetaBundle.generatorList.length - 1 ? extractContextBreakdown(ctxMeta) : null,
+        contextBreakdown: null,
         _isServerExact: Boolean(hasServerUsage && hasServerTiming)
       });
     }
@@ -3625,13 +3777,12 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       const sMeta = stepMetaMap.get(reqStepIdx);
       const stepObj = sMeta && sMeta.arrayIdx >= 0 ? rawSteps[sMeta.arrayIdx] : null;
       if (stepObj) {
-        appendFallbackTurnFromTranscriptStep(stepObj, sMeta.arrayIdx, sMeta.runningSettingModel || activeSettingModel, fallbackState);
+        appendFallbackTurnFromTranscriptStep(stepObj, sMeta.arrayIdx, sMeta.runningSettingModel || activeSettingModel);
       }
     }
   } else {
     // Pure transcript fallback when Language Server GeneratorMetadata is unavailable
     let runningModel = '';
-    const fallbackState = { prevTotal: 0 };
     for (let i = 0; i < rawSteps.length; i++) {
       const s = rawSteps[i];
       if (s.type === 'USER_INPUT' && s.content) {
@@ -3639,8 +3790,63 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         if (m) runningModel = m;
       }
       if (isModelTurnStep(s)) {
-        appendFallbackTurnFromTranscriptStep(s, i, runningModel, fallbackState);
+        appendFallbackTurnFromTranscriptStep(s, i, runningModel);
       }
+    }
+  }
+
+  // Restore chronological transcript order before computing sequential turnIndex, deltaTokens, contextBreakdown & latestTurn
+  if (turns.length > 0) {
+    for (const t of turns) {
+      if (t._minArrayIdx >= 0) {
+        t._sortPrimary = t._minArrayIdx;
+        t._sortSecondary = 0;
+      } else if (Number.isFinite(t._minStepIdx)) {
+        let predStep = -Infinity;
+        let predArr = -1;
+        let succStep = Infinity;
+        let succArr = -1;
+        for (const [sNum, arrIdx] of stepArrayIdxByStepNum.entries()) {
+          if (sNum <= t._minStepIdx && sNum > predStep) {
+            predStep = sNum;
+            predArr = arrIdx;
+          }
+          if (sNum > t._minStepIdx && sNum < succStep) {
+            succStep = sNum;
+            succArr = arrIdx;
+          }
+        }
+        if (predArr >= 0 && succArr >= 0) {
+          t._sortPrimary = (predArr + succArr) / 2;
+        } else if (predArr >= 0) {
+          t._sortPrimary = predArr + 0.5;
+        } else if (succArr >= 0) {
+          t._sortPrimary = succArr - 0.5;
+        } else {
+          t._sortPrimary = 0;
+        }
+        t._sortSecondary = t._minStepIdx;
+      } else {
+        t._sortPrimary = Number.MAX_SAFE_INTEGER;
+        t._sortSecondary = t._orderSeq;
+      }
+    }
+    turns.sort((a, b) => a._sortPrimary - b._sortPrimary || a._sortSecondary - b._sortSecondary || a._orderSeq - b._orderSeq);
+    let prevTotalTokens = 0;
+    for (let idx = 0; idx < turns.length; idx++) {
+      const t = turns[idx];
+      t.turnIndex = idx + 1;
+      t.deltaTokens = t.totalTokens > 0
+        ? (prevTotalTokens > 0 ? t.totalTokens - prevTotalTokens : t.totalTokens)
+        : 0;
+      if (t.totalTokens > 0) prevTotalTokens = t.totalTokens;
+      t.contextBreakdown = (idx === turns.length - 1 && t._rawCtxMeta) ? extractContextBreakdown(t._rawCtxMeta) : null;
+      delete t._minArrayIdx;
+      delete t._minStepIdx;
+      delete t._orderSeq;
+      delete t._rawCtxMeta;
+      delete t._sortPrimary;
+      delete t._sortSecondary;
     }
   }
 
