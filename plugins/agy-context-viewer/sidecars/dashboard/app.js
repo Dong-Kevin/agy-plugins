@@ -2871,6 +2871,16 @@
     );
   }
 
+  function isHostSidebarContext() {
+    return Boolean(
+      window.sidecar &&
+      !window.sidecar.isFloatWindow &&
+      !window.__CV_FLOAT_MODE__ &&
+      typeof window.sidecar.ui?.toggleAuxPane === 'function' &&
+      String(location.pathname || '').endsWith('/sidebar')
+    );
+  }
+
   let auxViewportVisible = false;
   let auxEverBeenVisible = false;
   try {
@@ -3212,20 +3222,24 @@
   }
 
   function startAuxPaneBridgeCoordinator() {
-    if (!isHostAuxPaneContext()) {
+    const isSidebarRelay = isHostSidebarContext();
+    if (!isHostAuxPaneContext() && !isSidebarRelay) {
       return;
     }
 
-    ensureAuxViewportObserver();
+    if (!isSidebarRelay) {
+      ensureAuxViewportObserver();
+    }
+    const isAuxPaneVisibleNow = () => !isSidebarRelay && isAuxIframeVisible();
     const coordinatorBootAt = Date.now();
-    let visibleSince = isAuxIframeVisible() ? (Date.now() - 1000) : 0;
+    let visibleSince = isAuxPaneVisibleNow() ? coordinatorBootAt : 0;
     let lastSeenSeq = 0;
     let pendingOpenTrigger = null;
 
     const getMyConvId = () => window.sidecar.conversationId || state.hostConvId || '';
 
     const reportHello = () => {
-      if (!isAuxIframeVisible()) return;
+      if (!isAuxPaneVisibleNow()) return;
       const convId = getMyConvId();
       if (convId) {
         apiFetch('/api/aux-pane-trigger', {
@@ -3236,7 +3250,7 @@
     };
 
     const claimPendingOpenAckIfVisible = async () => {
-      if (!pendingOpenTrigger || !isAuxIframeVisible()) return false;
+      if (!pendingOpenTrigger || !isAuxPaneVisibleNow()) return false;
       const pending = pendingOpenTrigger;
       if ((Date.now() - pending.at) > 2500 || !pending.isSelfTarget) {
         pendingOpenTrigger = null;
@@ -3255,13 +3269,14 @@
     };
 
     const handleVisibilityChange = () => {
-      const nowVisible = isAuxIframeVisible();
+      const nowVisible = isAuxPaneVisibleNow();
       if (nowVisible) {
         const becameVisible = !visibleSince;
         if (becameVisible) {
-          visibleSince = (Date.now() - coordinatorBootAt < 250) ? (Date.now() - 1000) : Date.now();
+          visibleSince = (Date.now() - coordinatorBootAt < 250) ? coordinatorBootAt : Date.now();
           reportHello();
           loadContext(false).catch(() => {});
+          loadHistory(false).catch(() => {});
           refreshFloatStatus().catch(() => {});
           claimPendingOpenAckIfVisible().catch(() => {});
           apiFetch('/api/aux-pane-trigger?waitMs=0').then(async (res) => {
@@ -3318,23 +3333,25 @@
       }
     };
 
-    if (visibleSince) {
-      reportHello();
-    }
-
-    document.addEventListener('pointerdown', reportHello, { passive: true });
-    document.addEventListener('keydown', reportHello, { passive: true });
-    auxVisibilityCallbacks.add(handleVisibilityChange);
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    window.addEventListener('message', (ev) => {
-      if (ev.data?.type === 'theme-change' || ev.data?.type === 'workspace-change') {
-        handleVisibilityChange();
+    if (!isSidebarRelay) {
+      if (visibleSince) {
+        reportHello();
       }
-    });
 
-    if (typeof ResizeObserver === 'function') {
-      const ro = new ResizeObserver(handleVisibilityChange);
-      ro.observe(document.documentElement);
+      document.addEventListener('pointerdown', reportHello, { passive: true });
+      document.addEventListener('keydown', reportHello, { passive: true });
+      auxVisibilityCallbacks.add(handleVisibilityChange);
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+      window.addEventListener('message', (ev) => {
+        if (ev.data?.type === 'theme-change' || ev.data?.type === 'workspace-change') {
+          handleVisibilityChange();
+        }
+      });
+
+      if (typeof ResizeObserver === 'function') {
+        const ro = new ResizeObserver(handleVisibilityChange);
+        ro.observe(document.documentElement);
+      }
     }
 
     const handleTrigger = async (trigger) => {
@@ -3349,15 +3366,23 @@
       if ((Date.now() - Number(trigger.at || 0)) > 5000) return;
 
       const myConvId = getMyConvId();
-      const isVisibleNow = isAuxIframeVisible();
-      const wasAlreadyVisible = visibleSince > 0 && visibleSince <= Number(trigger.at || 0) - 40;
+      const isVisibleNow = isAuxPaneVisibleNow();
+      const alreadyOpeningOrSwitched =
+        Number(trigger.openingSeq || 0) >= seq ||
+        Number(trigger.switchedSeq || 0) >= seq;
+      const wasAlreadyVisible =
+        !isSidebarRelay &&
+        !alreadyOpeningOrSwitched &&
+        coordinatorBootAt <= Number(trigger.at || 0) - 40 &&
+        visibleSince > 0 &&
+        visibleSince <= Number(trigger.at || 0) - 40;
       const isSelfTarget = trigger.targetPlugin === 'context-viewer';
       const exactConvMatch = !trigger.convId || !myConvId || myConvId === trigger.convId;
 
       if (isVisibleNow) {
         if (!exactConvMatch) {
           const settle = await apiFetch('/api/aux-pane-trigger?waitMs=0&holdMs=25').catch(() => null);
-          if (Number(settle?.trigger?.ackSeq || 0) >= seq || !isAuxIframeVisible()) return;
+          if (Number(settle?.trigger?.ackSeq || 0) >= seq || !isAuxPaneVisibleNow()) return;
         }
         if (!isSelfTarget) {
           if (trigger.uri) {
@@ -3403,7 +3428,9 @@
       if (document.hidden) return;
 
       let waitBeforeClaim;
-      if (auxEverBeenVisible) {
+      if (isSidebarRelay) {
+        waitBeforeClaim = 390;
+      } else if (auxEverBeenVisible) {
         waitBeforeClaim = isSelfTarget
           ? (exactConvMatch ? 30 : 125)
           : (exactConvMatch ? 75 : 175);
@@ -3417,7 +3444,7 @@
       if (latestTrig && (Number(latestTrig.ackSeq || 0) >= seq || Number(latestTrig.openingSeq || 0) >= seq)) {
         return;
       }
-      if (isAuxIframeVisible()) {
+      if (isAuxPaneVisibleNow()) {
         handleVisibilityChange();
         return;
       }
@@ -3431,14 +3458,17 @@
       }).catch(() => null);
       if (!openRes?.claimed) return;
 
-      pendingOpenTrigger = { seq, convId: targetConvId, at: Date.now(), isSelfTarget };
+      pendingOpenTrigger = isSidebarRelay ? null : { seq, convId: targetConvId, at: Date.now(), isSelfTarget };
+      // Host unmounts toggle-aux-pane (Cyc) while the iframe is hidden; only root epc(toggle-conversation) expands a collapsed Aux Pane.
       window.sidecar.ui.toggleConversation(targetConvId);
-      apiFetch('/api/aux-pane-trigger?waitMs=0&holdMs=110').then(() => {
-        if (isSelfTarget) {
-          claimPendingOpenAckIfVisible().catch(() => {});
-        }
-        handleVisibilityChange();
-      }).catch(() => {});
+      if (!isSidebarRelay) {
+        apiFetch('/api/aux-pane-trigger?waitMs=0&holdMs=110').then(() => {
+          if (isSelfTarget) {
+            claimPendingOpenAckIfVisible().catch(() => {});
+          }
+          handleVisibilityChange();
+        }).catch(() => {});
+      }
     };
 
     (async () => {
@@ -3503,11 +3533,14 @@
     initWorkspaceTracking();
     startAuxPaneBridgeCoordinator();
 
-    loadHistory(false).catch(() => {});
+    const initiallyVisible = !document.hidden && !state.hostHidden && isAuxIframeVisible();
+    if (initiallyVisible) {
+      loadHistory(false).catch(() => {});
+    }
 
     await Promise.allSettled([
       loadInitialSettings(),
-      loadContext(false),
+      initiallyVisible ? loadContext(false) : Promise.resolve(),
       refreshFloatStatus()
     ]);
 

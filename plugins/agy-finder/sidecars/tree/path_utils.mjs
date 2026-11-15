@@ -3,7 +3,7 @@
  * directory tree listing, and bounded BFS search utilities.
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { closeSync, existsSync, openSync, readdirSync, readSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -20,6 +20,19 @@ export const DEFAULT_IGNORED_NAMES = new Set([
 ]);
 
 const ALWAYS_SKIP_NAMES = new Set(['.DS_Store', 'Thumbs.db']);
+
+export const BROWSER_HTML_EXTS = new Set(['.html', '.htm', '.xhtml']);
+
+/**
+ * Check whether a raw path or file URI points to an HTML document.
+ * @param {string} rawPath
+ * @returns {boolean}
+ */
+export function isBrowserHtmlPath(rawPath) {
+  const { cleanedPath } = normalizeRawPathInput(String(rawPath || ''));
+  if (!cleanedPath) return false;
+  return BROWSER_HTML_EXTS.has(extname(cleanedPath).toLowerCase());
+}
 
 /**
  * Convert a local path or file:// URI into a clean local filesystem path.
@@ -301,6 +314,7 @@ export function resolveTargetPath(rawInput, roots = []) {
     relPath: relPosix,
     name: basename(absPath) || absPath,
     isDirectory,
+    isHtmlFile: !isDirectory && isBrowserHtmlPath(absPath),
     line,
     ancestorRelDirs,
     requiresHidden: pathRequiresHidden(relPosix)
@@ -361,6 +375,7 @@ export function listDirectoryEntries(rootPath, relDir = '', opts = {}) {
     }
 
     const relPath = toPosixRel(relative(rootAbs, fullPath));
+    const ext = isDirectory ? '' : extname(name).toLowerCase();
     items.push({
       name,
       relPath,
@@ -368,7 +383,8 @@ export function listDirectoryEntries(rootPath, relDir = '', opts = {}) {
       isDirectory,
       size,
       mtimeMs,
-      ext: isDirectory ? '' : extname(name).toLowerCase()
+      ext,
+      isHtmlFile: !isDirectory && BROWSER_HTML_EXTS.has(ext)
     });
   }
 
@@ -457,12 +473,14 @@ export function searchWorkspaceFiles(rootPath, query, opts = {}) {
         else if (lowerName.startsWith(q)) score = 3;
         else if (lowerName.includes(q)) score = 2;
 
+        const ext = isDirectory ? '' : extname(name).toLowerCase();
         matches.push({
           name,
           relPath,
           absPath: fullPath,
           fileUri: toFileUri(fullPath),
           isDirectory,
+          isHtmlFile: !isDirectory && BROWSER_HTML_EXTS.has(ext),
           score
         });
       }
@@ -528,6 +546,192 @@ export function revealInOsFileManager(rawPath, roots) {
         resolvePromise(err ? { ok: false, error: err.message } : { ok: true, path: openDir });
       });
     }
+  });
+}
+
+let macBrowserCache = { bundleId: '', expiresAt: 0 };
+
+function resolveMacDefaultBrowserBundleId() {
+  const now = Date.now();
+  if (now < macBrowserCache.expiresAt) {
+    return macBrowserCache.bundleId;
+  }
+  let bundleId = '';
+  try {
+    const plistPath = join(
+      homedir(),
+      'Library',
+      'Preferences',
+      'com.apple.LaunchServices',
+      'com.apple.launchservices.secure.plist'
+    );
+    if (existsSync(plistPath)) {
+      const rawJson = execFileSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', plistPath], {
+        encoding: 'utf8',
+        timeout: 800
+      });
+      const parsed = JSON.parse(rawJson);
+      const handlers = Array.isArray(parsed?.LSHandlers) ? parsed.LSHandlers : [];
+      for (const scheme of ['https', 'http']) {
+        const hit = handlers.find(
+          (h) => String(h?.LSHandlerURLScheme || '').toLowerCase() === scheme &&
+            typeof h?.LSHandlerRoleAll === 'string'
+        );
+        const role = String(hit?.LSHandlerRoleAll || '').trim();
+        if (role && role !== '-' && /^[A-Za-z0-9.-]+$/.test(role)) {
+          bundleId = role;
+          break;
+        }
+      }
+    }
+  } catch {}
+  macBrowserCache = { bundleId, expiresAt: now + 30000 };
+  return bundleId;
+}
+
+function resolveWinDefaultBrowserExe() {
+  try {
+    const ucOut = execFileSync(
+      'reg.exe',
+      ['query', 'HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\https\\UserChoice', '/v', 'ProgId'],
+      { encoding: 'utf8', timeout: 800 }
+    );
+    const m = ucOut.match(/ProgId\s+REG_SZ\s+([^\r\n]+)/i);
+    const progId = m ? m[1].trim() : '';
+    if (!progId || !/^[A-Za-z0-9._-]+$/.test(progId) || /^AppX/i.test(progId)) {
+      return '';
+    }
+    const cmdOut = execFileSync(
+      'reg.exe',
+      ['query', `HKCR\\${progId}\\shell\\open\\command`, '/ve'],
+      { encoding: 'utf8', timeout: 800 }
+    );
+    const cm = cmdOut.match(/REG_(?:SZ|EXPAND_SZ)\s+([^\r\n]+)/i);
+    const cmdLine = cm ? cm[1].trim() : '';
+    if (!cmdLine) return '';
+    const quoted = cmdLine.match(/^"([^"]+?\.exe)"/i);
+    const unquoted = cmdLine.match(/^([^\s"]+?\.exe)\b/i);
+    const exePath = (quoted?.[1] || unquoted?.[1] || '').trim();
+    return exePath && existsSync(exePath) ? exePath : '';
+  } catch {
+    return '';
+  }
+}
+
+function resolveLinuxDefaultBrowserDesktop() {
+  try {
+    const out = execFileSync('xdg-settings', ['get', 'default-web-browser'], {
+      encoding: 'utf8',
+      timeout: 800
+    }).trim();
+    return /^[A-Za-z0-9._-]+\.desktop$/.test(out) ? out : '';
+  } catch {
+    return '';
+  }
+}
+
+function buildBrowserLaunchCandidates(absPath, fileUri, platform = process.platform) {
+  if (platform === 'darwin') {
+    const bundleId = resolveMacDefaultBrowserBundleId();
+    const candidates = [];
+    if (bundleId) {
+      candidates.push(['/usr/bin/open', ['-b', bundleId, absPath]]);
+    }
+    if (bundleId !== 'com.apple.Safari') {
+      candidates.push(['/usr/bin/open', ['-b', 'com.apple.Safari', absPath]]);
+    }
+    candidates.push(['/usr/bin/open', [absPath]]);
+    return candidates;
+  }
+  if (platform === 'win32') {
+    const exePath = resolveWinDefaultBrowserExe();
+    const candidates = [];
+    if (exePath) {
+      candidates.push([exePath, [fileUri]]);
+    }
+    candidates.push(['rundll32.exe', ['url.dll,FileProtocolHandler', fileUri]]);
+    return candidates;
+  }
+  const desktopId = resolveLinuxDefaultBrowserDesktop();
+  const candidates = [];
+  if (desktopId) {
+    candidates.push(['gtk-launch', [desktopId, fileUri]]);
+  }
+  candidates.push(['xdg-open', [absPath]]);
+  return candidates;
+}
+
+/**
+ * Open a local HTML document (.html / .htm / .xhtml) in the OS default HTTPS browser.
+ * Rejects non-HTML files, directories, and nonexistent paths.
+ * @param {string} rawPath
+ * @param {string[]} roots
+ * @param {{ dryRun?: boolean, execFileImpl?: Function, platform?: string }} opts
+ */
+export function openInDefaultBrowser(rawPath, roots = [], opts = {}) {
+  const res = resolveTargetPath(rawPath, roots);
+  if (!res.ok || !res.exists) {
+    return Promise.resolve({ ok: false, error: res.error || '路径不存在' });
+  }
+  if (res.isDirectory) {
+    return Promise.resolve({ ok: false, error: '目标不是普通文件，无法在浏览器中打开' });
+  }
+  let isRegularFile = false;
+  try {
+    isRegularFile = statSync(res.absPath).isFile();
+  } catch (err) {
+    return Promise.resolve({ ok: false, error: err?.message || '无法读取文件状态' });
+  }
+  if (!isRegularFile) {
+    return Promise.resolve({ ok: false, error: '目标不是普通文件，无法在浏览器中打开' });
+  }
+  if (!isBrowserHtmlPath(res.absPath)) {
+    return Promise.resolve({ ok: false, error: '仅支持在默认浏览器中打开本地 HTML 文件（.html / .htm / .xhtml）' });
+  }
+
+  const candidates = buildBrowserLaunchCandidates(res.absPath, res.fileUri, opts.platform);
+  if (opts.dryRun || process.env.AGY_FINDER_DRY_RUN_BROWSER === '1') {
+    return Promise.resolve({
+      ok: true,
+      dryRun: true,
+      path: res.absPath,
+      fileUri: res.fileUri,
+      candidates
+    });
+  }
+
+  const execFn = typeof opts.execFileImpl === 'function' ? opts.execFileImpl : execFile;
+  return new Promise((resolvePromise) => {
+    let lastErr = null;
+    const tryNext = (idx) => {
+      if (idx >= candidates.length) {
+        resolvePromise({
+          ok: false,
+          error: lastErr?.message || '无法调用默认浏览器打开文件'
+        });
+        return;
+      }
+      const [cmd, args] = candidates[idx];
+      try {
+        execFn(cmd, args, (err) => {
+          if (!err) {
+            resolvePromise({
+              ok: true,
+              path: res.absPath,
+              fileUri: res.fileUri,
+              command: cmd
+            });
+            return;
+          }
+          lastErr = err;
+          tryNext(idx + 1);
+        });
+      } catch (err) {
+        lastErr = err;
+        tryNext(idx + 1);
+      }
+    };
+    tryNext(0);
   });
 }
 

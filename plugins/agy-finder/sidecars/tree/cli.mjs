@@ -6,7 +6,8 @@
  *   agy-finder [toggle|open [path]|close|aux [path]|status [--json]|hotkey <preset>|shortcut [arg]|aux-shortcut [arg]|quit]
  */
 
-import { controlDrawer, getDrawerStatus, HOTKEY_PRESETS } from './drawer.mjs';
+import { controlDrawer, getDrawerStatus, HOTKEY_PRESETS, readActiveContextHint } from './drawer.mjs';
+import { openInDefaultBrowser } from './path_utils.mjs';
 
 function printHelp() {
   console.log(`AGY Finder CLI
@@ -14,6 +15,7 @@ function printHelp() {
 用法:
   agy-finder toggle                       打开或关闭右侧独立目录树抽屉（默认）
   agy-finder open [path]                  打开独立抽屉并可选定位到指定路径
+  agy-finder browser <path>               在系统默认浏览器中打开本地 HTML 文件
   agy-finder close                        关闭/隐藏独立抽屉
   agy-finder aux [path]                   在 AGY 右侧辅助栏打开/切换目录树（可选定位路径）
   agy-finder status [--json]              查看独立抽屉、右侧辅助栏与快捷键状态
@@ -126,6 +128,24 @@ async function main() {
     const res = await controlDrawer({ action: 'open', revealPath });
     if (wantsJson) console.log(JSON.stringify(res, null, 2));
     else console.log(`[agy-finder] ${res.message || res.error || '已打开'}`);
+    if (res.ok === false) process.exit(1);
+    return;
+  }
+
+  if (cmd === 'browser' || cmd === 'open-browser') {
+    const targetPath = positional.slice(1).join(' ').trim();
+    if (!targetPath) {
+      const msg = '请指定要打开的本地 HTML 文件路径，例如：agy-finder browser preview/index.html';
+      if (wantsJson) console.log(JSON.stringify({ ok: false, error: msg }, null, 2));
+      else console.error(`[agy-finder] ${msg}`);
+      process.exit(1);
+    }
+    const hintRoots = Array.isArray(readActiveContextHint()?.roots) ? readActiveContextHint().roots : [];
+    const roots = [process.cwd(), ...hintRoots.filter((r) => r && r !== process.cwd())];
+    const res = await openInDefaultBrowser(targetPath, roots);
+    if (wantsJson) console.log(JSON.stringify(res, null, 2));
+    else if (res.ok) console.log(`[agy-finder] 已在默认浏览器中打开：${res.path}`);
+    else console.error(`[agy-finder] ${res.error || '无法在默认浏览器中打开'}`);
     if (res.ok === false) process.exit(1);
     return;
   }

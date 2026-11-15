@@ -110,7 +110,7 @@ export function extractCandidateTokens(markdownText) {
   for (const m of markdownText.matchAll(sidecarRe)) {
     try {
       const u = new URL(m[0]);
-      const p = u.searchParams.get('path') || u.searchParams.get('file') || u.searchParams.get('reveal');
+      const p = u.searchParams.get('path') || u.searchParams.get('file') || u.searchParams.get('reveal') || u.searchParams.get('browser');
       if (p) found.push(p);
     } catch {}
   }
@@ -285,6 +285,7 @@ export function getConversationMentions(opts = {}) {
       absPath: resolved.absPath,
       fileUri: resolved.fileUri,
       isDirectory: resolved.isDirectory,
+      isHtmlFile: Boolean(resolved.isHtmlFile),
       isExternalRoot: resolved.isExternalRoot,
       line: resolved.line
     });

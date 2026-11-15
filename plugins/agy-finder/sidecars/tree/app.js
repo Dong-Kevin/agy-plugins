@@ -189,6 +189,9 @@
     txt.title = state.selectedAbsPath;
     if (previewBtn) {
       previewBtn.classList.toggle('hidden', state.selectedIsDir);
+      const isHtml = !state.selectedIsDir && isHtmlPath(state.selectedRelPath || state.selectedAbsPath);
+      previewBtn.textContent = isHtml ? '🌐 浏览器' : '预览';
+      previewBtn.title = isHtml ? '在默认浏览器中打开（Alt/Option+点击查看源码）' : '在原生预览中打开';
     }
   }
 
@@ -270,6 +273,7 @@
         if (isSelected) cls.push('is-selected');
         if (isRevealed) cls.push('is-revealed');
 
+        const isHtml = !item.isDirectory && (item.isHtmlFile || isHtmlPath(item.name));
         rows.push(`
           <div class="${cls.join(' ')}"
                role="treeitem"
@@ -283,7 +287,7 @@
             <span class="af-node-ic ${item.isDirectory ? 'af-ic-dir' : 'af-ic-file'}">${item.isDirectory ? iconFolder(isOpen) : iconFile()}</span>
             <span class="af-node-label">${esc(item.name)}</span>
             <span class="af-row-actions">
-              ${!item.isDirectory ? '<button class="af-act-btn" data-act="preview" type="button" title="在原生预览中打开">↗</button>' : ''}
+              ${!item.isDirectory ? `<button class="af-act-btn" data-act="preview" type="button" title="${isHtml ? '在默认浏览器中打开（Alt/Option+点击查看源码）' : '在原生预览中打开'}">${isHtml ? '🌐' : '↗'}</button>` : ''}
               <button class="af-act-btn" data-act="copy" type="button" title="复制相对路径（Shift+点击复制绝对路径）">📋</button>
               <button class="af-act-btn" data-act="os" type="button" title="在系统文件管理器中显示">🖥</button>
             </span>
@@ -314,6 +318,38 @@
     return '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3.5 2h6l3 3v9h-9V2Z"/><path d="M9.5 2v3h3"/></svg>';
   }
 
+  function isHtmlPath(raw) {
+    return /\.(?:html?|xhtml)(?::\d+(?::\d+)?)?(?:[?#].*)?$/i.test(String(raw || '').trim());
+  }
+
+  async function openInBrowser(targetPath) {
+    if (!targetPath) return;
+    try {
+      const uris = state.roots.length ? state.roots.map((r) => r.fileUri) : await getHostWorkspaceUris();
+      const res = await apiPost('/api/open-browser', {
+        path: targetPath,
+        root: state.activeRoot,
+        workspaceUri: uris.join(','),
+        conversationId: getConversationId()
+      });
+      if (res?.ok === false) {
+        throw new Error(res.error || '无法在默认浏览器中打开');
+      }
+      showToast('已在默认浏览器中打开');
+    } catch (err) {
+      showToast(`浏览器打开失败：${err.message}`);
+    }
+  }
+
+  function openFileDefault(fileUri, line, fallbackPath = '', opts = {}) {
+    const candidate = fallbackPath || fileUri || '';
+    if (!opts.forceSource && isHtmlPath(candidate)) {
+      openInBrowser(candidate);
+      return;
+    }
+    openNativePreview(fileUri, line, fallbackPath);
+  }
+
   function openNativePreview(fileUri, line, fallbackPath = '') {
     if (!fileUri && !fallbackPath) return;
     const uri = line && fileUri ? `${fileUri}#L${line}` : fileUri;
@@ -327,6 +363,7 @@
 
   function closePreviewModal() {
     state.previewPath = '';
+    $('btn-preview-browser')?.classList.add('hidden');
     $('preview-modal')?.classList.add('hidden');
   }
 
@@ -338,6 +375,7 @@
 
     titleEl.textContent = rawPath;
     bodyEl.textContent = '加载中…';
+    $('btn-preview-browser')?.classList.add('hidden');
     modal.classList.remove('hidden');
 
     const res = await apiGet('/api/preview', {
@@ -349,6 +387,7 @@
       return;
     }
     state.previewPath = res.absPath;
+    $('btn-preview-browser')?.classList.toggle('hidden', !isHtmlPath(res.absPath || rawPath));
     const suffix = res.truncated ? '（仅显示前 64 KB）' : '';
     titleEl.textContent = `${res.relPath || res.name}${suffix}`;
     if (res.isBinary) {
@@ -501,11 +540,14 @@
     bar.classList.remove('hidden');
     countEl.textContent = String(state.mentions.length);
     listEl.innerHTML = state.mentions
-      .map((m) => `
+      .map((m) => {
+        const isHtml = !m.isDirectory && Boolean(m.isHtmlFile || isHtmlPath(m.name || m.absPath));
+        return `
         <div class="af-chip" data-mention-abs="${esc(m.absPath)}" title="${esc(m.absPath)}">
           <span class="af-chip-name">${m.isDirectory ? '📁' : '📄'} ${esc(m.name)}</span>
-          ${!m.isDirectory ? `<button class="af-chip-open" data-mention-preview="${esc(m.fileUri)}" data-mention-line="${m.line || ''}" type="button" title="原生预览">↗</button>` : ''}
-        </div>`)
+          ${!m.isDirectory ? `<button class="af-chip-open" data-mention-preview="${esc(m.fileUri)}" data-mention-line="${m.line || ''}" type="button" title="${isHtml ? '在默认浏览器中打开（Alt/Option+点击查看源码）' : '原生预览'}">${isHtml ? '🌐' : '↗'}</button>` : ''}
+        </div>`;
+      })
       .join('');
   }
 
@@ -529,11 +571,35 @@
 
   function checkDeepLinkUrl() {
     if (window.location.search === state.lastHandledUrlQuery) return;
-    state.lastHandledUrlQuery = window.location.search;
-    const params = new URLSearchParams(window.location.search);
+    const rawSearch = window.location.search;
+    state.lastHandledUrlQuery = rawSearch;
+    const params = new URLSearchParams(rawSearch);
     const target = params.get('path') || params.get('file') || params.get('reveal');
-    if (target) {
-      revealPathInTree(target).catch((err) => showToast(err.message));
+    const browserParam = params.get('browser');
+    const effectiveTarget = target || browserParam;
+    const openParam = String(params.get('open') || params.get('action') || '').trim().toLowerCase();
+    const wantsBrowser = Boolean(browserParam) || openParam === 'browser' || openParam === '1' || openParam === 'true';
+
+    if (wantsBrowser) {
+      params.delete('open');
+      if (openParam === 'browser' || params.get('action') === 'browser') params.delete('action');
+      if (browserParam && !target) {
+        params.set('path', browserParam);
+        params.delete('browser');
+      }
+      const nextQs = params.toString();
+      const cleanUrl = `${window.location.pathname || '/'}${nextQs ? `?${nextQs}` : ''}${window.location.hash || ''}`;
+      try {
+        window.history?.replaceState?.(null, '', cleanUrl);
+      } catch {}
+      state.lastHandledUrlQuery = window.location.search;
+    }
+
+    if (effectiveTarget) {
+      if (wantsBrowser) {
+        openInBrowser(effectiveTarget);
+      }
+      revealPathInTree(effectiveTarget).catch((err) => showToast(err.message));
     }
   }
 
@@ -1199,6 +1265,9 @@
     });
 
     $('btn-preview-close')?.addEventListener('click', closePreviewModal);
+    $('btn-preview-browser')?.addEventListener('click', () => {
+      if (state.previewPath) openInBrowser(state.previewPath);
+    });
     $('btn-preview-os')?.addEventListener('click', () => {
       if (state.previewPath) revealInOs(state.previewPath);
     });
@@ -1269,7 +1338,7 @@
       if (previewBtn) {
         e.stopPropagation();
         const chipEl = previewBtn.closest('[data-mention-abs]');
-        openNativePreview(previewBtn.dataset.mentionPreview, previewBtn.dataset.mentionLine, chipEl?.dataset.mentionAbs || '');
+        openFileDefault(previewBtn.dataset.mentionPreview, previewBtn.dataset.mentionLine, chipEl?.dataset.mentionAbs || '', { forceSource: Boolean(e.altKey) });
         return;
       }
       const chip = e.target.closest('[data-mention-abs]');
@@ -1284,9 +1353,9 @@
       copyText(copyAbs ? state.selectedAbsPath : state.selectedRelPath, copyAbs ? '绝对路径' : '相对路径');
     });
 
-    $('btn-preview-active')?.addEventListener('click', () => {
+    $('btn-preview-active')?.addEventListener('click', (e) => {
       if ((state.selectedFileUri || state.selectedAbsPath) && !state.selectedIsDir) {
-        openNativePreview(state.selectedFileUri, null, state.selectedAbsPath);
+        openFileDefault(state.selectedFileUri, null, state.selectedAbsPath, { forceSource: Boolean(e?.altKey) });
       }
     });
 
@@ -1309,7 +1378,7 @@
       if (actBtn) {
         e.stopPropagation();
         const act = actBtn.dataset.act;
-        if (act === 'preview') openNativePreview(fileUri, null, absPath);
+        if (act === 'preview') openFileDefault(fileUri, null, absPath, { forceSource: Boolean(e.altKey) });
         else if (act === 'copy') {
           const copyAbs = e.shiftKey || e.altKey;
           copyText(copyAbs ? absPath : relPath, copyAbs ? '绝对路径' : '相对路径');
@@ -1333,10 +1402,11 @@
     });
 
     treeContent?.addEventListener('dblclick', (e) => {
+      if (e.target.closest('[data-act]')) return;
       const row = e.target.closest('.af-tree-row[data-rel-path]');
       if (!row || row.dataset.isDir === '1') return;
       const absPath = state.activeRoot ? `${state.activeRoot}/${row.dataset.relPath}` : row.dataset.relPath;
-      openNativePreview(row.dataset.fileUri, null, absPath);
+      openFileDefault(row.dataset.fileUri, null, absPath, { forceSource: Boolean(e.altKey) });
     });
 
     document.addEventListener('keydown', async (e) => {
@@ -1432,6 +1502,12 @@
         }
       }
 
+      if (!inInput && !isMod && e.altKey && key === 'Enter' && state.selectedAbsPath && !state.selectedIsDir) {
+        e.preventDefault();
+        openNativePreview(state.selectedFileUri, null, state.selectedAbsPath);
+        return;
+      }
+
       if (inInput || isMod || e.altKey) return;
 
       if (key === 'ArrowDown') {
@@ -1453,7 +1529,7 @@
         } else if (state.selectedIsDir && state.selectedRelPath) {
           await toggleDirectoryByRelPath(state.selectedRelPath);
         } else if (state.selectedFileUri || state.selectedAbsPath) {
-          openNativePreview(state.selectedFileUri, null, state.selectedAbsPath);
+          openFileDefault(state.selectedFileUri, null, state.selectedAbsPath);
         }
       }
     });
@@ -1509,8 +1585,12 @@
         return;
       }
       const data = typeof event.data === 'string' ? (() => { try { return JSON.parse(event.data); } catch { return null; } })() : event.data;
-      const target = data && typeof data === 'object' ? (data.path || data.file || data.reveal) : '';
+      const target = data && typeof data === 'object' ? (data.path || data.file || data.reveal || data.browser) : '';
       if (typeof target === 'string' && target.trim()) {
+        const openMode = String(data.open || data.action || '').trim().toLowerCase();
+        if (data.browser || openMode === 'browser' || openMode === '1' || openMode === 'true') {
+          openInBrowser(target);
+        }
         revealPathInTree(target).catch((err) => showToast(err.message));
       }
     });
@@ -1550,7 +1630,7 @@
 
     ensureAuxViewportObserver();
     const coordinatorBootAt = Date.now();
-    let visibleSince = isAuxIframeVisible() ? (Date.now() - 1000) : 0;
+    let visibleSince = isAuxIframeVisible() ? coordinatorBootAt : 0;
     let lastSeenSeq = 0;
     let pendingOpenTrigger = null;
 
@@ -1595,13 +1675,21 @@
       if (nowVisible) {
         const becameVisible = !visibleSince;
         if (becameVisible) {
-          visibleSince = (Date.now() - coordinatorBootAt < 250) ? (Date.now() - 1000) : Date.now();
+          visibleSince = (Date.now() - coordinatorBootAt < 250) ? coordinatorBootAt : Date.now();
           reportHello();
           refreshWorkspace(true).catch(() => {});
           pollMentions().catch(() => {});
           claimPendingOpenAckIfVisible().catch(() => {});
           apiGet('/api/aux-pane-trigger', { waitMs: 0 }).then(async (res) => {
             const trig = res?.trigger;
+            if (
+              trig?.seq &&
+              trig.targetPlugin === 'agy-finder' &&
+              trig.revealPath &&
+              (Date.now() - Number(trig.at || 0)) < 4000
+            ) {
+              triggerRevealOnce(trig.seq, trig.revealPath);
+            }
             if (
               !trig?.seq ||
               (Date.now() - Number(trig.at || 0)) >= 2500 ||
@@ -1686,7 +1774,14 @@
 
       const myConvId = getConversationId();
       const isVisibleNow = isAuxIframeVisible();
-      const wasAlreadyVisible = visibleSince > 0 && visibleSince <= Number(trigger.at || 0) - 40;
+      const alreadyOpeningOrSwitched =
+        Number(trigger.openingSeq || 0) >= seq ||
+        Number(trigger.switchedSeq || 0) >= seq;
+      const wasAlreadyVisible =
+        !alreadyOpeningOrSwitched &&
+        coordinatorBootAt <= Number(trigger.at || 0) - 40 &&
+        visibleSince > 0 &&
+        visibleSince <= Number(trigger.at || 0) - 40;
       const isSelfTarget = trigger.targetPlugin === 'agy-finder';
       const exactConvMatch = !trigger.convId || !myConvId || myConvId === trigger.convId;
 
@@ -1773,6 +1868,7 @@
       if (isSelfTarget && trigger.revealPath) {
         triggerRevealOnce(seq, trigger.revealPath);
       }
+      // Host unmounts toggle-aux-pane (Cyc) while hidden; only root epc(toggle-conversation) expands a collapsed Aux Pane.
       window.sidecar.ui.toggleConversation(targetConvId);
       apiGet('/api/aux-pane-trigger', { waitMs: 0, holdMs: 110 }).then(() => {
         if (isSelfTarget) {

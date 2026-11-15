@@ -2449,6 +2449,290 @@ async function main() {
       rmSync(join(isolatedStateDir, 'gen_step_models_v1.json'), { force: true });
     }
 
+    // I1: Idle RPC elimination, quota resetTime boundary wake, delayed commit settle, cross-process disk cache & redaction
+    const i1ConvA = '00000000-0000-4000-8000-000000000301';
+    const i1ConvB = '00000000-0000-4000-8000-000000000302';
+    const i1Csrf = 'i1-ls-csrf-secret-tok';
+    const i1RawEmail = ['i1test', 'example.com'].join('@');
+    const i1FakeBearer = ['Bea', 'rer', ' ', 'i1_secret_token_xyz'].join('');
+    const i1BaseMs = Date.now();
+    const i1ResetIso = new Date(i1BaseMs + 28 * 60_000).toISOString();
+    let i1QuotaRemaining = 0.8;
+    let i1MetaMode = 'full';
+    const i1Counts = {
+      GetUserStatus: 0,
+      RetrieveUserQuotaSummary: 0,
+      GetCascadeTrajectoryGeneratorMetadata: 0
+    };
+    const i1Server = http.createServer((req, res) => {
+      let rawBody = '';
+      req.on('data', (c) => { rawBody += c; });
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        if (req.url?.includes('GetUserStatus')) {
+          i1Counts.GetUserStatus += 1;
+          res.end(JSON.stringify({
+            userStatus: {
+              email: i1RawEmail,
+              userTier: { id: 'g1-pro-tier', name: 'Google AI Pro' },
+              cascadeModelConfigData: {
+                clientModelConfigs: [
+                  {
+                    label: 'Gemini 3.8 Flash',
+                    modelOrAlias: { model: 'MODEL_PLACEHOLDER_M318' },
+                    quotaInfo: { poolId: 'i1-flash', remainingFraction: i1QuotaRemaining, resetTime: i1ResetIso }
+                  }
+                ]
+              }
+            }
+          }));
+          return;
+        }
+        if (req.url?.includes('RetrieveUserQuotaSummary')) {
+          i1Counts.RetrieveUserQuotaSummary += 1;
+          res.end(JSON.stringify({
+            groups: [
+              {
+                groupId: 'i1-flash',
+                displayName: 'Gemini Flash Pool',
+                modelIds: ['MODEL_PLACEHOLDER_M318'],
+                buckets: [{ bucketId: 'i1-flash-5h', window: '5h', remainingFraction: i1QuotaRemaining, resetTime: i1ResetIso }]
+              }
+            ]
+          }));
+          return;
+        }
+        if (req.url?.includes('GetCascadeTrajectoryGeneratorMetadata')) {
+          i1Counts.GetCascadeTrajectoryGeneratorMetadata += 1;
+          let cascadeId = '';
+          try { cascadeId = JSON.parse(rawBody || '{}').cascadeId || ''; } catch {}
+          if (cascadeId === i1ConvB && i1MetaMode === 'empty') {
+            res.end(JSON.stringify({ generatorMetadata: [] }));
+            return;
+          }
+          res.end(JSON.stringify({
+            generatorMetadata: [
+              {
+                stepIndices: [2],
+                chatModel: {
+                  modelDisplayName: 'Gemini 3.8 Flash',
+                  responseModel: 'gemini-3.8-flash',
+                  usage: { inputTokens: 2000, outputTokens: 200 },
+                  timeToFirstToken: '0.4s',
+                  streamingDuration: '1.0s',
+                  error: cascadeId === i1ConvB ? `upstream failed with ${i1FakeBearer}` : '',
+                  chatStartMetadata: {
+                    contextWindowMetadata: {
+                      maxContextTokens: 200000,
+                      estimatedTokensUsed: 2200,
+                      tokenBreakdown: {
+                        totalTokens: 2200,
+                        groups: [{ name: 'System Prompt', numTokens: 1200 }]
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }));
+          return;
+        }
+        res.end('{}');
+      });
+    });
+    await new Promise((r) => i1Server.listen(0, '127.0.0.1', r));
+    const i1StateDir = join(tmpVerifyRoot, 'i1-state');
+    mkdirSync(i1StateDir, { recursive: true });
+    const prevI1StateDir = process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR;
+    const prevI1Ls = process.env.ANTIGRAVITY_LS_ADDRESS;
+    const prevI1Csrf = process.env.ANTIGRAVITY_CSRF_TOKEN;
+    try {
+      const i1Port = i1Server.address().port;
+      const i1LsAddr = `127.0.0.1:${i1Port}`;
+      process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR = i1StateDir;
+      process.env.ANTIGRAVITY_LS_ADDRESS = i1LsAddr;
+      process.env.ANTIGRAVITY_CSRF_TOKEN = i1Csrf;
+
+      const writeI1Transcript = (id, mtimeMs) => {
+        const d = join(isolatedAgDir, 'brain', id, '.system_generated', 'logs');
+        mkdirSync(d, { recursive: true });
+        const tp = join(d, 'transcript.jsonl');
+        const iso = new Date(mtimeMs).toISOString();
+        writeFileSync(
+          tp,
+          [
+            { step_index: 1, type: 'USER_INPUT', created_at: iso, content: `i1 task ${id}` },
+            { step_index: 2, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: iso, input_tokens: 2000, output_tokens: 200, content: 'ok' }
+          ].map((r) => JSON.stringify(r)).join('\n') + '\n',
+          'utf-8'
+        );
+        utimesSync(tp, new Date(mtimeMs), new Date(mtimeMs));
+        return statSync(tp).mtimeMs;
+      };
+
+      // Case A: Background idle scans at +15s, +30s, +5m, +25m emit ZERO extra LS RPCs
+      const mtimeA = writeI1Transcript(i1ConvA, i1BaseMs);
+      const tA0 = Math.max(i1BaseMs, mtimeA);
+      const snapA0 = await scanConversation(i1ConvA, { background: true, menubarMode: 'context', nowMs: tA0 });
+      assert(
+        i1Counts.GetUserStatus === 1 &&
+          i1Counts.RetrieveUserQuotaSummary === 1 &&
+          i1Counts.GetCascadeTrajectoryGeneratorMetadata === 1,
+        `I1 Case A 首次扫描应精确触发各 1 次 RPC，实际：${JSON.stringify(i1Counts)}`
+      );
+      for (const offset of [15_000, 30_000, 5 * 60_000, 25 * 60_000]) {
+        const snapIdle = await scanConversation(i1ConvA, {
+          background: true,
+          menubarMode: 'context',
+          nowMs: tA0 + offset
+        });
+        assert(
+          snapIdle.etag === snapA0.etag &&
+            i1Counts.GetUserStatus === 1 &&
+            i1Counts.RetrieveUserQuotaSummary === 1 &&
+            i1Counts.GetCascadeTrajectoryGeneratorMetadata === 1,
+          `I1 Case A 空闲 +${offset}ms 竟产生额外 RPC 或 ETag 漂移：counts=${JSON.stringify(i1Counts)}`
+        );
+      }
+
+      // Case B: Crossing quota resetTime refreshes GetUserStatus + RetrieveUserQuotaSummary once, zero metadata RPCs
+      i1QuotaRemaining = 1.0;
+      const tResetCross = Date.parse(i1ResetIso) + 5_000;
+      const snapReset = await scanConversation(i1ConvA, {
+        background: true,
+        menubarMode: 'quota',
+        nowMs: tResetCross
+      });
+      assert(
+        i1Counts.GetUserStatus === 2 &&
+          i1Counts.RetrieveUserQuotaSummary === 2 &&
+          i1Counts.GetCascadeTrajectoryGeneratorMetadata === 1 &&
+          snapReset.etag !== snapA0.etag &&
+          snapReset.quotas?.[0]?.remainingPercent === 100,
+        `I1 Case B 跨越 resetTime 未按预期刷新配额：counts=${JSON.stringify(i1Counts)}, q=${JSON.stringify(snapReset.quotas)}`
+      );
+      await scanConversation(i1ConvA, {
+        background: true,
+        menubarMode: 'quota',
+        nowMs: tResetCross + 30_000
+      });
+      assert(
+        i1Counts.GetUserStatus === 2 &&
+          i1Counts.RetrieveUserQuotaSummary === 2 &&
+          i1Counts.GetCascadeTrajectoryGeneratorMetadata === 1,
+        `I1 Case B 跨越 resetTime 后的下次轮询不应重复请求：counts=${JSON.stringify(i1Counts)}`
+      );
+
+      // Case C: Delayed generatorMetadata commit retries after backoff, then settles with 0 subsequent metadata RPCs
+      i1MetaMode = 'empty';
+      const metaBeforeC = i1Counts.GetCascadeTrajectoryGeneratorMetadata;
+      const mtimeB = writeI1Transcript(i1ConvB, tResetCross + 60_000);
+      const tB0 = Math.max(tResetCross + 60_000, mtimeB);
+      const snapB0 = await scanConversation(i1ConvB, { background: true, nowMs: tB0 });
+      assert(
+        i1Counts.GetCascadeTrajectoryGeneratorMetadata === metaBeforeC + 1 &&
+          snapB0.speed?.isServerExact === false,
+        `I1 Case C 延迟提交初始响应应尝试 1 次并回退本地估算：meta=${i1Counts.GetCascadeTrajectoryGeneratorMetadata}`
+      );
+      await scanConversation(i1ConvB, { background: true, nowMs: tB0 + 1500 });
+      assert(
+        i1Counts.GetCascadeTrajectoryGeneratorMetadata === metaBeforeC + 1,
+        'I1 Case C 退避窗口 1.5s 内不应重复查询 GetCascadeTrajectoryGeneratorMetadata'
+      );
+      i1MetaMode = 'full';
+      const snapBSettled = await scanConversation(i1ConvB, { background: true, nowMs: tB0 + 4500 });
+      assert(
+        i1Counts.GetCascadeTrajectoryGeneratorMetadata === metaBeforeC + 2 &&
+          snapBSettled.speed?.isServerExact === true &&
+          snapBSettled.context?.budget === 200000,
+        `I1 Case C 4.5s 重试命中后应收敛完整服务端指标：meta=${i1Counts.GetCascadeTrajectoryGeneratorMetadata}, exact=${snapBSettled.speed?.isServerExact}, budget=${snapBSettled.context?.budget}`
+      );
+      const metaAfterSettle = i1Counts.GetCascadeTrajectoryGeneratorMetadata;
+      for (const offset of [10 * 60_000, 25 * 60_000]) {
+        await scanConversation(i1ConvB, { background: true, nowMs: tB0 + offset });
+      }
+      assert(
+        i1Counts.GetCascadeTrajectoryGeneratorMetadata === metaAfterSettle,
+        `I1 Case C 已收敛对话在 +10m/+25m 不应再发 GetCascadeTrajectoryGeneratorMetadata：before=${metaAfterSettle}, after=${i1Counts.GetCascadeTrajectoryGeneratorMetadata}`
+      );
+
+      // Case D: Cross-process cold child reuses disk caches with 0 RPCs, redacts secrets, and force:true bypasses caches
+      const i1CollectorUrl = pathToFileURL(join(ROOT, 'sidecars', 'dashboard', 'collector.mjs')).href;
+      const runI1Child = (code) => new Promise((resolveChild, rejectChild) => {
+        const child = spawn(process.execPath, ['--input-type=module', '-e', code], {
+          env: {
+            ...process.env,
+            AG_DIR: isolatedAgDir,
+            AG_CLI_DIR: isolatedCliDir,
+            ANTIGRAVITY_EXECUTABLE_DATA_DIR: i1StateDir,
+            ANTIGRAVITY_LS_ADDRESS: i1LsAddr,
+            ANTIGRAVITY_CSRF_TOKEN: i1Csrf
+          },
+          stdio: ['ignore', 'pipe', 'pipe']
+        });
+        let out = '';
+        let err = '';
+        child.stdout.on('data', (d) => { out += d.toString('utf-8'); });
+        child.stderr.on('data', (d) => { err += d.toString('utf-8'); });
+        child.on('error', rejectChild);
+        child.on('close', (codeExit) => {
+          if (codeExit !== 0) rejectChild(new Error(`I1 child exited ${codeExit}: ${err || out}`));
+          else resolveChild(JSON.parse(out.trim()));
+        });
+      });
+
+      const beforeChildCounts = { ...i1Counts };
+      const childCachedOut = await runI1Child(
+        `const m = await import(${JSON.stringify(i1CollectorUrl)});
+         const s = await m.scanConversation(${JSON.stringify(i1ConvB)}, { background: true, nowMs: ${tB0 + 4500} });
+         const h = await m.collectTokenHistory({ background: true, nowMs: ${tB0 + 4500} });
+         console.log(JSON.stringify({ etag: s.etag, budget: s.context?.budget, histOk: Boolean(h?.ok) }));`
+      );
+      assert(
+        childCachedOut.etag === snapBSettled.etag &&
+          childCachedOut.budget === 200000 &&
+          childCachedOut.histOk === true &&
+          i1Counts.GetUserStatus === beforeChildCounts.GetUserStatus &&
+          i1Counts.RetrieveUserQuotaSummary === beforeChildCounts.RetrieveUserQuotaSummary &&
+          i1Counts.GetCascadeTrajectoryGeneratorMetadata === beforeChildCounts.GetCascadeTrajectoryGeneratorMetadata,
+        `I1 Case D 跨进程冷启动未零 RPC 命中磁盘缓存：out=${JSON.stringify(childCachedOut)}, before=${JSON.stringify(beforeChildCounts)}, after=${JSON.stringify(i1Counts)}`
+      );
+
+      const hostDiskFile = join(i1StateDir, 'host_status_cache_v1.json');
+      const convDiskFile = join(i1StateDir, 'active_conv_gen_cache_v1.json');
+      assert(existsSync(hostDiskFile) && existsSync(convDiskFile), 'I1 Case D 共享磁盘缓存文件未生成');
+      const hostDiskRaw = readFileSync(hostDiskFile, 'utf-8');
+      const convDiskRaw = readFileSync(convDiskFile, 'utf-8');
+      for (const forbidden of [i1Csrf, i1LsAddr, i1RawEmail, 'i1_secret_token_xyz']) {
+        assert(!hostDiskRaw.includes(forbidden), `I1 host_status_cache_v1.json 泄露敏感字段: ${forbidden}`);
+        assert(!convDiskRaw.includes(forbidden), `I1 active_conv_gen_cache_v1.json 泄露敏感字段: ${forbidden}`);
+      }
+
+      await runI1Child(
+        `const m = await import(${JSON.stringify(i1CollectorUrl)});
+         await m.scanConversation(${JSON.stringify(i1ConvB)}, { force: true });
+         console.log('{"forced":true}');`
+      );
+      assert(
+        i1Counts.GetUserStatus === beforeChildCounts.GetUserStatus + 1 &&
+          i1Counts.RetrieveUserQuotaSummary === beforeChildCounts.RetrieveUserQuotaSummary + 1 &&
+          i1Counts.GetCascadeTrajectoryGeneratorMetadata === beforeChildCounts.GetCascadeTrajectoryGeneratorMetadata + 1,
+        `I1 Case D force:true 必须穿透所有缓存直连 LS：before=${JSON.stringify(beforeChildCounts)}, after=${JSON.stringify(i1Counts)}`
+      );
+    } finally {
+      if (prevI1StateDir === undefined) delete process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR; else process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR = prevI1StateDir;
+      if (prevI1Ls === undefined) delete process.env.ANTIGRAVITY_LS_ADDRESS; else process.env.ANTIGRAVITY_LS_ADDRESS = prevI1Ls;
+      if (prevI1Csrf === undefined) delete process.env.ANTIGRAVITY_CSRF_TOKEN; else process.env.ANTIGRAVITY_CSRF_TOKEN = prevI1Csrf;
+      i1Server.closeAllConnections?.();
+      await new Promise((r) => i1Server.close(r));
+      rmSync(join(isolatedAgDir, 'brain', i1ConvA), { recursive: true, force: true });
+      rmSync(join(isolatedAgDir, 'brain', i1ConvB), { recursive: true, force: true });
+      rmSync(i1StateDir, { recursive: true, force: true });
+      rmSync(join(isolatedStateDir, 'gen_step_models_v1.json'), { force: true });
+      rmSync(join(isolatedStateDir, 'host_status_cache_v1.json'), { force: true });
+      rmSync(join(isolatedStateDir, 'active_conv_gen_cache_v1.json'), { force: true });
+    }
+
     // R8: Windows PowerShell Unicode-safe Base64 loader shim in non-ASCII + space directory
     const ps1Text = readFileSync(join(ROOT, 'install.ps1'), 'utf-8');
     assert(!/\$TargetDir.*-Encoding\s+ASCII/i.test(ps1Text), 'R8 install.ps1 仍将 $TargetDir 直接以 ASCII 编码写出');
@@ -3444,16 +3728,20 @@ async function main() {
       `同一前台标签连续按键应稳定命中同一非后台对话：${secondPressTrig.convId} vs ${thirdPressTrig.convId}`
     );
 
-    // Regression check for IntersectionObserver visibility detection, holdMs unthrottled wakeup & Pinned Tab bridge in dashboard/app.js
+    // Regression check for IntersectionObserver visibility detection, holdMs unthrottled wakeup, Pinned Tab & hidden toggleConversation -> visible toggleAuxPane bridge in dashboard/app.js
     const cvAppSource = readFileSync(join(ROOT, 'sidecars', 'dashboard', 'app.js'), 'utf-8');
     assert(
       cvAppSource.includes('IntersectionObserver') &&
         cvAppSource.includes('intersectionRect') &&
         cvAppSource.includes('agy_aux_ever_visible') &&
         cvAppSource.includes('holdMs=') &&
-        cvAppSource.includes('toggleConversation(targetConvId)') &&
+        cvAppSource.includes('isHostSidebarContext') &&
+        cvAppSource.includes('alreadyOpeningOrSwitched') &&
+        cvAppSource.includes('window.sidecar.ui.toggleConversation(targetConvId)') &&
+        !cvAppSource.includes('if (canToggleAux)') &&
+        cvAppSource.includes("toggleAuxPane({ tabType: 'sidecarView', uri: trig.uri })") &&
         !cvAppSource.includes('return window.innerWidth > 40 && window.innerHeight > 40;'),
-      'dashboard/app.js 缺少 IntersectionObserver 真可见性检测、holdMs 无节流唤醒或防假阳性保护'
+      'dashboard/app.js 缺少 IntersectionObserver 真可见性检测、holdMs 无节流唤醒、隐藏态 toggleConversation 开栏或可见态 toggleAuxPane 保护'
     );
 
     // Verify Hero Card Quota promotion & collapsible cumulative block in index.html
@@ -3475,6 +3763,7 @@ async function main() {
 
     // Real VM behavioral test for R4 (out-of-order conversation switches & per-conversation ETag) and UX #2 (collapsible summary & toggle)
     await verifyDashboardFrontendBehavior(cvAppSource);
+    await verifyContextAuxBridgeBehavior(cvAppSource);
 
     // macOS Swift native host typecheck
     if (process.platform === 'darwin' && existsSync('/usr/bin/swiftc')) {
@@ -3876,6 +4165,519 @@ async function verifyDashboardFrontendBehavior(appSource) {
   assert(
     !takeaway.textContent.includes('BravoStale'),
     `响应返回时检测到 live window.sidecar.conversationId 已变为 convC，旧 B 响应必须被丢弃，实际：${takeaway.textContent}`
+  );
+
+  // Verify hidden float-window boot skips /api/context and /api/history until __cvOnHostVisibility(true)
+  const hiddenFetches = [];
+  const hiddenIntervals = [];
+  const hiddenEls = new Map();
+  const makeHiddenEl = (id, initClasses = []) => {
+    const classSet = new Set(initClasses);
+    return {
+      id,
+      innerHTML: '',
+      textContent: '',
+      value: '',
+      disabled: false,
+      title: '',
+      checked: false,
+      dataset: {},
+      style: {
+        _props: new Map(),
+        setProperty(k, v) { this._props.set(k, String(v)); },
+        removeProperty(k) { this._props.delete(k); },
+        getPropertyValue(k) { return this._props.get(k) || ''; }
+      },
+      attributes: new Map(),
+      classList: {
+        add: (...cls) => cls.forEach((c) => classSet.add(c)),
+        remove: (...cls) => cls.forEach((c) => classSet.delete(c)),
+        toggle: (c, force) => {
+          const want = force === undefined ? !classSet.has(c) : Boolean(force);
+          if (want) classSet.add(c); else classSet.delete(c);
+          return want;
+        },
+        contains: (c) => classSet.has(c)
+      },
+      addEventListener: () => {},
+      dispatchEvent: () => {},
+      querySelectorAll: () => [],
+      querySelector: () => null,
+      appendChild: () => {},
+      insertAdjacentHTML: () => {},
+      setAttribute(k, v) { this.attributes.set(k, String(v)); },
+      getAttribute(k) { return this.attributes.has(k) ? this.attributes.get(k) : null; },
+      hasAttribute(k) { return this.attributes.has(k); },
+      removeAttribute(k) { this.attributes.delete(k); }
+    };
+  };
+  const getHiddenEl = (id) => {
+    if (!hiddenEls.has(id)) hiddenEls.set(id, makeHiddenEl(id));
+    return hiddenEls.get(id);
+  };
+  const hiddenRootAttrs = new Map();
+  const hiddenRootStyles = new Map();
+  const hiddenSandbox = {
+    console, Date, Math, JSON, URL, URLSearchParams, Set, Map, Array, Object, String, Number, Boolean, Promise, Error,
+    NodeFilter: { SHOW_TEXT: 4 },
+    MutationObserver: class { observe() {} disconnect() {} },
+    ResizeObserver: class { observe() {} disconnect() {} },
+    IntersectionObserver: class { observe() {} disconnect() {} },
+    getComputedStyle: () => ({ color: 'rgb(255, 255, 255)', getPropertyValue: () => '' }),
+    setTimeout, clearTimeout, clearInterval,
+    setInterval: (fn, ms) => { hiddenIntervals.push({ fn, ms }); return hiddenIntervals.length; },
+    requestAnimationFrame: (fn) => { fn(); return 1; },
+    localStorage: { getItem: () => null, setItem: () => {} },
+    sessionStorage: { getItem: () => null, setItem: () => {} },
+    navigator: { platform: 'MacIntel', userAgent: 'Mozilla/5.0' },
+    document: {
+      readyState: 'complete',
+      hidden: false,
+      visibilityState: 'visible',
+      documentElement: {
+        clientWidth: 340, clientHeight: 700, dataset: {}, appendChild: () => {},
+        style: {
+          getPropertyValue: (k) => hiddenRootStyles.get(k) || '',
+          setProperty: (k, v) => hiddenRootStyles.set(k, String(v)),
+          removeProperty: (k) => hiddenRootStyles.delete(k)
+        },
+        getAttribute: (k) => (hiddenRootAttrs.has(k) ? hiddenRootAttrs.get(k) : null),
+        setAttribute: (k, v) => hiddenRootAttrs.set(k, String(v)),
+        hasAttribute: (k) => hiddenRootAttrs.has(k),
+        removeAttribute: (k) => hiddenRootAttrs.delete(k)
+      },
+      head: { appendChild: () => {} },
+      body: makeHiddenEl('body'),
+      getElementById: getHiddenEl,
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      createTreeWalker: () => ({ nextNode: () => false, currentNode: null }),
+      addEventListener: () => {},
+      createElement: () => makeHiddenEl('')
+    },
+    window: null,
+    fetch: async (urlStr) => {
+      const u = new URL(urlStr, 'http://127.0.0.1');
+      hiddenFetches.push(u.pathname);
+      if (u.pathname === '/api/settings') {
+        return { ok: true, status: 200, json: async () => ({ ok: true, settings: {}, uiPreferences: {}, shortcut: {}, auxShortcut: {}, menubar: { supported: true, enabled: true } }) };
+      }
+      if (u.pathname === '/api/history') {
+        return { ok: true, status: 200, json: async () => ({ ok: true, etag: 'hist-h', presets: [], totals: { totalTokens: 600 }, daily: [], models: [], plans: [] }) };
+      }
+      if (u.pathname === '/api/context') {
+        return { ok: true, status: 200, json: async () => mkSnap(convA, 'Alpha', 'etag-h', 600, 0.06) };
+      }
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    }
+  };
+  hiddenSandbox.window = {
+    __CV_FLOAT_MODE__: true,
+    __CV_INITIAL_HIDDEN__: true,
+    location: { origin: 'http://127.0.0.1', href: 'http://127.0.0.1/' },
+    matchMedia: () => ({ matches: false, addEventListener: () => {} }),
+    getComputedStyle: hiddenSandbox.getComputedStyle,
+    addEventListener: () => {},
+    self: null,
+    top: null,
+    fetch: hiddenSandbox.fetch
+  };
+  hiddenSandbox.location = hiddenSandbox.window.location;
+  hiddenSandbox.window.self = hiddenSandbox.window;
+  hiddenSandbox.window.top = hiddenSandbox.window;
+  hiddenSandbox.__CV_FLOAT_MODE__ = true;
+  hiddenSandbox.__CV_INITIAL_HIDDEN__ = true;
+  hiddenSandbox.globalThis = hiddenSandbox;
+
+  runInNewContext(appSource, hiddenSandbox, { filename: 'dashboard-app-hidden.js' });
+  await new Promise((r) => setTimeout(r, 35));
+  for (const iv of hiddenIntervals) iv.fn();
+  await new Promise((r) => setTimeout(r, 20));
+  assert(
+    !hiddenFetches.includes('/api/context') && !hiddenFetches.includes('/api/history'),
+    `隐藏浮窗启动及定时轮询不得触发 /api/context 或 /api/history，实际：${JSON.stringify(hiddenFetches)}`
+  );
+  hiddenSandbox.window.__cvOnHostVisibility(true);
+  await new Promise((r) => setTimeout(r, 35));
+  assert(
+    hiddenFetches.includes('/api/context') &&
+      hiddenFetches.includes('/api/history') &&
+      getHiddenEl('ctx-takeaway').textContent.includes('Alpha'),
+    `触发 __cvOnHostVisibility(true) 后应恢复加载 /api/context 与 /api/history 并渲染 Alpha，实际：fetches=${JSON.stringify(hiddenFetches)}, takeaway=${getHiddenEl('ctx-takeaway').textContent}`
+  );
+}
+
+async function verifyContextAuxBridgeBehavior(appSource) {
+  const convA = ['22222222', '3333', '4444', '5555', '666666666601'].join('-');
+  const makeStubEl = (id = '') => {
+    const classes = new Set();
+    const attrs = new Map();
+    return {
+      id,
+      value: '',
+      textContent: '',
+      innerHTML: '',
+      scrollTop: 0,
+      dataset: {},
+      style: {},
+      className: '',
+      classList: {
+        add: (...names) => names.forEach((n) => classes.add(n)),
+        remove: (...names) => names.forEach((n) => classes.delete(n)),
+        toggle: (n, force) => {
+          const on = force === undefined ? !classes.has(n) : Boolean(force);
+          if (on) classes.add(n);
+          else classes.delete(n);
+          return on;
+        },
+        contains: (n) => classes.has(n)
+      },
+      setAttribute: (k, v) => attrs.set(k, String(v)),
+      getAttribute: (k) => (attrs.has(k) ? attrs.get(k) : null),
+      hasAttribute: (k) => attrs.has(k),
+      removeAttribute: (k) => attrs.delete(k),
+      addEventListener: () => {},
+      appendChild: () => {},
+      focus: () => {},
+      scrollIntoView: () => {}
+    };
+  };
+
+  const runScenario = async ({ pathname = '/', initialTrigger }) => {
+    const els = new Map();
+    const getEl = (id) => {
+      if (!els.has(id)) els.set(id, makeStubEl(id));
+      return els.get(id);
+    };
+    const trigState = {
+      seq: 0,
+      targetPlugin: '',
+      uri: '',
+      action: 'toggle',
+      convId: convA,
+      at: 0,
+      openingSeq: 0,
+      ackSeq: 0,
+      switchedSeq: 0,
+      ...initialTrigger
+    };
+    const helloCalls = [];
+    const toggleAuxCalls = [];
+    const ignoredHiddenToggleAuxCalls = [];
+    const toggleConvCalls = [];
+    const parentMessages = [];
+    const ioCallbacks = [];
+    const longPollWaiters = [];
+    let currentIoVisible = false;
+    const sessionMap = new Map();
+    const localMap = new Map();
+    const rootAttrs = new Map();
+    const rootStyles = new Map();
+    const intervalCbs = [];
+
+    const mockFetch = async (urlStr, opts = {}) => {
+      const u = new URL(urlStr, 'http://127.0.0.1');
+      if (u.pathname === '/api/aux-pane-trigger') {
+        const method = String(opts.method || 'GET').toUpperCase();
+        if (method === 'POST') {
+          const body = opts.body ? JSON.parse(opts.body) : {};
+          const act = String(body.action || '');
+          const s = Number(body.seq || 0);
+          if (act === 'hello') {
+            helloCalls.push(body.convId || '');
+            return { ok: true, status: 200, json: async () => ({ ok: true }) };
+          }
+          if (act === 'opening') {
+            if (s <= Number(trigState.openingSeq || 0)) {
+              return { ok: true, status: 200, json: async () => ({ ok: true, claimed: false, trigger: { ...trigState } }) };
+            }
+            trigState.openingSeq = s;
+            return { ok: true, status: 200, json: async () => ({ ok: true, claimed: true, trigger: { ...trigState } }) };
+          }
+          if (act === 'switched') {
+            if (s <= Number(trigState.switchedSeq || 0)) {
+              return { ok: true, status: 200, json: async () => ({ ok: true, claimed: false, trigger: { ...trigState } }) };
+            }
+            trigState.switchedSeq = s;
+            return { ok: true, status: 200, json: async () => ({ ok: true, claimed: true, trigger: { ...trigState } }) };
+          }
+          if (act === 'ack') {
+            if (s < Number(trigState.seq || 0) || Number(trigState.ackSeq || 0) >= s) {
+              return { ok: true, status: 200, json: async () => ({ ok: true, claimed: false, trigger: { ...trigState } }) };
+            }
+            trigState.ackSeq = s;
+            trigState.ackPlugin = body.plugin || 'context-viewer';
+            return { ok: true, status: 200, json: async () => ({ ok: true, claimed: true, trigger: { ...trigState } }) };
+          }
+          return { ok: true, status: 200, json: async () => ({ ok: true, trigger: { ...trigState } }) };
+        }
+        const holdMs = Number(u.searchParams.get('holdMs') || 0);
+        if (holdMs > 0) {
+          await new Promise((r) => setTimeout(r, Math.min(12, holdMs)));
+        }
+        const sinceParam = u.searchParams.get('since');
+        const waitMs = Number(u.searchParams.get('waitMs') ?? 8500);
+        if (sinceParam !== null && Number(sinceParam) >= Number(trigState.seq || 0) && waitMs > 0) {
+          const nextTrig = await new Promise((resolvePromise) => {
+            longPollWaiters.push(resolvePromise);
+          });
+          return { ok: true, status: 200, json: async () => ({ ok: true, changed: true, trigger: nextTrig }) };
+        }
+        return { ok: true, status: 200, json: async () => ({ ok: true, trigger: { ...trigState } }) };
+      }
+      if (u.pathname === '/api/settings') {
+        return { ok: true, status: 200, json: async () => ({ ok: true, settings: {}, uiPreferences: {}, shortcut: {}, auxShortcut: {}, menubar: { supported: false, enabled: false } }) };
+      }
+      if (u.pathname === '/api/history') {
+        return { ok: true, status: 200, json: async () => ({ ok: true, etag: 'hist-aux', presets: [], totals: { totalTokens: 100 }, daily: [], models: [], plans: [] }) };
+      }
+      if (u.pathname === '/api/context') {
+        return { ok: true, status: 200, json: async () => ({ ok: true, etag: 'ctx-aux', conversationId: convA, context: { usedTokens: 100, budgetTokens: 1000, breakdown: { groups: [] } }, window: { used: 100, budget: 1000, remaining: 900, pct: 10 }, speed: {}, quotaStatus: { pools: [] }, sparkline: [], turns: [] }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    };
+
+    const sandbox = {
+      console,
+      Date,
+      Math,
+      JSON,
+      URL,
+      URLSearchParams,
+      Set,
+      Map,
+      Array,
+      Object,
+      String,
+      Number,
+      Boolean,
+      Promise,
+      Error,
+      NodeFilter: { SHOW_TEXT: 4 },
+      MutationObserver: class { observe() {} disconnect() {} },
+      ResizeObserver: class { observe() {} disconnect() {} },
+      IntersectionObserver: class {
+        constructor(cb) {
+          ioCallbacks.push(cb);
+        }
+        observe() {}
+        disconnect() {}
+      },
+      getComputedStyle: () => ({ color: 'rgb(255, 255, 255)', getPropertyValue: () => '' }),
+      setTimeout,
+      clearTimeout,
+      clearInterval,
+      setInterval: (fn, ms) => {
+        intervalCbs.push({ fn, ms });
+        return intervalCbs.length;
+      },
+      requestAnimationFrame: (fn) => { fn(); return 1; },
+      localStorage: {
+        getItem: (k) => (localMap.has(k) ? localMap.get(k) : null),
+        setItem: (k, v) => localMap.set(k, String(v))
+      },
+      sessionStorage: {
+        getItem: (k) => (sessionMap.has(k) ? sessionMap.get(k) : null),
+        setItem: (k, v) => sessionMap.set(k, String(v))
+      },
+      navigator: { platform: 'MacIntel', userAgent: 'Mozilla/5.0' },
+      document: {
+        readyState: 'complete',
+        hidden: false,
+        visibilityState: 'visible',
+        documentElement: {
+          clientWidth: 340,
+          clientHeight: 680,
+          dataset: {},
+          appendChild: () => {},
+          style: {
+            getPropertyValue: (k) => rootStyles.get(k) || '',
+            setProperty: (k, v) => rootStyles.set(k, String(v)),
+            removeProperty: (k) => rootStyles.delete(k)
+          },
+          getAttribute: (k) => (rootAttrs.has(k) ? rootAttrs.get(k) : null),
+          setAttribute: (k, v) => rootAttrs.set(k, String(v)),
+          hasAttribute: (k) => rootAttrs.has(k),
+          removeAttribute: (k) => rootAttrs.delete(k)
+        },
+        head: { appendChild: () => {} },
+        body: makeStubEl('body'),
+        getElementById: getEl,
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        createTreeWalker: () => ({ nextNode: () => false, currentNode: null }),
+        addEventListener: () => {},
+        createElement: () => makeStubEl('')
+      },
+      window: null,
+      fetch: mockFetch
+    };
+
+    const loc = { origin: 'http://127.0.0.1', pathname, href: `http://127.0.0.1${pathname}` };
+    sandbox.window = {
+      location: loc,
+      matchMedia: () => ({ matches: false, addEventListener: () => {} }),
+      getComputedStyle: sandbox.getComputedStyle,
+      addEventListener: () => {},
+      parent: { postMessage: (msg) => parentMessages.push(msg) },
+      sidecar: {
+        conversationId: convA,
+        fetch: mockFetch,
+        getWorkspaceUris: async () => [],
+        onWorkspaceChange: () => () => {},
+        ui: {
+          toggleAuxPane: (req) => {
+            // Host Cyc unmounts toggle-aux-pane while the iframe is hidden (visible === false).
+            if (!currentIoVisible) {
+              ignoredHiddenToggleAuxCalls.push(req);
+              return;
+            }
+            toggleAuxCalls.push(req);
+          },
+          toggleConversation: (id) => toggleConvCalls.push(id)
+        }
+      },
+      self: null,
+      top: null,
+      fetch: mockFetch
+    };
+    sandbox.location = loc;
+    sandbox.window.self = sandbox.window;
+    sandbox.window.top = sandbox.window;
+    sandbox.globalThis = sandbox;
+
+    runInNewContext(appSource, sandbox, { filename: `dashboard-aux-bridge-${pathname}.js` });
+    await new Promise((r) => setTimeout(r, 25));
+
+    return {
+      trigState,
+      helloCalls,
+      toggleAuxCalls,
+      ignoredHiddenToggleAuxCalls,
+      toggleConvCalls,
+      parentMessages,
+      setIoVisible: (visible) => {
+        currentIoVisible = Boolean(visible);
+        for (const cb of ioCallbacks) {
+          cb([{
+            isIntersecting: currentIoVisible,
+            intersectionRect: currentIoVisible ? { width: 340, height: 680 } : { width: 0, height: 0 }
+          }]);
+        }
+      },
+      pushTrigger: (patch) => {
+        Object.assign(trigState, patch);
+        const snap = { ...trigState };
+        for (const r of longPollWaiters.splice(0)) r(snap);
+      }
+    };
+  };
+
+  // Case 1: Hidden Aux Pane iframe expands pane via toggleConversation, then visible peer switches tab via toggleAuxPane
+  const sc1 = await runScenario({
+    pathname: '/',
+    initialTrigger: { seq: 9, at: Date.now() - 10000, ackSeq: 9, openingSeq: 9, switchedSeq: 9 }
+  });
+  sc1.setIoVisible(false);
+  sc1.pushTrigger({
+    seq: 10,
+    targetPlugin: 'agy-finder',
+    uri: 'sidecar://agy-finder/tree/',
+    action: 'toggle',
+    convId: convA,
+    at: Date.now(),
+    openingSeq: 0,
+    switchedSeq: 0
+  });
+  await new Promise((r) => setTimeout(r, 45));
+  assert(
+    sc1.trigState.openingSeq === 10 &&
+      sc1.trigState.switchedSeq === 0 &&
+      sc1.toggleConvCalls.length === 1 &&
+      sc1.toggleConvCalls[0] === convA &&
+      sc1.ignoredHiddenToggleAuxCalls.length === 0 &&
+      sc1.toggleAuxCalls.length === 0 &&
+      !sc1.parentMessages.some((m) => m?.type === 'sidecar-key-event'),
+    `隐藏态必须先调用 toggleConversation 展开侧栏且不得在隐藏态调用 toggleAuxPane：conv=${JSON.stringify(sc1.toggleConvCalls)}, hiddenAux=${JSON.stringify(sc1.ignoredHiddenToggleAuxCalls)}, trig=${JSON.stringify(sc1.trigState)}`
+  );
+  sc1.setIoVisible(true);
+  await new Promise((r) => setTimeout(r, 40));
+  assert(
+    sc1.trigState.switchedSeq === 10 &&
+      sc1.trigState.ackSeq === 10 &&
+      sc1.ignoredHiddenToggleAuxCalls.length === 0 &&
+      sc1.toggleAuxCalls.length === 1 &&
+      sc1.toggleAuxCalls[0]?.tabType === 'sidecarView' &&
+      sc1.toggleAuxCalls[0]?.uri === 'sidecar://agy-finder/tree/',
+    `侧栏展开可见后对端句柄应在 visible===true 时切换至目标 sidecarView：aux=${JSON.stringify(sc1.toggleAuxCalls)}, trig=${JSON.stringify(sc1.trigState)}`
+  );
+
+  // Case 2: Newly cold-mounted iframe acks without closing, while already-visible iframe toggles closed on next hotkey
+  const sc2 = await runScenario({
+    pathname: '/',
+    initialTrigger: {
+      seq: 11,
+      targetPlugin: 'context-viewer',
+      uri: 'sidecar://context-viewer/dashboard/',
+      action: 'toggle',
+      convId: convA,
+      at: Date.now() - 25,
+      openingSeq: 11,
+      ackSeq: 10,
+      switchedSeq: 0
+    }
+  });
+  sc2.setIoVisible(true);
+  await new Promise((r) => setTimeout(r, 35));
+  assert(
+    sc2.trigState.ackSeq === 11 &&
+      sc2.ignoredHiddenToggleAuxCalls.length === 0 &&
+      !sc2.parentMessages.some((m) => m?.type === 'sidecar-key-event'),
+    `冷启动刚显现的 Aux 子帧应仅 ack=11 且不得误发关闭键：trig=${JSON.stringify(sc2.trigState)}, msgs=${JSON.stringify(sc2.parentMessages)}`
+  );
+  await new Promise((r) => setTimeout(r, 55));
+  sc2.pushTrigger({
+    seq: 12,
+    targetPlugin: 'context-viewer',
+    uri: 'sidecar://context-viewer/dashboard/',
+    action: 'toggle',
+    convId: convA,
+    at: Date.now(),
+    openingSeq: 0,
+    switchedSeq: 0
+  });
+  await new Promise((r) => setTimeout(r, 35));
+  assert(
+    sc2.trigState.ackSeq === 12 &&
+      sc2.parentMessages.some((m) => m?.type === 'sidecar-key-event' && m?.payload?.key === 'b' && m?.payload?.shiftKey === true),
+    `已在屏 Aux 子帧再次收到快捷键应 ack=12 并发送关闭键事件：trig=${JSON.stringify(sc2.trigState)}, msgs=${JSON.stringify(sc2.parentMessages)}`
+  );
+
+  // Case 3: Left /sidebar entrypoint relays triggers via toggleConversation without reporting hello or posting close shortcut
+  const sc3 = await runScenario({
+    pathname: '/sidebar',
+    initialTrigger: { seq: 12, at: Date.now() - 10000, ackSeq: 12, openingSeq: 12, switchedSeq: 12 }
+  });
+  sc3.pushTrigger({
+    seq: 13,
+    targetPlugin: 'agy-finder',
+    uri: 'sidecar://agy-finder/tree/',
+    action: 'toggle',
+    convId: convA,
+    at: Date.now(),
+    openingSeq: 0,
+    switchedSeq: 0
+  });
+  await new Promise((r) => setTimeout(r, 50));
+  assert(
+    sc3.helloCalls.length === 0 &&
+      !sc3.parentMessages.some((m) => m?.type === 'sidecar-key-event') &&
+      sc3.trigState.openingSeq === 13 &&
+      sc3.trigState.switchedSeq === 0 &&
+      sc3.ignoredHiddenToggleAuxCalls.length === 0 &&
+      sc3.toggleConvCalls.length === 1 &&
+      sc3.toggleConvCalls[0] === convA,
+    `/sidebar 兜底转发应不上报 hello、不误发关闭键并通过 toggleConversation 展开目标对话：hello=${JSON.stringify(sc3.helloCalls)}, conv=${JSON.stringify(sc3.toggleConvCalls)}, hiddenAux=${JSON.stringify(sc3.ignoredHiddenToggleAuxCalls)}, trig=${JSON.stringify(sc3.trigState)}`
   );
 }
 

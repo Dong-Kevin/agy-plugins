@@ -39,6 +39,7 @@ import { fileURLToPath } from 'node:url';
 import { CONV_ID_RE, getConversationMentions } from './mentions.mjs';
 import {
   listDirectoryEntries,
+  openInDefaultBrowser,
   readTextPreview,
   resolveTargetPath,
   revealInOsFileManager,
@@ -1970,6 +1971,16 @@ export async function controlDrawer(options = {}, deps = {}) {
       await new Promise((r) => setTimeout(r, 45));
       latest = readAuxPaneTrigger();
     }
+    if (
+      Number(latest.ackSeq || 0) < Number(trigger.seq || 1) &&
+      Number(latest.openingSeq || 0) >= Number(trigger.seq || 1)
+    ) {
+      const mountDeadline = Date.now() + 450;
+      while (Date.now() < mountDeadline && Number(latest.ackSeq || 0) < Number(trigger.seq || 1)) {
+        await new Promise((r) => setTimeout(r, 45));
+        latest = readAuxPaneTrigger();
+      }
+    }
     const acked = Number(latest.ackSeq || 0) >= Number(trigger.seq || 1);
     const opened = Number(latest.openingSeq || 0) >= Number(trigger.seq || 1);
     const settings = getShortcutSettings(platform);
@@ -2529,6 +2540,9 @@ async function dispatchDrawerRpc(rawPath, method, rawBody, stateObj, hooks = {})
   }
   if (u.pathname === '/api/reveal-os' && method === 'POST') {
     return revealInOsFileManager(String(data.path || ''), roots);
+  }
+  if (u.pathname === '/api/open-browser' && method === 'POST') {
+    return openInDefaultBrowser(String(data.path || ''), roots);
   }
   if (u.pathname === '/api/shortcut' && method === 'GET') {
     const settings = getShortcutSettings();

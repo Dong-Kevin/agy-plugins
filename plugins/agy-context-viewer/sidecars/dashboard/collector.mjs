@@ -73,6 +73,17 @@ const convGenMetaCache = new Map();     // convId -> { at, generatorList, callsB
 const lsGenMissCache = new Map();       // convId -> { lsKey, size, mtimeMs, at }
 const recentConvMetaCache = new Map();  // logPath -> { key, title, lastContextTokens, turnsCount }
 let genStepModelsCache = { path: '', mtimeMs: -1, size: -1, data: null };
+let hostDiskCacheMeta = { path: '', mtimeMs: -1, size: -1, data: null };
+let activeConvGenDiskCache = { path: '', mtimeMs: -1, size: -1, data: null };
+let inFlightHostStatus = null;
+const inFlightGenMeta = new Map();
+const observedActivityByRoot = new Map();
+const HOST_STATUS_DISK_CACHE_VERSION = 1;
+const HOST_STATUS_CACHE_MAX_ENTRIES = 4;
+const ACTIVE_CONV_GEN_DISK_CACHE_VERSION = 1;
+const ACTIVE_CONV_GEN_CACHE_MAX_CONVS = 6;
+const CONV_META_SETTLE_AGE_MS = 180_000;
+const CONV_META_RETRY_DELAYS_MS = [4000, 8000, 18000, 60000];
 let cachedHostStatus = {
   at: 0,
   lsKey: '',
@@ -513,6 +524,39 @@ function hashAccountKey(email) {
   return 'acct_' + createHash('sha256').update(email.trim().toLowerCase()).digest('hex').slice(0, 12);
 }
 
+function hashLsKey(lsKey) {
+  if (!lsKey || typeof lsKey !== 'string') return '';
+  return 'ls_' + createHash('sha256').update(lsKey).digest('hex').slice(0, 16);
+}
+
+function getActivityRootKey() {
+  return `${findAppDataDir()}|${findCliDataDir()}`;
+}
+
+function noteObservedTranscriptActivity(mtimeMs, nowMs = Date.now()) {
+  const mt = Number(mtimeMs || 0);
+  if (!Number.isFinite(mt) || mt <= 0) return;
+  const rootKey = getActivityRootKey();
+  const prev = observedActivityByRoot.get(rootKey);
+  if (!prev) {
+    if (observedActivityByRoot.size > 32) {
+      const firstK = observedActivityByRoot.keys().next().value;
+      if (firstK) observedActivityByRoot.delete(firstK);
+    }
+    observedActivityByRoot.set(rootKey, { mtimeMs: mt, activityMs: mt });
+    return;
+  }
+  if (mt > prev.mtimeMs) {
+    prev.mtimeMs = mt;
+    prev.activityMs = Math.max(Number(nowMs) || Date.now(), mt);
+  }
+}
+
+function getObservedActivityMs() {
+  const entry = observedActivityByRoot.get(getActivityRootKey());
+  return entry ? Math.max(entry.activityMs || 0, entry.mtimeMs || 0) : 0;
+}
+
 // ---------------------------------------------------------------------------
 // Official Language Server Connect RPC (uses env vars injected by Sidecar SDK)
 // ---------------------------------------------------------------------------
@@ -621,12 +665,140 @@ function toStableQuotaState(quotaStatus = {}) {
   };
 }
 
-async function getHostUserStatus(force = false) {
+function getHostStatusCachePath() {
+  return join(getPluginStateDir(), 'host_status_cache_v1.json');
+}
+
+function sanitizeModelConfigsForDiskCache(modelConfigs = []) {
+  if (!Array.isArray(modelConfigs)) return [];
+  return modelConfigs
+    .filter((cfg) => cfg && typeof cfg === 'object')
+    .map((cfg) => ({
+      ...(cfg.label ? { label: cfg.label } : {}),
+      ...(cfg.modelId ? { modelId: cfg.modelId } : {}),
+      ...(cfg.modelOrAlias ? { modelOrAlias: cfg.modelOrAlias } : {}),
+      ...(cfg.quotaPoolId ? { quotaPoolId: cfg.quotaPoolId } : {}),
+      ...(cfg.quotaInfo ? { quotaInfo: cfg.quotaInfo } : {})
+    }));
+}
+
+function sanitizeSummaryGroupsForDiskCache(groups = []) {
+  if (!Array.isArray(groups)) return [];
+  return groups
+    .filter((g) => g && typeof g === 'object')
+    .map((g) => ({
+      ...(g.groupId ? { groupId: g.groupId } : {}),
+      ...(g.poolId ? { poolId: g.poolId } : {}),
+      ...(g.id ? { id: g.id } : {}),
+      ...(g.displayName ? { displayName: g.displayName } : {}),
+      ...(g.title ? { title: g.title } : {}),
+      ...(g.name ? { name: g.name } : {}),
+      ...(Array.isArray(g.modelIds) ? { modelIds: g.modelIds } : {}),
+      ...(Array.isArray(g.models) ? { models: g.models } : {}),
+      ...(Array.isArray(g.buckets) ? { buckets: g.buckets } : {})
+    }));
+}
+
+function loadHostStatusDiskCache(targetPath = getHostStatusCachePath()) {
+  const p = targetPath || getHostStatusCachePath();
+  let st = null;
+  try {
+    if (existsSync(p)) st = statSync(p);
+  } catch {}
+  const stMtime = st ? st.mtimeMs : -1;
+  const stSize = st ? st.size : -1;
+  if (
+    hostDiskCacheMeta.path === p &&
+    hostDiskCacheMeta.mtimeMs === stMtime &&
+    hostDiskCacheMeta.size === stSize &&
+    hostDiskCacheMeta.data
+  ) {
+    return hostDiskCacheMeta.data;
+  }
+  const raw = readJsonSafe(p, null);
+  const entries = {};
+  if (raw?.version === HOST_STATUS_DISK_CACHE_VERSION && raw.entries && typeof raw.entries === 'object') {
+    for (const [k, v] of Object.entries(raw.entries)) {
+      if (/^ls_[0-9a-f]{16}$/i.test(k) && v && typeof v === 'object' && v.plan && v.quotaStatus) {
+        entries[k] = v;
+      }
+    }
+  }
+  const data = { version: HOST_STATUS_DISK_CACHE_VERSION, entries };
+  hostDiskCacheMeta = { path: p, mtimeMs: stMtime, size: stSize, data };
+  return data;
+}
+
+function saveHostStatusDiskEntry(lsKeyHash, entry, targetPath = getHostStatusCachePath()) {
+  if (!lsKeyHash || !entry) return;
+  try {
+    const data = loadHostStatusDiskCache(targetPath);
+    const nextEntries = { ...data.entries, [lsKeyHash]: entry };
+    const sorted = Object.entries(nextEntries)
+      .sort((a, b) => Number(b[1]?.at || 0) - Number(a[1]?.at || 0))
+      .slice(0, HOST_STATUS_CACHE_MAX_ENTRIES);
+    const payload = {
+      version: HOST_STATUS_DISK_CACHE_VERSION,
+      entries: Object.fromEntries(sorted)
+    };
+    writeJsonAtomic(targetPath, payload);
+    const st = statSync(targetPath);
+    hostDiskCacheMeta = { path: targetPath, mtimeMs: st.mtimeMs, size: st.size, data: payload };
+  } catch {}
+}
+
+function hasCrossedQuotaResetBoundary(quotas, cachedAtMs, nowMs) {
+  if (!Array.isArray(quotas) || !quotas.length || !cachedAtMs) return false;
+  for (const pool of quotas) {
+    if (!pool || typeof pool !== 'object') continue;
+    for (const rawIso of [pool.resetTime, pool.fiveHour?.resetTime, pool.weekly?.resetTime]) {
+      if (!rawIso || typeof rawIso !== 'string') continue;
+      const ms = Date.parse(rawIso);
+      if (Number.isFinite(ms) && ms > cachedAtMs && ms <= nowMs) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function computeHostStatusTtlMs(options = {}, entry = null, nowMs = Date.now()) {
+  const stateStr = entry?.quotaStatus?.state || '';
+  const background = Boolean(options.background);
+  if (stateStr === 'error' || stateStr === 'stale') {
+    return background ? 180_000 : 60_000;
+  }
+  const menubarMode = String(options.menubarMode || 'context');
+  const activityMs = Number(options.latestActivityMs || options.latestTranscriptMtimeMs || getObservedActivityMs() || 0);
+  const hasActivityTs = activityMs > 0;
+  const idleAgeMs = hasActivityTs ? Math.max(0, nowMs - activityMs) : 0;
+
+  if (background) {
+    if (hasActivityTs && idleAgeMs >= 600_000) {
+      return 1_800_000;
+    }
+    if (hasActivityTs && idleAgeMs >= 120_000) {
+      return menubarMode === 'quota' ? 300_000 : 600_000;
+    }
+    return menubarMode === 'quota' ? 60_000 : 180_000;
+  }
+
+  if (hasActivityTs && idleAgeMs >= 600_000) {
+    return 600_000;
+  }
+  if (hasActivityTs && idleAgeMs >= 120_000) {
+    return 120_000;
+  }
+  return 30_000;
+}
+
+async function getHostUserStatus(force = false, options = {}) {
   const lsAddr = process.env.ANTIGRAVITY_LS_ADDRESS;
   const csrf = process.env.ANTIGRAVITY_CSRF_TOKEN;
+  const nowMs = Number(options.nowMs) || Date.now();
   if (!lsAddr || !csrf) {
     return {
-      at: Date.now(),
+      at: nowMs,
       lsKey: '',
       sig: 'no-ls',
       raw: null,
@@ -642,133 +814,226 @@ async function getHostUserStatus(force = false) {
     };
   }
   const lsKey = `${lsAddr}|${csrf}`;
-  if (!force && cachedHostStatus.at && cachedHostStatus.lsKey === lsKey && Date.now() - cachedHostStatus.at < 30_000) {
-    return cachedHostStatus;
+  const lsKeyHash = hashLsKey(lsKey);
+
+  if (
+    !force &&
+    cachedHostStatus.at &&
+    cachedHostStatus.lsKey === lsKey &&
+    !hasCrossedQuotaResetBoundary(cachedHostStatus.quotas, cachedHostStatus.at, nowMs)
+  ) {
+    const ttlMs = computeHostStatusTtlMs(options, cachedHostStatus, nowMs);
+    if ((nowMs - cachedHostStatus.at) < ttlMs) {
+      return cachedHostStatus;
+    }
   }
-  const [res, quotaSummaryRes] = await Promise.all([
-    callLanguageServer('GetUserStatus', {}),
-    callLanguageServer('RetrieveUserQuotaSummary', {})
-  ]);
-  const cachedGood = lastGoodHostData?.lsKey === lsKey ? lastGoodHostData : null;
-  if (!res) {
-    if (cachedGood) {
-      const quotaStatus = makeQuotaStatus('stale', {
-        stale: true,
-        summaryStale: true,
-        source: 'cache',
-        lastSuccessAt: cachedGood.fetchedAt,
-        summaryLastSuccessAt: cachedGood.summaryFetchedAt,
-        reason: '语言服务连接失败，当前展示上次成功同步数据'
-      });
-      const { updatedAt: _planUpdatedAt, ...stablePlan } = cachedGood.plan || {};
-      const sig = computeContentEtag('host', {
-        plan: stablePlan,
-        quotas: cachedGood.quotas,
-        dynamicModelMap: cachedGood.dynamicModelMap,
-        quotaState: toStableQuotaState(quotaStatus)
-      });
+
+  const diskCache = loadHostStatusDiskCache();
+  const diskEntry = diskCache?.entries?.[lsKeyHash] || null;
+  const diskGoodFallback = (
+    diskEntry &&
+    (diskEntry.quotaStatus?.state === 'live' || diskEntry.quotaStatus?.state === 'degraded') &&
+    diskEntry.fetchedAt
+  )
+    ? {
+        lsKey,
+        fetchedAt: diskEntry.fetchedAt,
+        summaryFetchedAt: diskEntry.summaryFetchedAt || null,
+        accountKey: diskEntry.plan?.accountKey || 'default',
+        plan: diskEntry.plan,
+        quotas: Array.isArray(diskEntry.quotas) ? diskEntry.quotas : [],
+        modelConfigs: Array.isArray(diskEntry.modelConfigs) ? diskEntry.modelConfigs : [],
+        quotaSummaryGroups: Array.isArray(diskEntry.quotaSummaryGroups) ? diskEntry.quotaSummaryGroups : [],
+        dynamicModelMap: diskEntry.dynamicModelMap || {}
+      }
+    : null;
+
+  if (
+    !force &&
+    diskEntry &&
+    diskEntry.at &&
+    !hasCrossedQuotaResetBoundary(diskEntry.quotas, diskEntry.at, nowMs)
+  ) {
+    const diskTtlMs = computeHostStatusTtlMs(options, diskEntry, nowMs);
+    if ((nowMs - Number(diskEntry.at)) < diskTtlMs) {
+      if (diskGoodFallback) {
+        lastGoodHostData = diskGoodFallback;
+      }
       cachedHostStatus = {
-        at: Date.now(),
+        at: Number(diskEntry.at),
+        lsKey,
+        sig: diskEntry.sig || 'host:disk',
+        raw: null,
+        plan: diskEntry.plan,
+        quotas: Array.isArray(diskEntry.quotas) ? diskEntry.quotas : [],
+        modelConfigs: Array.isArray(diskEntry.modelConfigs) ? diskEntry.modelConfigs : [],
+        quotaSummaryGroups: Array.isArray(diskEntry.quotaSummaryGroups) ? diskEntry.quotaSummaryGroups : [],
+        dynamicModelMap: diskEntry.dynamicModelMap || {},
+        quotaStatus: diskEntry.quotaStatus
+      };
+      return cachedHostStatus;
+    }
+  }
+
+  if (!force && inFlightHostStatus && !inFlightHostStatus.force && inFlightHostStatus.lsKey === lsKey) {
+    return inFlightHostStatus.promise;
+  }
+
+  const runFetch = (async () => {
+    const [res, quotaSummaryRes] = await Promise.all([
+      callLanguageServer('GetUserStatus', {}),
+      callLanguageServer('RetrieveUserQuotaSummary', {})
+    ]);
+    const fetchedAtMs = Number(options.nowMs) || Date.now();
+    const cachedGood = (lastGoodHostData?.lsKey === lsKey ? lastGoodHostData : null) || diskGoodFallback;
+    if (!res) {
+      if (cachedGood) {
+        const quotaStatus = makeQuotaStatus('stale', {
+          stale: true,
+          summaryStale: true,
+          source: 'cache',
+          lastSuccessAt: cachedGood.fetchedAt,
+          summaryLastSuccessAt: cachedGood.summaryFetchedAt,
+          reason: '语言服务连接失败，当前展示上次成功同步数据'
+        });
+        const { updatedAt: _planUpdatedAt, ...stablePlan } = cachedGood.plan || {};
+        const sig = computeContentEtag('host', {
+          plan: stablePlan,
+          quotas: cachedGood.quotas,
+          dynamicModelMap: cachedGood.dynamicModelMap,
+          quotaState: toStableQuotaState(quotaStatus)
+        });
+        cachedHostStatus = {
+          at: fetchedAtMs,
+          lsKey,
+          sig,
+          raw: null,
+          plan: cachedGood.plan,
+          quotas: cachedGood.quotas,
+          modelConfigs: cachedGood.modelConfigs,
+          quotaSummaryGroups: cachedGood.quotaSummaryGroups,
+          dynamicModelMap: cachedGood.dynamicModelMap,
+          quotaStatus
+        };
+        return cachedHostStatus;
+      }
+      const plan = parseUserPlanStatus(null);
+      const quotaStatus = makeQuotaStatus('error', {
+        stale: false,
+        summaryStale: false,
+        source: 'none',
+        lastSuccessAt: null,
+        summaryLastSuccessAt: null,
+        reason: '语言服务请求失败，暂未获取到配额数据'
+      });
+      const sig = computeContentEtag('host', { quotaState: toStableQuotaState(quotaStatus) });
+      cachedHostStatus = {
+        at: fetchedAtMs,
         lsKey,
         sig,
         raw: null,
-        plan: cachedGood.plan,
-        quotas: cachedGood.quotas,
-        modelConfigs: cachedGood.modelConfigs,
-        quotaSummaryGroups: cachedGood.quotaSummaryGroups,
-        dynamicModelMap: cachedGood.dynamicModelMap,
+        plan,
+        quotas: [],
+        modelConfigs: [],
+        quotaSummaryGroups: [],
+        dynamicModelMap: {},
         quotaStatus
       };
       return cachedHostStatus;
     }
-    const plan = parseUserPlanStatus(null);
-    const quotaStatus = makeQuotaStatus('error', {
-      stale: false,
-      summaryStale: false,
-      source: 'none',
-      lastSuccessAt: null,
-      summaryLastSuccessAt: null,
-      reason: '语言服务请求失败，暂未获取到配额数据'
+
+    const nowIso = new Date(fetchedAtMs).toISOString();
+    const plan = parseUserPlanStatus(res);
+    const accountHash = hashAccountKey(res?.userStatus?.email || '');
+    plan.accountKey = accountHash;
+    const modelConfigs = sanitizeModelConfigsForDiskCache(res?.userStatus?.cascadeModelConfigData?.clientModelConfigs || []);
+    const summaryOk = quotaSummaryRes !== null && typeof quotaSummaryRes === 'object';
+    const quotaSummaryGroups = summaryOk
+      ? sanitizeSummaryGroupsForDiskCache(quotaSummaryRes?.response?.groups || quotaSummaryRes?.groups || [])
+      : [];
+    const dynamicModelMap = {};
+    for (const cfg of modelConfigs) {
+      const mid = String(cfg.modelOrAlias?.model || cfg.modelId || '').trim().toLowerCase();
+      const norm = normalizeModelId(cfg.label || '') || normalizeModelId(mid);
+      if (mid && norm) dynamicModelMap[mid] = norm;
+    }
+    const quotas = groupModelQuotas(modelConfigs, quotaSummaryGroups);
+    const summaryFetchedAt = summaryOk ? nowIso : (cachedGood?.summaryFetchedAt || null);
+    const quotaStatus = summaryOk
+      ? makeQuotaStatus('live', {
+          stale: false,
+          summaryStale: false,
+          source: 'live',
+          lastSuccessAt: nowIso,
+          summaryLastSuccessAt: nowIso,
+          reason: ''
+        })
+      : makeQuotaStatus('degraded', {
+          stale: false,
+          summaryStale: true,
+          source: 'live',
+          lastSuccessAt: nowIso,
+          summaryLastSuccessAt: summaryFetchedAt,
+          reason: '多窗口配额摘要暂不可用，当前仅展示基础配额信息'
+        });
+    lastGoodHostData = {
+      lsKey,
+      fetchedAt: nowIso,
+      summaryFetchedAt,
+      accountKey: accountHash,
+      plan,
+      quotas,
+      modelConfigs,
+      quotaSummaryGroups,
+      dynamicModelMap
+    };
+    const { updatedAt: _planUpdatedAt, ...stablePlan } = plan;
+    const sig = computeContentEtag('host', {
+      plan: stablePlan,
+      quotas,
+      dynamicModelMap,
+      quotaState: toStableQuotaState(quotaStatus)
     });
-    const sig = computeContentEtag('host', { quotaState: toStableQuotaState(quotaStatus) });
     cachedHostStatus = {
-      at: Date.now(),
+      at: fetchedAtMs,
       lsKey,
       sig,
       raw: null,
       plan,
-      quotas: [],
-      modelConfigs: [],
-      quotaSummaryGroups: [],
-      dynamicModelMap: {},
+      quotas,
+      modelConfigs,
+      quotaSummaryGroups,
+      dynamicModelMap,
       quotaStatus
     };
+    saveHostStatusDiskEntry(lsKeyHash, {
+      at: fetchedAtMs,
+      sig,
+      fetchedAt: nowIso,
+      summaryFetchedAt,
+      plan,
+      quotas,
+      modelConfigs,
+      quotaSummaryGroups,
+      dynamicModelMap,
+      quotaStatus
+    });
     return cachedHostStatus;
+  })();
+
+  if (!force) {
+    const flightEntry = { lsKey, force: false, promise: runFetch };
+    inFlightHostStatus = flightEntry;
+    try {
+      return await runFetch;
+    } finally {
+      if (inFlightHostStatus === flightEntry) {
+        inFlightHostStatus = null;
+      }
+    }
   }
 
-  const nowIso = new Date().toISOString();
-  const plan = parseUserPlanStatus(res);
-  const accountHash = hashAccountKey(res?.userStatus?.email || '');
-  plan.accountKey = accountHash;
-  const modelConfigs = res?.userStatus?.cascadeModelConfigData?.clientModelConfigs || [];
-  const summaryOk = quotaSummaryRes !== null && typeof quotaSummaryRes === 'object';
-  const quotaSummaryGroups = summaryOk ? (quotaSummaryRes?.response?.groups || quotaSummaryRes?.groups || []) : [];
-  const dynamicModelMap = {};
-  for (const cfg of modelConfigs) {
-    const mid = String(cfg.modelOrAlias?.model || cfg.modelId || '').trim().toLowerCase();
-    const norm = normalizeModelId(cfg.label || '') || normalizeModelId(mid);
-    if (mid && norm) dynamicModelMap[mid] = norm;
-  }
-  const quotas = groupModelQuotas(modelConfigs, quotaSummaryGroups);
-  const summaryFetchedAt = summaryOk ? nowIso : (cachedGood?.summaryFetchedAt || null);
-  const quotaStatus = summaryOk
-    ? makeQuotaStatus('live', {
-        stale: false,
-        summaryStale: false,
-        source: 'live',
-        lastSuccessAt: nowIso,
-        summaryLastSuccessAt: nowIso,
-        reason: ''
-      })
-    : makeQuotaStatus('degraded', {
-        stale: false,
-        summaryStale: true,
-        source: 'live',
-        lastSuccessAt: nowIso,
-        summaryLastSuccessAt: summaryFetchedAt,
-        reason: '多窗口配额摘要暂不可用，当前仅展示基础配额信息'
-      });
-  lastGoodHostData = {
-    lsKey,
-    fetchedAt: nowIso,
-    summaryFetchedAt,
-    accountKey: accountHash,
-    plan,
-    quotas,
-    modelConfigs,
-    quotaSummaryGroups,
-    dynamicModelMap
-  };
-  const { updatedAt: _planUpdatedAt, ...stablePlan } = plan;
-  const sig = computeContentEtag('host', {
-    plan: stablePlan,
-    quotas,
-    dynamicModelMap,
-    quotaState: toStableQuotaState(quotaStatus)
-  });
-  cachedHostStatus = {
-    at: Date.now(),
-    lsKey,
-    sig,
-    raw: null,
-    plan,
-    quotas,
-    modelConfigs,
-    quotaSummaryGroups,
-    dynamicModelMap,
-    quotaStatus
-  };
-  return cachedHostStatus;
+  return runFetch;
 }
 
 // ---------------------------------------------------------------------------
@@ -798,8 +1063,8 @@ function loadRawSettings() {
   return { version: '1.0.0', lastAccountKey: 'default', accounts: {}, uiPreferences: {} };
 }
 
-export async function getSettings() {
-  const host = await getHostUserStatus(false);
+export async function getSettings(options = {}) {
+  const host = await getHostUserStatus(false, { background: true, ...options });
   const settings = loadRawSettings();
   const acctKey = host.plan?.accountKey || settings.lastAccountKey || 'default';
   const customPlan = settings.accounts[acctKey] || settings.accounts.default || null;
@@ -2005,7 +2270,7 @@ export function syncSidebarManifestFromSettings() {
 }
 
 export async function saveSettings(payload = {}) {
-  const host = await getHostUserStatus(false);
+  const host = await getHostUserStatus(false, { background: true });
   const settings = loadRawSettings();
   const acctKey = host.plan?.accountKey || settings.lastAccountKey || 'default';
 
@@ -2326,13 +2591,14 @@ function readConversationAnnotationsMap() {
   return map;
 }
 
-export function listRecentConversations(limit = 24) {
+export function listRecentConversations(limit = 24, nowMs = Date.now()) {
   const annMap = readConversationAnnotationsMap();
   const roots = [
     { dir: join(findAppDataDir(), 'brain'), source: 'desktop' },
     { dir: join(findCliDataDir(), 'brain'), source: 'cli' }
   ];
   const entries = [];
+  let maxMtimeMs = 0;
   for (const root of roots) {
     if (!existsSync(root.dir)) continue;
     try {
@@ -2345,6 +2611,7 @@ export function listRecentConversations(limit = 24) {
         try {
           const st = statSync(logPath);
           if (st.size <= 0) continue;
+          if (st.mtimeMs > maxMtimeMs) maxMtimeMs = st.mtimeMs;
           const ann = annMap.get(dirent.name) || null;
           entries.push({
             id: dirent.name,
@@ -2360,6 +2627,9 @@ export function listRecentConversations(limit = 24) {
         } catch {}
       }
     } catch {}
+  }
+  if (maxMtimeMs > 0) {
+    noteObservedTranscriptActivity(maxMtimeMs, nowMs);
   }
 
   const enriched = entries.map((item) => {
@@ -2499,41 +2769,143 @@ function resolveActiveConversationId(recentConversations) {
 // ---------------------------------------------------------------------------
 
 async function fetchGeneratorMetadataForConv(convId, force = false, options = {}) {
+  const lsAddr = process.env.ANTIGRAVITY_LS_ADDRESS || '';
+  const csrf = process.env.ANTIGRAVITY_CSRF_TOKEN || '';
+  const lsKey = (lsAddr && csrf) ? `${lsAddr}|${csrf}` : '';
+  if (!lsKey) return null;
+
+  const nowMs = Number(options.nowMs) || Date.now();
+  const bypassMemTtl = Boolean(options.bypassMemTtl);
   const cached = convGenMetaCache.get(convId);
-  if (!force && cached && Date.now() - cached.at < 2500) {
+  if (!force && !bypassMemTtl && cached && cached.lsKey === lsKey && (nowMs - cached.at) < 15_000) {
     return cached;
   }
-  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 4500;
-  const res = await callLanguageServer(
-    'GetCascadeTrajectoryGeneratorMetadata',
-    {
-      cascadeId: convId,
-      generatorMetadataOffset: 0,
-      includeMessages: false
-    },
-    timeoutMs,
-    {
-      signal: options.signal || null,
-      unrefSocket: Boolean(options.unrefSocket)
-    }
-  );
-  if (res === null) {
-    return cached ? { ...cached, fromFallbackCache: true, rpcFailed: true } : null;
-  }
-  if (!Array.isArray(res.generatorMetadata)) {
-    return cached
-      ? { ...cached, fromFallbackCache: true, rpcFailed: false }
-      : { at: Date.now(), generatorList: [], callsByStep: new Map(), emptyFromHost: true, rpcFailed: false };
-  }
-  if (res.generatorMetadata.length === 0) {
-    return cached?.callsByStep?.size
-      ? { ...cached, fromFallbackCache: true, rpcFailed: false }
-      : { at: Date.now(), generatorList: [], callsByStep: new Map(), emptyFromHost: true, rpcFailed: false };
+
+  const flightKey = `${lsKey}|${convId}`;
+  const canCoalesce = !force && !options.signal && !bypassMemTtl;
+  if (canCoalesce && inFlightGenMeta.has(flightKey)) {
+    return inFlightGenMeta.get(flightKey);
   }
 
-  const callsByStep = new Map(cached?.callsByStep || []);
-  const generatorList = res.generatorMetadata;
+  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 4500;
+  const run = (async () => {
+    const res = await callLanguageServer(
+      'GetCascadeTrajectoryGeneratorMetadata',
+      {
+        cascadeId: convId,
+        generatorMetadataOffset: 0,
+        includeMessages: false
+      },
+      timeoutMs,
+      {
+        signal: options.signal || null,
+        unrefSocket: Boolean(options.unrefSocket)
+      }
+    );
+    if (res === null) {
+      return cached?.lsKey === lsKey ? { ...cached, fromFallbackCache: true, rpcFailed: true } : null;
+    }
+    if (!Array.isArray(res.generatorMetadata)) {
+      return cached?.lsKey === lsKey
+        ? { ...cached, fromFallbackCache: true, rpcFailed: false }
+        : { at: nowMs, lsKey, generatorList: [], callsByStep: new Map(), emptyFromHost: true, rpcFailed: false };
+    }
+    if (res.generatorMetadata.length === 0) {
+      return cached?.lsKey === lsKey && cached?.callsByStep?.size
+        ? { ...cached, fromFallbackCache: true, rpcFailed: false }
+        : { at: nowMs, lsKey, generatorList: [], callsByStep: new Map(), emptyFromHost: true, rpcFailed: false };
+    }
+
+    const callsByStep = new Map(cached?.lsKey === lsKey ? (cached?.callsByStep || []) : []);
+    const generatorList = res.generatorMetadata;
+    for (const entry of generatorList) {
+      const hasModel = Boolean(extractStepModel(null, entry, ''));
+      const indices = entry.stepIndices || (entry.stepIndex != null ? [entry.stepIndex] : []);
+      for (const idx of indices) {
+        const stepNum = Number(idx);
+        if (!Number.isFinite(stepNum)) continue;
+        if (hasModel || !callsByStep.has(stepNum)) {
+          callsByStep.set(stepNum, entry);
+        }
+      }
+    }
+    const value = { at: nowMs, lsKey, generatorList, callsByStep };
+    if (callsByStep.size > 0) {
+      convGenMetaCache.set(convId, value);
+    }
+    return { ...value, rpcFailed: false };
+  })();
+
+  if (canCoalesce) {
+    inFlightGenMeta.set(flightKey, run);
+  }
+  try {
+    return await run;
+  } finally {
+    if (inFlightGenMeta.get(flightKey) === run) {
+      inFlightGenMeta.delete(flightKey);
+    }
+  }
+}
+
+function getActiveConvGenCachePath() {
+  return join(getPluginStateDir(), 'active_conv_gen_cache_v1.json');
+}
+
+function slimGeneratorListForCache(generatorList = []) {
+  if (!Array.isArray(generatorList) || !generatorList.length) return [];
+  const lastIdx = generatorList.length - 1;
+  return generatorList.map((entry, idx) => {
+    if (!entry || typeof entry !== 'object') return entry;
+    const cm = entry.chatModel && typeof entry.chatModel === 'object' ? entry.chatModel : null;
+    if (!cm) {
+      return {
+        ...(entry.stepIndices ? { stepIndices: entry.stepIndices } : {}),
+        ...(entry.stepIndex != null ? { stepIndex: entry.stepIndex } : {}),
+        ...(entry.model ? { model: entry.model } : {}),
+        ...(entry.modelDisplayName ? { modelDisplayName: entry.modelDisplayName } : {}),
+        ...(entry.responseModel ? { responseModel: entry.responseModel } : {})
+      };
+    }
+    const ctxMeta = cm.chatStartMetadata?.contextWindowMetadata;
+    const slimCtxMeta = ctxMeta ? {
+      maxContextTokens: ctxMeta.maxContextTokens,
+      estimatedTokensUsed: ctxMeta.estimatedTokensUsed,
+      totalTokens: ctxMeta.totalTokens,
+      ...(idx === lastIdx && ctxMeta.tokenBreakdown ? { tokenBreakdown: ctxMeta.tokenBreakdown } : {})
+    } : undefined;
+    const slimRetryInfos = Array.isArray(cm.retryInfos)
+      ? cm.retryInfos.map((r) => (r && typeof r === 'object' ? {
+          ...(r.usage ? { usage: r.usage } : {}),
+          ...(r.error ? { error: sanitizeDiagnosticText(String(r.error), 240) } : {})
+        } : r))
+      : undefined;
+    return {
+      ...(entry.stepIndices ? { stepIndices: entry.stepIndices } : {}),
+      ...(entry.stepIndex != null ? { stepIndex: entry.stepIndex } : {}),
+      ...(entry.model ? { model: entry.model } : {}),
+      ...(entry.modelDisplayName ? { modelDisplayName: entry.modelDisplayName } : {}),
+      ...(entry.responseModel ? { responseModel: entry.responseModel } : {}),
+      chatModel: {
+        ...(cm.model ? { model: cm.model } : {}),
+        ...(cm.modelDisplayName ? { modelDisplayName: cm.modelDisplayName } : {}),
+        ...(cm.responseModel ? { responseModel: cm.responseModel } : {}),
+        ...(cm.usage ? { usage: cm.usage } : {}),
+        ...(cm.timeToFirstToken !== undefined ? { timeToFirstToken: cm.timeToFirstToken } : {}),
+        ...(cm.streamingDuration !== undefined ? { streamingDuration: cm.streamingDuration } : {}),
+        ...(cm.error ? { error: sanitizeDiagnosticText(String(cm.error), 240) } : {}),
+        ...(slimRetryInfos ? { retryInfos: slimRetryInfos } : {}),
+        ...(slimCtxMeta ? { chatStartMetadata: { contextWindowMetadata: slimCtxMeta } } : {})
+      }
+    };
+  });
+}
+
+function buildCallsByStepFromList(generatorList = []) {
+  const callsByStep = new Map();
+  if (!Array.isArray(generatorList)) return callsByStep;
   for (const entry of generatorList) {
+    if (!entry || typeof entry !== 'object') continue;
     const hasModel = Boolean(extractStepModel(null, entry, ''));
     const indices = entry.stepIndices || (entry.stepIndex != null ? [entry.stepIndex] : []);
     for (const idx of indices) {
@@ -2544,11 +2916,77 @@ async function fetchGeneratorMetadataForConv(convId, force = false, options = {}
       }
     }
   }
-  const value = { at: Date.now(), generatorList, callsByStep };
-  if (callsByStep.size > 0) {
-    convGenMetaCache.set(convId, value);
+  return callsByStep;
+}
+
+function hasValidGenStepEntry(entry) {
+  return Boolean(entry && (
+    extractStepModel(null, entry, '') ||
+    entry?.chatModel?.usage ||
+    entry?.chatModel?.chatStartMetadata?.contextWindowMetadata
+  ));
+}
+
+function getMaxGenStepIdx(generatorList = []) {
+  let maxIdx = -1;
+  if (!Array.isArray(generatorList)) return maxIdx;
+  for (const entry of generatorList) {
+    if (!entry || typeof entry !== 'object') continue;
+    const indices = entry.stepIndices || (entry.stepIndex != null ? [entry.stepIndex] : []);
+    for (const idx of indices) {
+      const n = Number(idx);
+      if (Number.isFinite(n) && n > maxIdx) maxIdx = n;
+    }
   }
-  return { ...value, rpcFailed: false };
+  return maxIdx;
+}
+
+function loadActiveConvGenDiskCache(targetPath = getActiveConvGenCachePath()) {
+  const p = targetPath || getActiveConvGenCachePath();
+  let st = null;
+  try {
+    if (existsSync(p)) st = statSync(p);
+  } catch {}
+  const stMtime = st ? st.mtimeMs : -1;
+  const stSize = st ? st.size : -1;
+  if (
+    activeConvGenDiskCache.path === p &&
+    activeConvGenDiskCache.mtimeMs === stMtime &&
+    activeConvGenDiskCache.size === stSize &&
+    activeConvGenDiskCache.data
+  ) {
+    return activeConvGenDiskCache.data;
+  }
+  const raw = readJsonSafe(p, null);
+  const convs = {};
+  if (raw?.version === ACTIVE_CONV_GEN_DISK_CACHE_VERSION && raw.convs && typeof raw.convs === 'object') {
+    for (const [cid, v] of Object.entries(raw.convs)) {
+      if (CONV_ID_RE.test(cid) && v && typeof v === 'object') {
+        convs[cid] = v;
+      }
+    }
+  }
+  const data = { version: ACTIVE_CONV_GEN_DISK_CACHE_VERSION, convs };
+  activeConvGenDiskCache = { path: p, mtimeMs: stMtime, size: stSize, data };
+  return data;
+}
+
+function saveActiveConvGenDiskEntry(convId, entry, targetPath = getActiveConvGenCachePath()) {
+  if (!convId || !CONV_ID_RE.test(convId) || !entry) return;
+  try {
+    const data = loadActiveConvGenDiskCache(targetPath);
+    const nextConvs = { ...data.convs, [convId]: entry };
+    const sorted = Object.entries(nextConvs)
+      .sort((a, b) => Number(b[1]?.fetchedAt || 0) - Number(a[1]?.fetchedAt || 0))
+      .slice(0, ACTIVE_CONV_GEN_CACHE_MAX_CONVS);
+    const payload = {
+      version: ACTIVE_CONV_GEN_DISK_CACHE_VERSION,
+      convs: Object.fromEntries(sorted)
+    };
+    writeJsonAtomic(targetPath, payload);
+    const st = statSync(targetPath);
+    activeConvGenDiskCache = { path: targetPath, mtimeMs: st.mtimeMs, size: st.size, data: payload };
+  } catch {}
 }
 
 function extractContextBreakdown(contextWindowMetadata) {
@@ -2589,12 +3027,22 @@ function extractContextBreakdown(contextWindowMetadata) {
 
 export async function scanConversation(requestedConvId = '', options = {}) {
   const force = Boolean(options.force);
+  const nowMs = Number(options.nowMs) || Date.now();
+  const background = Boolean(options.background);
+  const menubarMode = String(options.menubarMode || 'context');
+  const stateDir = getPluginStateDir();
+  const agDir = findAppDataDir();
+  const lsAddr = process.env.ANTIGRAVITY_LS_ADDRESS || '';
+  const lsCsrf = process.env.ANTIGRAVITY_CSRF_TOKEN || '';
+  const hasLsConfig = Boolean(lsAddr && lsCsrf);
+  const lsKey = hasLsConfig ? `${lsAddr}|${lsCsrf}` : '';
+  const lsKeyHash = hashLsKey(lsKey);
   if (force) {
     fileAuditCache.clear();
     scanSnapCache.clear();
   }
 
-  const recentConversations = listRecentConversations(24);
+  const recentConversations = listRecentConversations(24, nowMs);
   const convId = (requestedConvId && CONV_ID_RE.test(requestedConvId))
     ? requestedConvId
     : resolveActiveConversationId(recentConversations);
@@ -2609,7 +3057,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     };
   }
 
-  const desktopLogsDir = join(findAppDataDir(), 'brain', convId, '.system_generated', 'logs');
+  const desktopLogsDir = join(agDir, 'brain', convId, '.system_generated', 'logs');
   const cliLogsDir = join(findCliDataDir(), 'brain', convId, '.system_generated', 'logs');
   const cliDirectLog = join(findCliDataDir(), 'brain', convId, 'transcript.jsonl');
   const brainBase = existsSync(desktopLogsDir) ? desktopLogsDir : cliLogsDir;
@@ -2628,30 +3076,30 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       logStatSize = st.size;
     } catch {}
   }
+  if (logStatMtime > 0) {
+    noteObservedTranscriptActivity(logStatMtime, nowMs);
+  }
 
-  const host = await getHostUserStatus(force);
+  const host = await getHostUserStatus(force, {
+    background,
+    menubarMode,
+    nowMs,
+    latestTranscriptMtimeMs: logStatMtime
+  });
 
-  const snapCacheKey = `${convId}|${logStatMtime}|${logStatSize}|${host.sig}|${Math.floor(Date.now() / 15000)}`;
-  if (!force && scanSnapCache.has(convId)) {
-    const hit = scanSnapCache.get(convId);
-    if (hit.key === snapCacheKey) {
+  const baseSnapKey = `${convId}|${logStatMtime}|${logStatSize}|${host.sig}|${lsKeyHash}|${agDir}|${stateDir}`;
+  const prevHit = scanSnapCache.get(convId);
+  const sameBaseKey = Boolean(prevHit && prevHit.baseKey === baseSnapKey);
+  if (!force && sameBaseKey) {
+    if (prevHit.metaSettled || !hasLsConfig || nowMs < (prevHit.nextMetaCheckAt || 0)) {
       return {
-        ...hit.snap,
+        ...prevHit.snap,
         recentConversations
       };
     }
   }
 
-  const genMetaBundle = await fetchGeneratorMetadataForConv(convId, force);
-  if (genMetaBundle?.generatorList?.length) {
-    maybePersistConvStepModels(
-      convId,
-      existsSync(compactPath) ? compactPath : targetLogPath,
-      genMetaBundle.generatorList
-    );
-  }
-
-  // Parse transcript steps
+  // Parse transcript steps BEFORE deciding whether Language Server GeneratorMetadata RPC is needed
   const groups = {
     user: emptyMeasure(),
     assistant: emptyMeasure(),
@@ -2687,6 +3135,8 @@ export async function scanConversation(requestedConvId = '', options = {}) {
 
   totalSteps = rawSteps.length;
   const stepMetaMap = new Map();
+  const requiredModelSteps = [];
+  let latestErrorStepIdx = -1;
   let lastTranscriptPlannerArrayIdx = -1;
 
   const summarizeToolNames = (toolCalls) => {
@@ -2719,6 +3169,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       addMeasure(groups.user, measureText(contentStr));
     } else if (isModelTurnStep(step)) {
       assistantMessages++;
+      requiredModelSteps.push(sIdx);
       addMeasure(groups.assistant, measureText(contentStr));
       if (step.thinking) addMeasure(groups.thinking, measureText(step.thinking));
       const toolBadges = summarizeToolNames(step.tool_calls);
@@ -2737,12 +3188,16 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       if ((stepUsage.input || stepUsage.cache || stepUsage.output) && step.status !== 'ERROR') {
         lastTranscriptPlannerArrayIdx = i;
       }
-      if (step.status === 'ERROR' && contentStr) {
-        latestStepError = { stepIndex: sIdx, text: contentStr };
+      if (step.status === 'ERROR') {
+        latestErrorStepIdx = Math.max(latestErrorStepIdx, sIdx);
+        if (contentStr) {
+          latestStepError = { stepIndex: sIdx, text: contentStr };
+        }
       }
     } else if (type === 'CHECKPOINT' || step.checkpoint) {
       addMeasure(groups.summaries, measureText(contentStr || step.checkpoint?.sessionSummary || ''));
     } else if (type === 'ERROR_MESSAGE' || step.status === 'ERROR') {
+      latestErrorStepIdx = Math.max(latestErrorStepIdx, sIdx);
       if (contentStr) latestStepError = { stepIndex: sIdx, text: contentStr };
       addMeasure(groups.tools, measureText(contentStr));
     } else {
@@ -2768,6 +3223,117 @@ export async function scanConversation(requestedConvId = '', options = {}) {
           });
         }
       }
+    }
+  }
+
+  const isRetryCheck = Boolean(!force && sameBaseKey && !prevHit?.metaSettled);
+  const prevRetryCount = sameBaseKey ? Number(prevHit?.retryCount || 0) : 0;
+  let genMetaBundle = null;
+  let genFromCache = false;
+  if (!force && hasLsConfig && !isRetryCheck) {
+    const memGen = convGenMetaCache.get(convId);
+    const memCovers = Boolean(
+      memGen &&
+      memGen.lsKey === lsKey &&
+      memGen.generatorList?.length &&
+      requiredModelSteps.every((stepNum) => hasValidGenStepEntry(memGen.callsByStep?.get(stepNum))) &&
+      (latestErrorStepIdx < 0 || getMaxGenStepIdx(memGen.generatorList) >= latestErrorStepIdx)
+    );
+    if (memCovers) {
+      genMetaBundle = { ...memGen, rpcFailed: false, fromMemCache: true };
+      genFromCache = true;
+    } else {
+      const diskCache = loadActiveConvGenDiskCache();
+      const diskEntry = diskCache?.convs?.[convId];
+      if (
+        diskEntry &&
+        diskEntry.lsKeyHash === lsKeyHash &&
+        diskEntry.size === logStatSize &&
+        diskEntry.mtimeMs === logStatMtime &&
+        diskEntry.settled === true
+      ) {
+        const diskList = Array.isArray(diskEntry.generatorList) ? diskEntry.generatorList : [];
+        const callsByStep = buildCallsByStepFromList(diskList);
+        if (callsByStep.size > 0) {
+          convGenMetaCache.set(convId, {
+            at: Number(diskEntry.fetchedAt || nowMs),
+            lsKey,
+            generatorList: diskList,
+            callsByStep
+          });
+        }
+        genMetaBundle = {
+          at: Number(diskEntry.fetchedAt || nowMs),
+          lsKey,
+          generatorList: diskList,
+          callsByStep,
+          emptyFromHost: Boolean(diskEntry.empty),
+          rpcFailed: false,
+          fromDiskCache: true
+        };
+        genFromCache = true;
+      }
+    }
+  }
+
+  if (!genFromCache && hasLsConfig && (rawSteps.length > 0 || force)) {
+    genMetaBundle = await fetchGeneratorMetadataForConv(convId, force, {
+      bypassMemTtl: isRetryCheck,
+      nowMs
+    });
+  }
+
+  const ageMs = logStatMtime > 0 ? Math.max(0, nowMs - logStatMtime) : 0;
+  const maxGenStepIdx = getMaxGenStepIdx(genMetaBundle?.generatorList);
+  const allRequiredCovered = requiredModelSteps.every((stepNum) => hasValidGenStepEntry(genMetaBundle?.callsByStep?.get(stepNum)));
+  const errorCovered = (
+    latestErrorStepIdx < 0 ||
+    maxGenStepIdx >= latestErrorStepIdx ||
+    Boolean(genMetaBundle?.generatorList?.some((e) => e?.chatModel?.error || e?.chatModel?.retryInfos?.some((r) => r?.error)))
+  );
+  const nextRetryCount = isRetryCheck ? (prevRetryCount + 1) : (sameBaseKey ? prevRetryCount : 0);
+  let metaSettled = false;
+  let nextMetaCheckAt = 0;
+
+  if (!hasLsConfig || !rawSteps.length) {
+    metaSettled = true;
+  } else if (genMetaBundle?.fromDiskCache) {
+    metaSettled = true;
+  } else if (
+    !genMetaBundle?.rpcFailed &&
+    allRequiredCovered &&
+    errorCovered &&
+    (requiredModelSteps.length > 0 || latestErrorStepIdx >= 0 || ageMs >= 10_000)
+  ) {
+    metaSettled = true;
+  } else if (!genMetaBundle?.rpcFailed && ageMs >= CONV_META_SETTLE_AGE_MS) {
+    metaSettled = true;
+  } else if (nextRetryCount >= CONV_META_RETRY_DELAYS_MS.length) {
+    metaSettled = true;
+  } else {
+    metaSettled = false;
+    const delayMs = CONV_META_RETRY_DELAYS_MS[Math.min(nextRetryCount, CONV_META_RETRY_DELAYS_MS.length - 1)];
+    nextMetaCheckAt = nowMs + delayMs;
+  }
+
+  if (!genFromCache && hasLsConfig && !genMetaBundle?.rpcFailed) {
+    if (genMetaBundle?.generatorList?.length) {
+      maybePersistConvStepModels(
+        convId,
+        existsSync(compactPath) ? compactPath : targetLogPath,
+        genMetaBundle.generatorList
+      );
+    }
+    if (metaSettled || genMetaBundle?.generatorList?.length) {
+      saveActiveConvGenDiskEntry(convId, {
+        lsKeyHash,
+        size: logStatSize,
+        mtimeMs: logStatMtime,
+        fetchedAt: nowMs,
+        settled: metaSettled,
+        empty: !(genMetaBundle?.generatorList?.length),
+        generatorList: slimGeneratorListForCache(genMetaBundle?.generatorList || [])
+      });
     }
   }
 
@@ -3179,7 +3745,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   const resultSnap = {
     ok: true,
     etag,
-    scannedAt: Date.now(),
+    scannedAt: nowMs,
     conversationId: convId,
     conversationTitle: resolvedTitle,
     workspacePath,
@@ -3196,7 +3762,14 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     const oldest = scanSnapCache.keys().next().value;
     if (oldest) scanSnapCache.delete(oldest);
   }
-  scanSnapCache.set(convId, { key: snapCacheKey, snap: resultSnap });
+  scanSnapCache.set(convId, {
+    key: baseSnapKey,
+    baseKey: baseSnapKey,
+    retryCount: nextRetryCount,
+    metaSettled,
+    nextMetaCheckAt,
+    snap: resultSnap
+  });
   return resultSnap;
 }
 
@@ -3260,7 +3833,7 @@ function countSessionFiles(convDir) {
 
 function invalidateHistoryResultCache() {
   genBackfillDataSeq += 1;
-  cachedHistoryResult = { at: 0, hostSig: '', etag: '', data: null };
+  cachedHistoryResult = { at: 0, hostSig: '', persistPath: '', lsKey: '', etag: '', data: null };
 }
 
 function flushGenBackfillPersisted(wave) {
@@ -3504,6 +4077,9 @@ async function enqueueAndWaitGenBackfill(
 
 export async function collectTokenHistory(options = {}) {
   const force = Boolean(options.force);
+  const nowMs = Number(options.nowMs) || Date.now();
+  const background = Boolean(options.background);
+  const menubarMode = String(options.menubarMode || 'context');
   const curPersistPath = getGenStepModelsPath();
   const curLsAddr = process.env.ANTIGRAVITY_LS_ADDRESS || '';
   const curLsCsrf = process.env.ANTIGRAVITY_CSRF_TOKEN || '';
@@ -3522,12 +4098,16 @@ export async function collectTokenHistory(options = {}) {
     genStepModelsCache = { path: '', mtimeMs: -1, size: -1, data: null };
     lsGenMissCache.clear();
   }
-  const host = await getHostUserStatus(force);
+  const host = await getHostUserStatus(force, { background, menubarMode, nowMs });
+  const observedAct = getObservedActivityMs();
+  const histTtlMs = (observedAct > 0 && (nowMs - observedAct) >= 120_000) ? 60_000 : 12_000;
   if (
     !force &&
     cachedHistoryResult.data &&
     cachedHistoryResult.hostSig === host.sig &&
-    Date.now() - cachedHistoryResult.at < 12_000
+    cachedHistoryResult.persistPath === curPersistPath &&
+    cachedHistoryResult.lsKey === curLsKey &&
+    (nowMs - cachedHistoryResult.at) < histTtlMs
   ) {
     return cachedHistoryResult.data;
   }
@@ -3580,7 +4160,7 @@ export async function collectTokenHistory(options = {}) {
 
   const parsedJobs = [];
   const backfillCandidates = [];
-  const nowMs = Date.now();
+  let maxJobMtimeMs = 0;
 
   for (let idx = 0; idx < allJobs.length; idx++) {
     const job = allJobs[idx];
@@ -3589,6 +4169,7 @@ export async function collectTokenHistory(options = {}) {
     }
     try {
       const st = statSync(job.path);
+      if (st.mtimeMs > maxJobMtimeMs) maxJobMtimeMs = st.mtimeMs;
       let cached = transcriptHistCache.get(job.path);
 
       if (!cached || cached.size !== st.size || cached.mtimeMs !== st.mtimeMs) {
@@ -3692,6 +4273,10 @@ export async function collectTokenHistory(options = {}) {
         force
       });
     } catch {}
+  }
+
+  if (maxJobMtimeMs > 0) {
+    noteObservedTranscriptActivity(maxJobMtimeMs, nowMs);
   }
 
   if (hasLsConfig && backfillCandidates.length > 0) {
@@ -3919,7 +4504,14 @@ export async function collectTokenHistory(options = {}) {
   };
 
   if (resultBuiltSeq === genBackfillDataSeq) {
-    cachedHistoryResult = { at: Date.now(), hostSig: host.sig, etag, data: result };
+    cachedHistoryResult = {
+      at: nowMs,
+      hostSig: host.sig,
+      persistPath: curPersistPath,
+      lsKey: curLsKey,
+      etag,
+      data: result
+    };
   }
   return result;
 }

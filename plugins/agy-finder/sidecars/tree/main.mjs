@@ -28,6 +28,7 @@ import {
 import { CONV_ID_RE, getConversationMentions } from './mentions.mjs';
 import {
   listDirectoryEntries,
+  openInDefaultBrowser,
   readTextPreview,
   resolveTargetPath,
   revealInOsFileManager,
@@ -197,6 +198,11 @@ function createHandlers(getDefaultConvId, makeResponse, transformHtml = (html) =
       return revealInOsFileManager(String(data.path || ''), roots);
     },
 
+    apiOpenBrowser: async (data = {}) => {
+      const roots = resolveActiveRoots(data, getDefaultConvId);
+      return openInDefaultBrowser(String(data.path || ''), roots);
+    },
+
     apiShortcutGet: async () => {
       const settings = getShortcutSettings();
       return {
@@ -301,6 +307,7 @@ async function startOfficialSidecar() {
   app.api('/api/search', h.apiSearch, 'GET');
   app.api('/api/preview', h.apiPreview, 'GET');
   app.api('/api/reveal-os', h.apiRevealOs, 'POST');
+  app.api('/api/open-browser', h.apiOpenBrowser, 'POST');
   app.api('/api/shortcut', h.apiShortcutGet, 'GET');
   app.api('/api/shortcut', h.apiShortcutPost, 'POST');
   app.api('/api/aux-pane-trigger', h.apiAuxTriggerGet, 'GET');
@@ -399,6 +406,7 @@ async function startStandaloneServer() {
     ['GET:/api/search', h.apiSearch],
     ['GET:/api/preview', h.apiPreview],
     ['POST:/api/reveal-os', h.apiRevealOs],
+    ['POST:/api/open-browser', h.apiOpenBrowser],
     ['GET:/api/shortcut', h.apiShortcutGet],
     ['POST:/api/shortcut', h.apiShortcutPost],
     ['GET:/api/aux-pane-trigger', h.apiAuxTriggerGet],

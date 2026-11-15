@@ -703,6 +703,16 @@ export async function controlFloatWindow(options = {}, deps = {}) {
       await new Promise((r) => setTimeout(r, 45));
       latest = readAuxPaneTrigger();
     }
+    if (
+      Number(latest.ackSeq || 0) < Number(trig.seq || 1) &&
+      Number(latest.openingSeq || 0) >= Number(trig.seq || 1)
+    ) {
+      const mountDeadline = Date.now() + 450;
+      while (Date.now() < mountDeadline && Number(latest.ackSeq || 0) < Number(trig.seq || 1)) {
+        await new Promise((r) => setTimeout(r, 45));
+        latest = readAuxPaneTrigger();
+      }
+    }
     const acked = Number(latest.ackSeq || 0) >= Number(trig.seq || 1);
     const opened = Number(latest.openingSeq || 0) >= Number(trig.seq || 1);
     let message = '已切换 Antigravity 右侧辅助栏「上下文看板」';
@@ -1558,7 +1568,11 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
   if (u.pathname === '/api/context' && method === 'GET') {
     const convId = data.conversationId || '';
     const force = data.force === '1' || data.force === 'true' || data.force === true;
-    const snap = await scanConversation(convId, { force });
+    const snap = await scanConversation(convId, {
+      force,
+      background: currentState?.windowVisible === false,
+      menubarMode: currentState?.menubarMode || 'context'
+    });
     if (hooks.onActiveContextSnap && (!convId || convId === currentState.pinnedConvId)) {
       hooks.onActiveContextSnap(snap);
     }
@@ -1576,7 +1590,11 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
 
   if (u.pathname === '/api/history' && method === 'GET') {
     const force = data.force === '1' || data.force === 'true' || data.force === true;
-    const hist = await collectTokenHistory({ force });
+    const hist = await collectTokenHistory({
+      force,
+      background: currentState?.windowVisible === false,
+      menubarMode: currentState?.menubarMode || 'context'
+    });
     if (!force && data.etag && hist.etag && data.etag === hist.etag) {
       return { ok: true, unchanged: true, etag: hist.etag };
     }
@@ -1584,7 +1602,7 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
   }
 
   if (u.pathname === '/api/settings' && method === 'GET') {
-    return getSettings();
+    return getSettings({ background: true });
   }
   if (u.pathname === '/api/settings' && method === 'POST') {
     return saveSettings(data);
@@ -1896,12 +1914,21 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
   let lastSentMode = '';
   let latestSnap = null;
   let barPolling = false;
+  let lastBarScanAt = 0;
+  let lastWebContextAt = 0;
+  let lastSnapSig = '';
+  let lastSnapChangedAt = Date.now();
 
   const applySnapToMenubar = (snap) => {
     if (snap?.ok) {
       latestSnap = snap;
       state.activeConvId = snap.conversationId || null;
       state.activeConvTitle = snap.conversationTitle || null;
+      const sig = `${snap.etag || ''}|${snap.conversationId || ''}`;
+      if (sig !== lastSnapSig) {
+        lastSnapSig = sig;
+        lastSnapChangedAt = Date.now();
+      }
     }
     if (!state.menubarEnabled) return;
     const curMode = state.menubarMode || 'context';
@@ -1921,7 +1948,12 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
     if (barPolling && !forceScan) return;
     barPolling = true;
     try {
-      const snap = await scanConversation('', { force: false });
+      const snap = await scanConversation('', {
+        force: false,
+        background: !state.windowVisible,
+        menubarMode: state.menubarMode || 'context'
+      });
+      lastBarScanAt = Date.now();
       applySnapToMenubar(snap);
     } catch {} finally {
       barPolling = false;
@@ -1929,9 +1961,15 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
   };
 
   const barTimer = setInterval(() => {
-    if (state.menubarEnabled) {
-      refreshMenubarStatusItem(false).catch(() => {});
+    if (!state.menubarEnabled) return;
+    const now = Date.now();
+    if (state.windowVisible && !state.pinnedConvId && (now - lastWebContextAt) < 4000) {
+      return;
     }
+    if (!state.windowVisible && lastSnapSig && (now - lastSnapChangedAt) > 90_000 && (now - lastBarScanAt) < 5000) {
+      return;
+    }
+    refreshMenubarStatusItem(false).catch(() => {});
   }, 1500);
   barTimer.unref?.();
 
@@ -2390,7 +2428,10 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
       }
       try {
         const payload = await dispatchApiRpc(msg.path, msg.method, msg.body, state, {
-          onActiveContextSnap: applySnapToMenubar,
+          onActiveContextSnap: (snap) => {
+            lastWebContextAt = Date.now();
+            applySnapToMenubar(snap);
+          },
           onSetMenubar: handleSetMenubarInDaemon,
           onSetMenubarMode: handleSetMenubarModeInDaemon,
           onSetShortcut: handleSetShortcutInDaemon,
