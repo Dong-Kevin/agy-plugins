@@ -488,7 +488,15 @@ async function main() {
 
   // S4: Exact generational matching only — unknown or older generations must return null (unpriced -> Hybrid)
   assert(normalizeModelId('Gemini 4 Carbon (High)') === 'gemini-4-carbon', 'S4 Gemini 4 Carbon 匹配异常');
+  assert(normalizeModelId('Orchestrator (Carbon)') === 'gemini-4-carbon', 'S4 Orchestrator (Carbon) 匹配异常');
+  assert(normalizeModelId('MODEL_PLACEHOLDER_M667') === 'gemini-4-carbon', 'S4 M667 placeholder 应映射 gemini-4-carbon');
   assert(normalizeModelId('Gemini 4 Argon') === 'gemini-4-argon', 'S4 Gemini 4 Argon 匹配异常');
+  assert(normalizeModelId('Orchestrator (Argon)') === 'gemini-4-argon', 'S4 Orchestrator (Argon) 匹配异常');
+  assert(normalizeModelId('MODEL_PLACEHOLDER_M681') === 'gemini-4-argon', 'S4 M681 placeholder 应映射 gemini-4-argon');
+  assert(normalizeModelId('Gemini 4 Hydrogen (XHigh)') === 'gemini-4-hydrogen', 'S4 Gemini 4 Hydrogen (XHigh) 匹配异常');
+  assert(normalizeModelId('Gemini 4 Hydrogen (Orchestrator)') === 'gemini-4-hydrogen', 'S4 Gemini 4 Hydrogen (Orchestrator) 匹配异常');
+  assert(normalizeModelId('MODEL_PLACEHOLDER_M525') === 'gemini-4-hydrogen', 'S4 M525 placeholder 应映射 gemini-4-hydrogen');
+  assert(normalizeModelId('MODEL_PLACEHOLDER_M528') === 'gemini-4-hydrogen', 'S4 M528 placeholder 应映射 gemini-4-hydrogen');
   assert(normalizeModelId('Gemini 3.8 Flash') === 'gemini-3.8-flash', 'S4 Gemini 3.8 Flash 匹配异常');
   assert(normalizeModelId('Gemini 3.5 Flash-Lite') === 'gemini-3.5-flash-lite', 'S4 Gemini 3.5 Flash-Lite 匹配异常');
   assert(normalizeModelId('Gemini 3.1 Pro (High)') === 'gemini-3.1-pro-preview', 'S4 Gemini 3.1 Pro 匹配异常');
@@ -508,7 +516,11 @@ async function main() {
     'Gemini Flash',
     'Gemini 2.0 Flash-Lite',
     'Flash-Lite',
-    'GPT-OSS 20B'
+    'GPT-OSS 20B',
+    'gemini-pro-orchestrator',
+    'gemini-flash-worker-agy',
+    'Gemini 5 Hydrogen',
+    'MODEL_PLACEHOLDER_M669'
   ]) {
     assert(normalizeModelId(unpricedGen) === null, `S4 非当前代际或泛称模型 "${unpricedGen}" 不应误绑已知代际费率`);
   }
@@ -525,17 +537,35 @@ async function main() {
     'S4 未收录代际模型在 summarizeApiCost 中未正确归入 unsupportedModel / 保留真实显示名'
   );
   assert(normalizeModelId('MODEL_PLACEHOLDER_M322') === 'gemini-3.8-flash', 'S4 M322 placeholder 应映射 gemini-3.8-flash');
-  assert(normalizeModelId('Gemini 4 Hydrogen (XHigh)') === null, 'S4 Gemini 4 Hydrogen (XHigh) 应保持未收录单价 (null)');
   const hydrogenMerged = summarizeApiCost([
-    { model: 'Gemini 4 Hydrogen (XHigh)', inputTokens: 2000, outputTokens: 200 },
-    { model: 'Gemini 4 Hydrogen (High)', inputTokens: 1000, outputTokens: 100 }
+    { model: 'Gemini 4 Hydrogen (XHigh)', inputTokens: 1_000_000, cacheTokens: 0, outputTokens: 0 },
+    { model: 'Gemini 4 Hydrogen (High)', inputTokens: 0, cacheTokens: 1_000_000, outputTokens: 0 },
+    { model: 'Gemini 4 Hydrogen (Orchestrator)', inputTokens: 0, cacheTokens: 0, outputTokens: 1_000_000 },
+    { model: 'Orchestrator (Carbon)', inputTokens: 500_000, cacheTokens: 0, outputTokens: 0, date: '2026-11-15' }
+  ]);
+  const h4Row = hydrogenMerged.byModel.find((m) => m.displayName === 'Gemini 4 Hydrogen');
+  const c4Row = hydrogenMerged.byModel.find((m) => m.displayName === 'Gemini 4 Carbon');
+  assert(
+    hydrogenMerged.pricedRequestsCount === 4 &&
+      hydrogenMerged.unpricedRequestsCount === 0 &&
+      hydrogenMerged.byModel.length === 2 &&
+      h4Row && !h4Row.unpriced && h4Row.requests === 3 && h4Row.tokens === 3_000_000 &&
+      Math.abs(h4Row.costUSD - 9.075) < 1e-6 &&
+      c4Row && !c4Row.unpriced && c4Row.requests === 1 && Math.abs(c4Row.costUSD - 1.0) < 1e-6,
+    `Gemini 4 Hydrogen / Orchestrator 合并计价异常：${JSON.stringify(hydrogenMerged.byModel)}`
+  );
+  const futureSuffixMerged = summarizeApiCost([
+    { model: 'Gemini 5 Neon (XHigh)', inputTokens: 2000, outputTokens: 200 },
+    { model: 'Gemini 5 Neon (High)', inputTokens: 1000, outputTokens: 100 },
+    { model: 'Gemini 5 Neon (Orchestrator)', inputTokens: 500, outputTokens: 50 }
   ]);
   assert(
-    hydrogenMerged.byModel.length === 1 &&
-      hydrogenMerged.byModel[0].displayName === 'Gemini 4 Hydrogen' &&
-      hydrogenMerged.byModel[0].requests === 2 &&
-      hydrogenMerged.byModel[0].tokens === 3300,
-    `同模型不同推理强度后缀未合并：${JSON.stringify(hydrogenMerged.byModel)}`
+    futureSuffixMerged.byModel.length === 1 &&
+      futureSuffixMerged.byModel[0].displayName === 'Gemini 5 Neon' &&
+      futureSuffixMerged.byModel[0].unpriced === true &&
+      futureSuffixMerged.byModel[0].requests === 3 &&
+      futureSuffixMerged.byModel[0].tokens === 3850,
+    `未收录模型剥离后缀合并异常：${JSON.stringify(futureSuffixMerged.byModel)}`
   );
   const ultraParsed = parseUserPlanStatus({
     userStatus: {
@@ -621,6 +651,11 @@ async function main() {
       f1FlashRev?.remainingPercent === 20,
     `F1 同品牌双 Gemini 池列表与单模型配额不一致：Carbon=${f1Carbon?.remainingPercent} Flash=${f1Flash?.remainingPercent}`
   );
+  assert(
+    resolveModelQuota('Gemini Flash', f1Configs, f1Groups)?.remainingPercent === 20 &&
+      resolveModelQuota('Gemini 5 Unknown', f1Configs, f1Groups) === null,
+    'F1 多池下 Gemini Flash 应唯一定位 Flash 子池，无子族标签应返回 null'
+  );
 
   // F1b: Explicit poolId-only (no modelIds) & explicit modelIds-only (identical displayName, no groupId)
   const f1PoolIdOnlyGroups = [
@@ -661,7 +696,7 @@ async function main() {
 
   // Q1: Hydrogen + XHigh + Orchestrator must merge into single Gemini umbrella pool despite descriptive group copy,
   // producing semantic brand titles ("Gemini 模型" / "非 Gemini 模型（Claude / GPT）")
-  const q1Pools = groupModelQuotas([
+  const q1Configs = [
     { label: 'Gemini 4 Carbon (High)', modelId: 'MODEL_PLACEHOLDER_M427', quotaInfo: { remainingFraction: 0.965, resetTime: '2026-11-14T16:07:19Z' } },
     { label: 'Gemini 4 Hydrogen (Low)', modelId: 'MODEL_PLACEHOLDER_M525', quotaInfo: { remainingFraction: 0.965, resetTime: '2026-11-14T16:07:19Z' } },
     { label: 'Gemini 4 Hydrogen (High)', modelId: 'MODEL_PLACEHOLDER_M527', quotaInfo: { remainingFraction: 0.965, resetTime: '2026-11-14T16:07:19Z' } },
@@ -669,7 +704,8 @@ async function main() {
     { label: 'Orchestrator (Carbon)', modelId: 'MODEL_PLACEHOLDER_M667', quotaInfo: { remainingFraction: 0.965, resetTime: '2026-11-14T16:07:19Z' } },
     { label: 'Claude Opus 5.5 (Thinking)', modelId: 'MODEL_PLACEHOLDER_M400', quotaInfo: { remainingFraction: 0.88, resetTime: '2026-11-14T16:38:00Z' } },
     { label: 'GPT-OSS 120B (Medium)', modelId: 'MODEL_OPENAI_GPT_OSS_120B_MEDIUM', quotaInfo: { remainingFraction: 0.88, resetTime: '2026-11-14T16:38:00Z' } }
-  ], [
+  ];
+  const q1Groups = [
     {
       displayName: 'Gemini Models',
       description: 'Includes Carbon, Argon, and Flash variants',
@@ -686,7 +722,8 @@ async function main() {
         { bucketId: '3p-weekly', window: 'weekly', remainingFraction: 0.266, resetTime: '2026-11-19T02:03:00Z' }
       ]
     }
-  ]);
+  ];
+  const q1Pools = groupModelQuotas(q1Configs, q1Groups);
   const q1GemPool = q1Pools.find((p) => p.families.includes('Gemini 4 Hydrogen'));
   const q1NonGemPool = q1Pools.find((p) => p.families.includes('Claude Opus 5.5'));
   assert(
@@ -699,6 +736,26 @@ async function main() {
       q1NonGemPool?.shortLabel === '非 Gemini' &&
       q1NonGemPool?.modelsCount === 2,
     `Q1 Hydrogen / XHigh 并池或语义标题异常：${JSON.stringify(q1Pools)}`
+  );
+  const q1OrchCarbon = resolveModelQuota('Orchestrator (Carbon)', q1Configs, q1Groups);
+  const q1HydroOrch = resolveModelQuota('Gemini 4 Hydrogen (Orchestrator)', q1Configs, q1Groups);
+  const q1GemFlash = resolveModelQuota('Gemini Flash', q1Configs, q1Groups);
+  assert(
+    q1OrchCarbon?.label === 'Orchestrator (Carbon)' &&
+      q1OrchCarbon?.modelKey === 'gemini-4-carbon' &&
+      q1OrchCarbon?.fiveHour?.remainingPercent === 96.5 &&
+      q1OrchCarbon?.weekly?.remainingPercent === 92.4 &&
+      q1HydroOrch?.label === 'Gemini 4 Hydrogen (Orchestrator)' &&
+      q1HydroOrch?.modelKey === 'gemini-4-hydrogen' &&
+      q1HydroOrch?.fiveHour?.remainingPercent === 96.5 &&
+      q1HydroOrch?.weekly?.remainingPercent === 92.4 &&
+      q1GemFlash?.label === 'Gemini Flash' &&
+      q1GemFlash?.modelKey === null &&
+      q1GemFlash?.fiveHour?.remainingPercent === 96.5 &&
+      q1GemFlash?.weekly?.remainingPercent === 92.4 &&
+      resolveModelQuota('未记录模型', q1Configs, q1Groups) === null &&
+      resolveModelQuota('Unknown Custom Model', q1Configs, q1Groups) === null,
+    `Q1 Orchestrator / Gemini 内部执行模型配额解析异常：Carbon=${JSON.stringify(q1OrchCarbon)}, HydroOrch=${JSON.stringify(q1HydroOrch)}, Flash=${JSON.stringify(q1GemFlash)}`
   );
 
   // Build reusable VM harness executing actual app.js renderers (Tab 1 Context/Quota + Tab 3 Quota Pools)
@@ -795,6 +852,13 @@ async function main() {
       q1PoolsHtml.includes('非 Gemini 模型（Claude / GPT）') &&
       q1PoolsHtml.includes('Gemini 4 Hydrogen (XHigh)'),
     `Q1 Tab3 配额池语义标题或悬浮档位明细异常：${q1PoolsHtml}`
+  );
+  q1Harness.vmCtx.renderSpeedCard(null, { quota: q1HydroOrch }, [], null);
+  assert(
+    !q1Harness.getEl('ctx-quota-box').classList.contains('hidden') &&
+      q1Harness.getEl('ctx-quota-val').textContent.includes('5h 96.5%') &&
+      q1Harness.getEl('ctx-quota-val').textContent.includes('周 92.4%'),
+    `Q1 Tab1 内部执行模型应正常展示 5h 与周额度：${q1Harness.getEl('ctx-quota-val').textContent}`
   );
 
   // T1: Exhaustive quota semantics matrix (5h+weekly, 5h-only, weekly-only, resetTime-only, all-missing, genuine 0%)

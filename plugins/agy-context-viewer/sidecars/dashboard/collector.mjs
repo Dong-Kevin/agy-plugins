@@ -815,6 +815,16 @@ function computeHostStatusTtlMs(options = {}, entry = null, nowMs = Date.now()) 
   return 30_000;
 }
 
+function buildDynamicModelMap(modelConfigs = []) {
+  const map = {};
+  for (const cfg of modelConfigs) {
+    const mid = String(cfg?.modelOrAlias?.model || cfg?.modelId || '').trim().toLowerCase();
+    const norm = normalizeModelId(cfg?.label || '') || normalizeModelId(mid);
+    if (mid && norm) map[mid] = norm;
+  }
+  return map;
+}
+
 async function getHostUserStatus(force = false, options = {}) {
   const lsAddr = process.env.ANTIGRAVITY_LS_ADDRESS;
   const csrf = process.env.ANTIGRAVITY_CSRF_TOKEN;
@@ -853,6 +863,26 @@ async function getHostUserStatus(force = false, options = {}) {
 
   const diskCache = loadHostStatusDiskCache();
   const diskEntry = diskCache?.entries?.[lsKeyHash] || null;
+  const diskModelConfigs = Array.isArray(diskEntry?.modelConfigs) ? diskEntry.modelConfigs : [];
+  const diskSummaryGroups = Array.isArray(diskEntry?.quotaSummaryGroups) ? diskEntry.quotaSummaryGroups : [];
+  const hasHydratableConfigs = diskModelConfigs.length > 0;
+  const hydratedDynamicModelMap = hasHydratableConfigs
+    ? { ...(diskEntry?.dynamicModelMap || {}), ...buildDynamicModelMap(diskModelConfigs) }
+    : (diskEntry?.dynamicModelMap || {});
+  const hydratedQuotas = hasHydratableConfigs
+    ? groupModelQuotas(diskModelConfigs, diskSummaryGroups)
+    : (Array.isArray(diskEntry?.quotas) ? diskEntry.quotas : []);
+  let hydratedSig = diskEntry?.sig || 'host:disk';
+  if (hasHydratableConfigs && diskEntry?.plan) {
+    const { updatedAt: _planUpdatedAt, ...stablePlan } = diskEntry.plan;
+    hydratedSig = computeContentEtag('host', {
+      plan: stablePlan,
+      quotas: hydratedQuotas,
+      dynamicModelMap: hydratedDynamicModelMap,
+      quotaState: toStableQuotaState(diskEntry.quotaStatus)
+    });
+  }
+
   const diskGoodFallback = (
     diskEntry &&
     (diskEntry.quotaStatus?.state === 'live' || diskEntry.quotaStatus?.state === 'degraded') &&
@@ -864,10 +894,10 @@ async function getHostUserStatus(force = false, options = {}) {
         summaryFetchedAt: diskEntry.summaryFetchedAt || null,
         accountKey: diskEntry.plan?.accountKey || 'default',
         plan: diskEntry.plan,
-        quotas: Array.isArray(diskEntry.quotas) ? diskEntry.quotas : [],
-        modelConfigs: Array.isArray(diskEntry.modelConfigs) ? diskEntry.modelConfigs : [],
-        quotaSummaryGroups: Array.isArray(diskEntry.quotaSummaryGroups) ? diskEntry.quotaSummaryGroups : [],
-        dynamicModelMap: diskEntry.dynamicModelMap || {}
+        quotas: hydratedQuotas,
+        modelConfigs: diskModelConfigs,
+        quotaSummaryGroups: diskSummaryGroups,
+        dynamicModelMap: hydratedDynamicModelMap
       }
     : null;
 
@@ -875,7 +905,7 @@ async function getHostUserStatus(force = false, options = {}) {
     !force &&
     diskEntry &&
     diskEntry.at &&
-    !hasCrossedQuotaResetBoundary(diskEntry.quotas, diskEntry.at, nowMs)
+    !hasCrossedQuotaResetBoundary(hydratedQuotas, diskEntry.at, nowMs)
   ) {
     const diskTtlMs = computeHostStatusTtlMs(options, diskEntry, nowMs);
     if ((nowMs - Number(diskEntry.at)) < diskTtlMs) {
@@ -885,13 +915,13 @@ async function getHostUserStatus(force = false, options = {}) {
       cachedHostStatus = {
         at: Number(diskEntry.at),
         lsKey,
-        sig: diskEntry.sig || 'host:disk',
+        sig: hydratedSig,
         raw: null,
         plan: diskEntry.plan,
-        quotas: Array.isArray(diskEntry.quotas) ? diskEntry.quotas : [],
-        modelConfigs: Array.isArray(diskEntry.modelConfigs) ? diskEntry.modelConfigs : [],
-        quotaSummaryGroups: Array.isArray(diskEntry.quotaSummaryGroups) ? diskEntry.quotaSummaryGroups : [],
-        dynamicModelMap: diskEntry.dynamicModelMap || {},
+        quotas: hydratedQuotas,
+        modelConfigs: diskModelConfigs,
+        quotaSummaryGroups: diskSummaryGroups,
+        dynamicModelMap: hydratedDynamicModelMap,
         quotaStatus: diskEntry.quotaStatus
       };
       return cachedHostStatus;
@@ -974,12 +1004,7 @@ async function getHostUserStatus(force = false, options = {}) {
     const quotaSummaryGroups = summaryOk
       ? sanitizeSummaryGroupsForDiskCache(quotaSummaryRes?.response?.groups || quotaSummaryRes?.groups || [])
       : [];
-    const dynamicModelMap = {};
-    for (const cfg of modelConfigs) {
-      const mid = String(cfg.modelOrAlias?.model || cfg.modelId || '').trim().toLowerCase();
-      const norm = normalizeModelId(cfg.label || '') || normalizeModelId(mid);
-      if (mid && norm) dynamicModelMap[mid] = norm;
-    }
+    const dynamicModelMap = buildDynamicModelMap(modelConfigs);
     const quotas = groupModelQuotas(modelConfigs, quotaSummaryGroups);
     const summaryFetchedAt = summaryOk ? nowIso : (cachedGood?.summaryFetchedAt || null);
     const quotaStatus = summaryOk

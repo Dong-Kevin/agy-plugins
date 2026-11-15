@@ -3,7 +3,7 @@
  * Zero external dependencies. Read-only computation module.
  */
 
-export const PRICING_VERIFIED_DATE = '2026-11-11';
+export const PRICING_VERIFIED_DATE = '2026-11-15';
 
 // Official public API retail pricing (USD per 1M tokens)
 export const MODEL_PRICING_TABLE = {
@@ -37,6 +37,14 @@ export const MODEL_PRICING_TABLE = {
       outputPerMillion: 20.00,
       cacheReadPerMillion: 0.20,
       note: 'Gemini 4 Argon 标准费率'
+    }
+  ],
+  'gemini-4-hydrogen': [
+    {
+      inputPerMillion: 1.50,
+      outputPerMillion: 7.50,
+      cacheReadPerMillion: 0.075,
+      note: 'Gemini 4 Hydrogen 标准费率'
     }
   ],
   'gemini-3.8-flash': [
@@ -111,6 +119,7 @@ export const MODEL_PRICING_TABLE = {
 export const MODEL_DISPLAY_NAMES = {
   'gemini-4-carbon': 'Gemini 4 Carbon',
   'gemini-4-argon': 'Gemini 4 Argon',
+  'gemini-4-hydrogen': 'Gemini 4 Hydrogen',
   'gemini-3.8-flash': 'Gemini 3.8 Flash',
   'claude-opus-5-5': 'Claude Opus 5.5',
   'claude-sonnet-5-5': 'Claude Sonnet 5.5',
@@ -124,9 +133,15 @@ const PLACEHOLDER_MODEL_MAP = {
   model_placeholder_m427: 'gemini-4-carbon',
   model_placeholder_m437: 'gemini-4-carbon',
   model_placeholder_m438: 'gemini-4-carbon',
+  model_placeholder_m667: 'gemini-4-carbon',
   model_placeholder_m417: 'gemini-4-argon',
   model_placeholder_m418: 'gemini-4-argon',
   model_placeholder_m419: 'gemini-4-argon',
+  model_placeholder_m681: 'gemini-4-argon',
+  model_placeholder_m525: 'gemini-4-hydrogen',
+  model_placeholder_m526: 'gemini-4-hydrogen',
+  model_placeholder_m527: 'gemini-4-hydrogen',
+  model_placeholder_m528: 'gemini-4-hydrogen',
   model_placeholder_m318: 'gemini-3.8-flash',
   model_placeholder_m319: 'gemini-3.8-flash',
   model_placeholder_m320: 'gemini-3.8-flash',
@@ -150,8 +165,9 @@ export function normalizeModelId(raw, dynamicMap = null) {
 
   // Match strictly against known model generations; unknown or older generations return null
   // so they are never mis-billed at another generation's retail rate.
-  if (/(?:^|[\s/_-])(?:gemini[-_\s]*)?4[-_\s]*carbon(?:$|[^a-z0-9])/.test(s)) return 'gemini-4-carbon';
-  if (/(?:^|[\s/_-])(?:gemini[-_\s]*)?4[-_\s]*argon(?:$|[^a-z0-9])/.test(s)) return 'gemini-4-argon';
+  if (/(?:^|[\s/_-])(?:gemini[-_\s]*)?4[-_\s]*carbon(?:$|[^a-z0-9])/.test(s) || /\borchestrator\s*[\s/_(-]*\bcarbon\b/.test(s)) return 'gemini-4-carbon';
+  if (/(?:^|[\s/_-])(?:gemini[-_\s]*)?4[-_\s]*argon(?:$|[^a-z0-9])/.test(s) || /\borchestrator\s*[\s/_(-]*\bargon\b/.test(s)) return 'gemini-4-argon';
+  if (/(?:^|[\s/_-])(?:gemini[-_\s]*)?4[-_\s]*hydrogen(?:$|[^a-z0-9])/.test(s) || /\borchestrator\s*[\s/_(-]*\bhydrogen\b/.test(s)) return 'gemini-4-hydrogen';
   if (/(?:^|[\s/_-])(?:gemini[-_\s]*)?3[._-]5[-_\s]*flash[-_\s]*lite(?:$|[^a-z0-9])/.test(s)) return 'gemini-3.5-flash-lite';
   if (/(?:^|[\s/_-])(?:gemini[-_\s]*)?3[._-]8[-_\s]*flash(?:$|[^a-z0-9])/.test(s) && !/flash[-_\s]*lite/.test(s)) return 'gemini-3.8-flash';
   if (/\bclaude\b/.test(s) && /(?:opus[-_\s]*5[._-]5|5[._-]5[-_\s]*opus)(?:$|[^0-9])/.test(s)) return 'claude-opus-5-5';
@@ -214,7 +230,7 @@ function getSummaryGroupKey(g, fallbackIdx = 0) {
   return `group-${fallbackIdx}`;
 }
 
-const EFFORT_SUFFIX_RE = /\s*\((?:XHigh|Low|Medium|High|Minimal|Thinking|Fast)\)\s*$/i;
+const EFFORT_SUFFIX_RE = /\s*\((?:XHigh|Low|Medium|High|Minimal|Thinking|Fast|Orchestrator)\)\s*$/i;
 
 function extractSubfamilyTags(str) {
   const s = String(str || '').toLowerCase();
@@ -472,13 +488,17 @@ export function groupModelQuotas(clientModelConfigs = [], quotaSummaryGroups = [
 
 export function resolveModelQuota(modelNameOrKey, clientModelConfigs = [], quotaSummaryGroups = []) {
   if (!Array.isArray(clientModelConfigs) || !clientModelConfigs.length || !modelNameOrKey) return null;
-  const targetLower = String(modelNameOrKey).trim().toLowerCase();
-  const targetNorm = normalizeModelId(modelNameOrKey);
+  const targetRaw = String(modelNameOrKey).trim();
+  const targetLower = targetRaw.toLowerCase();
+  if (!targetLower || targetLower === 'none' || targetRaw === '未记录模型') return null;
+
+  const targetNorm = normalizeModelId(targetRaw);
   let matchedIdx = clientModelConfigs.findIndex((c) => {
     const lbl = String(c.label || '').toLowerCase();
     const mid = String(c.modelOrAlias?.model || c.modelId || '').toLowerCase();
     return lbl === targetLower || mid === targetLower;
   });
+  const exactMatch = matchedIdx >= 0;
   if (matchedIdx < 0 && targetNorm) {
     matchedIdx = clientModelConfigs.findIndex((c) => {
       const k = normalizeModelId(c.label || '') || normalizeModelId(c.modelOrAlias?.model || c.modelId || '');
@@ -494,13 +514,52 @@ export function resolveModelQuota(modelNameOrKey, clientModelConfigs = [], quota
       });
     }
   }
-  if (matchedIdx < 0) return null;
 
-  const matched = clientModelConfigs[matchedIdx];
-  const displayLabel = matched.label || formatModelDisplayName(modelNameOrKey, targetNorm);
-  const { cfgToPool } = buildQuotaPools(clientModelConfigs, quotaSummaryGroups);
-  const pool = cfgToPool.get(matchedIdx);
-  if (!pool) return null;
+  const { pools, cfgToPool } = buildQuotaPools(clientModelConfigs, quotaSummaryGroups);
+  let pool = matchedIdx >= 0 ? cfgToPool.get(matchedIdx) : null;
+  let displayLabel;
+
+  if (matchedIdx >= 0 && pool) {
+    const matched = clientModelConfigs[matchedIdx];
+    displayLabel = exactMatch
+      ? (matched.label || formatModelDisplayName(targetRaw, targetNorm))
+      : (formatModelDisplayName(targetRaw, targetNorm) || matched.label);
+  } else if (matchedIdx < 0) {
+    // Fallback for internal Gemini execution/orchestrator models absent from clientModelConfigs dropdown
+    const isThirdParty = /\b(?:claude|anthropic|opus|sonnet|haiku|gpt|openai)\b/.test(targetLower);
+    const isGeminiInternal = !isThirdParty && (
+      /\bgemini\b/.test(targetLower) ||
+      (/\borchestrator\b/.test(targetLower) && /\b(?:carbon|argon|hydrogen|flash)\b/.test(targetLower))
+    );
+    if (!isGeminiInternal) return null;
+
+    const geminiPools = pools.filter((p) =>
+      p.displayTitle === 'Gemini 模型' ||
+      (Array.isArray(p.models) && p.models.some((m) =>
+        /\b(?:gemini|carbon|argon|hydrogen|flash)\b/i.test(`${m?.label || ''} ${m?.familyKey || ''}`)
+      ))
+    );
+    if (geminiPools.length === 1) {
+      pool = geminiPools[0];
+    } else if (geminiPools.length > 1) {
+      const targetTags = extractSubfamilyTags(targetLower);
+      if (targetTags.length) {
+        const subPools = geminiPools.filter((p) =>
+          Array.isArray(p.models) && p.models.some((m) => {
+            const mTags = extractSubfamilyTags(`${m?.label || ''} ${m?.familyKey || ''}`);
+            return targetTags.some((t) => mTags.includes(t));
+          })
+        );
+        if (subPools.length === 1) {
+          pool = subPools[0];
+        }
+      }
+    }
+    if (!pool) return null;
+    displayLabel = formatModelDisplayName(targetRaw, targetNorm);
+  } else {
+    return null;
+  }
 
   return {
     label: displayLabel,
