@@ -30,7 +30,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/m
 irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.ps1 | iex
 ```
 
-- 也可直接从 [Releases](https://github.com/Dong-Kevin/agy-plugins/releases) 下载 `context-viewer-v1.7.10.zip` 解压后运行 `./install.sh`（或 `agy plugin install ./plugins/agy-context-viewer`）。
+- 也可直接从 [Releases](https://github.com/Dong-Kevin/agy-plugins/releases) 下载 `context-viewer-v1.7.11.zip` 解压后运行 `./install.sh`（或 `agy plugin install ./plugins/agy-context-viewer`）。
 - 仅通过 `agy plugin install` 安装时，CLI 入口为 `node ~/.gemini/config/plugins/context-viewer/sidecars/dashboard/cli.mjs`。
 
 </details>
@@ -66,7 +66,7 @@ agy-context json             # 输出结构化汇总 JSON（追加 --full 返回
 
 ## 核心功能与界面预览
 
-- **当前会话诊断**：自动对齐客户端上下文预算（200K / 256K / 1M），拆分系统提示、工具定义与对话历史占比，并记录 TTFT、流式 `tok/s` 与每轮工具增幅。
+- **当前会话诊断**：动态跟随宿主实时上下文窗口上限（如 `256K` / `512K` / `840K` / `1M`，服务端扩容或回退自动同步），拆分系统提示、工具定义与对话历史占比，并记录 TTFT、流式 `tok/s` 与每轮工具增幅。
 - **桌面端 + `agy` CLI 汇总**：合并统计两个来源的 **53 周热力图**、日/周/月/年分布及 **Gemini / 非 Gemini（Claude · GPT）** 双配额池 5h + 周额度余量与 API 等值参考。
 
 <p align="center">

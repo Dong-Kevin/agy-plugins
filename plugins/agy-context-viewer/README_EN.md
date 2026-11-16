@@ -30,7 +30,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/m
 irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.ps1 | iex
 ```
 
-- You can also download `context-viewer-v1.7.10.zip` from [Releases](https://github.com/Dong-Kevin/agy-plugins/releases), extract it, and run `./install.sh` (or `agy plugin install ./plugins/agy-context-viewer`).
+- You can also download `context-viewer-v1.7.11.zip` from [Releases](https://github.com/Dong-Kevin/agy-plugins/releases), extract it, and run `./install.sh` (or `agy plugin install ./plugins/agy-context-viewer`).
 - When installed via `agy plugin install` alone, invoke the CLI with `node ~/.gemini/config/plugins/context-viewer/sidecars/dashboard/cli.mjs`.
 
 </details>
@@ -66,7 +66,7 @@ agy-context json             # Output structured JSON summary (append --full for
 
 ## Core Highlights & Preview
 
-- **Active Session Diagnostics**: Aligns to host context limits (`200K` / `256K` / `1M`), splits System / Tools / Chat tokens, and tracks TTFT, streaming `tok/s`, cache hit rate, and per-turn growth.
+- **Active Session Diagnostics**: Dynamically tracks live host context window limits (e.g., `256K` / `512K` / `840K` / `1M`, auto-syncing whenever server tiers expand or roll back), splits System / Tools / Chat tokens, and tracks TTFT, streaming `tok/s`, cache hit rate, and per-turn growth.
 - **Unified Telemetry**: Aggregates Desktop + `agy` CLI history across a **53-week heatmap**, clean **Gemini vs. Non-Gemini (Claude · GPT)** 5h + Weekly quota pools, and public API cost reference.
 
 <p align="center">

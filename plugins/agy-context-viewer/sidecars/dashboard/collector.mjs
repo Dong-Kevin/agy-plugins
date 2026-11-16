@@ -2339,6 +2339,7 @@ export async function saveSettings(payload = {}) {
       ...payload.uiPreferences,
       updatedAt: new Date().toISOString()
     };
+    delete settings.uiPreferences.budgetOverride;
   }
 
   writeJsonAtomic(getSettingsPath(), settings);

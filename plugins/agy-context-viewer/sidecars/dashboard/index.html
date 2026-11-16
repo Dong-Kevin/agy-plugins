@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy" content="frame-src 'none'; child-src 'none'">
   <title>上下文与 Token 看板</title>
   <script src="/preload.js"></script>
-  <link rel="stylesheet" href="/styles.css?v=1.7.10">
+  <link rel="stylesheet" href="/styles.css?v=1.7.11">
 </head>
 <body>
   <div class="app-shell">
@@ -181,12 +181,7 @@
               <span id="ctx-pending-badge" class="status-pill warn hidden" title="上一轮响应后新增的待发送步骤预估 Token">+待发 0</span>
             </div>
             <div class="row-gap">
-              <div class="seg-group" id="budget-seg" role="group" aria-label="窗口上限基准">
-                <button type="button" class="seg-btn active" data-budget="0" title="跟随服务端报告的窗口预算上限">自动</button>
-                <button type="button" class="seg-btn" data-budget="200000">200K</button>
-                <button type="button" class="seg-btn" data-budget="256000">256K</button>
-                <button type="button" class="seg-btn" data-budget="1000000">1M</button>
-              </div>
+              <span id="ctx-budget-chip" class="meta-chip num" title="实时跟随服务端下发的当前模型上下文窗口上限">上限 --</span>
               <span id="ctx-health-pill" class="status-pill neutral">检测中</span>
             </div>
           </div>
@@ -218,7 +213,7 @@
               <div class="metric-cell">
                 <span class="m-label">预算上限</span>
                 <span id="ctx-budget" class="m-val">--</span>
-                <span id="ctx-budget-sub" class="m-sub">自动压缩阈值</span>
+                <span id="ctx-budget-sub" class="m-sub">服务端实时阈值</span>
               </div>
               <div class="metric-cell">
                 <span class="m-label">剩余可用</span>
@@ -682,6 +677,6 @@
       </section>
     </main>
   </div>
-  <script src="/app.js?v=1.7.10"></script>
+  <script src="/app.js?v=1.7.11"></script>
 </body>
 </html>

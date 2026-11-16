@@ -76,8 +76,7 @@
       themeMode: 'auto', // 'auto' | 'light' | 'dark'
       preset: 'violet',
       customLevels: null, // [c0, c1, c2, c3, c4] or null
-      customAccent: '',
-      budgetOverride: 0 // 0 = auto server budget, or 200000 / 256000 / 1000000
+      customAccent: ''
     },
 
     presetsPopulated: false,
@@ -339,9 +338,6 @@
       const active = !state.ui.customLevels && chip.dataset.preset === state.ui.preset;
       chip.classList.toggle('active', active);
     });
-    document.querySelectorAll('#budget-seg .seg-btn').forEach((btn) => {
-      btn.classList.toggle('active', Number(btn.dataset.budget || 0) === (state.ui.budgetOverride || 0));
-    });
 
     const icTheme = $('ic-theme');
     const btnTheme = $('btn-theme');
@@ -375,8 +371,7 @@
             themeMode: state.ui.themeMode,
             preset: state.ui.preset,
             customLevels: state.ui.customLevels,
-            customAccent: state.ui.customAccent,
-            budgetOverride: state.ui.budgetOverride || 0
+            customAccent: state.ui.customAccent
           }
         }
       });
@@ -529,9 +524,6 @@
       if (typeof prefs.customAccent === 'string') {
         state.ui.customAccent = prefs.customAccent;
       }
-      if (typeof prefs.budgetOverride === 'number' && [0, 200000, 256000, 1000000].includes(prefs.budgetOverride)) {
-        state.ui.budgetOverride = prefs.budgetOverride;
-      }
       if (typeof s.entrypoints?.sidebarEnabled === 'boolean') {
         state.sidebarEntryEnabled = s.entrypoints.sidebarEnabled;
       }
@@ -603,22 +595,14 @@
   function computeEffectiveWindow(ctx = {}) {
     const rawServerBudget = Number(ctx?.budget);
     const serverBudget = Number.isFinite(rawServerBudget) && rawServerBudget > 0 ? rawServerBudget : null;
-    const isOverridden = Number(state.ui.budgetOverride) > 0;
-    const budget = isOverridden ? Number(state.ui.budgetOverride) : serverBudget;
-    const isSameAsServer = isOverridden && serverBudget !== null && budget === serverBudget;
-    const budgetSource = isOverridden ? 'user' : (serverBudget ? (ctx?.budgetSource || 'server') : 'unknown');
+    const budget = serverBudget;
+    const budgetSource = serverBudget ? (ctx?.budgetSource || 'server') : 'unknown';
     const used = typeof ctx?.used === 'number' && Number.isFinite(ctx.used) ? ctx.used : null;
     const pct = used !== null && budget !== null && budget > 0
       ? Number(((used / budget) * 100).toFixed(1))
       : null;
-    const serverPct = used !== null && serverBudget !== null && serverBudget > 0
-      ? Number(((used / serverBudget) * 100).toFixed(1))
-      : null;
     const remaining = used !== null && budget !== null && budget > 0
       ? Math.max(0, budget - used)
-      : null;
-    const serverRemaining = used !== null && serverBudget !== null && serverBudget > 0
-      ? Math.max(0, serverBudget - used)
       : null;
     return {
       budget,
@@ -626,11 +610,9 @@
       budgetSource,
       used,
       pct,
-      serverPct,
+      serverPct: pct,
       remaining,
-      serverRemaining,
-      isOverridden,
-      isSameAsServer
+      serverRemaining: remaining
     };
   }
 
@@ -720,6 +702,20 @@
       `${fmtInt(audit.turnsCount || 0)} 轮响应 · ${fmtInt(audit.totalSteps || 0)} 步 · ${fmtInt(audit.toolCallsCount || 0)} 次工具`
     );
 
+    const budgetChip = $('ctx-budget-chip');
+    if (budgetChip) {
+      if (win.budget) {
+        setText(budgetChip, `上限 ${fmtTokens(win.budget)}`);
+        budgetChip.setAttribute('title', `服务端实时下发的当前模型自动压缩阈值（${fmtInt(win.budget)} Tokens）`);
+      } else if (win.used === null) {
+        setText(budgetChip, '上限待同步');
+        budgetChip.setAttribute('title', '待首轮模型响应后同步服务端窗口上限');
+      } else {
+        setText(budgetChip, '上限未记录');
+        budgetChip.setAttribute('title', '本地归档未记录该轮模型的服务端窗口上限');
+      }
+    }
+
     const healthPct = win.serverBudget ? win.serverPct : pct;
 
     // Health status pill
@@ -733,16 +729,13 @@
       } else if (win.used === null) {
         cls = 'neutral';
         label = '待首轮请求';
-      } else if (healthPct === null) {
+      } else if (pct === null) {
         cls = 'neutral';
         label = '容量未知';
-      } else if (win.isOverridden && !win.serverBudget) {
-        cls = pct >= 90 ? 'danger' : pct >= 75 ? 'warn' : 'neutral';
-        label = pct >= 90 ? '近对比基准' : pct >= 75 ? '超对比 75%' : '按对比基准';
-      } else if (healthPct >= 90) {
+      } else if (pct >= 90) {
         cls = 'danger';
         label = '临近上限';
-      } else if (healthPct >= 75) {
+      } else if (pct >= 75) {
         cls = 'warn';
         label = '占用偏高';
       }
@@ -753,10 +746,7 @@
     // Hero circular gauge (r = 35 => C = 219.91)
     const circum = 219.91;
     setText('ctx-pct-big', pct !== null ? `${pct.toFixed(1)}%` : '--%');
-    setText(
-      'ctx-gauge-sub',
-      win.isOverridden ? `按 ${fmtTokens(win.budget, 0)} 基准` : (win.budget ? '预算占比' : '上限未知')
-    );
+    setText('ctx-gauge-sub', win.budget ? '预算占比' : '上限未知');
 
     const heroFill = $('hero-ring-fill');
     const heroCache = $('hero-ring-cache');
@@ -784,19 +774,14 @@
       setText('ctx-used-sub', `本地归档约 ${fmtTokens(audit.localTotal?.low || 0, 1)}~${fmtTokens(audit.localTotal?.high || 0, 1)}`);
     }
 
-    setText('ctx-budget', win.budget ? fmtTokens(win.budget) : '未知');
-    setText(
-      'ctx-budget-sub',
-      win.isOverridden
-        ? (win.serverBudget ? `服务端默认 ${fmtTokens(win.serverBudget, 0)}` : '用户对比基准（非服务端阈值）')
-        : (win.budget ? '自动压缩阈值' : '当前模型上限未知')
-    );
+    setText('ctx-budget', win.budget ? fmtTokens(win.budget) : (win.used === null ? '--' : '未知'));
+    setText('ctx-budget-sub', win.budget ? '服务端实时阈值' : (win.used === null ? '待首轮同步' : '本地未记录上限'));
     setText('ctx-rem', win.remaining !== null ? fmtTokens(win.remaining) : '--');
     setText(
       'ctx-rem-sub',
       win.remaining !== null && win.budget > 0
-        ? `${win.isOverridden ? '距基准余 ' : '剩余 '}${Math.max(0, 100 - (pct || 0)).toFixed(1)}% 空间`
-        : (win.used !== null ? '需窗口上限方可计算' : '等待服务端统计')
+        ? `剩余 ${Math.max(0, 100 - (pct || 0)).toFixed(1)}% 空间`
+        : (win.used !== null ? '需服务端上限计算' : '等待服务端统计')
     );
 
     setText('ctx-cache-rate', ctx.cacheHitPercent !== null ? `${ctx.cacheHitPercent.toFixed(1)}%` : '--');
@@ -826,43 +811,31 @@
         setText(takeaway, `${err.title}：${err.detail}`);
       } else if (win.used === null) {
         setText(takeaway, `当前会话（${snap.conversationTitle}）暂无已完成模型轮次；发送消息后自动同步精确窗口占用。`);
-      } else if (healthPct === null) {
+      } else if (pct === null) {
         setText(
           takeaway,
-          `当前会话已用 ${fmtTokens(win.used)} Token；本地归档未记录该模型窗口容量上限，暂不推导健康百分比（可在上方选择 200K / 256K / 1M 作为对比基准）。`
+          `当前会话已用 ${fmtTokens(win.used)} Token；本地归档未记录该轮模型的服务端窗口上限，暂不推导健康百分比。`
         );
-      } else if (win.isOverridden && !win.serverBudget) {
-        if (pct >= 88) takeaway.classList.add('danger');
-        else if (pct >= 72) takeaway.classList.add('warn');
+      } else if (pct >= 88) {
+        takeaway.classList.add('danger');
         setText(
           takeaway,
-          `当前会话已用 ${fmtTokens(win.used)} Token，按所选 ${fmtTokens(win.budget, 0)} 对比基准折算为 ${pct.toFixed(1)}%（剩余 ${fmtTokens(win.remaining)}，非服务端压缩阈值）。`
+          `当前窗口已使用 ${pct.toFixed(1)}%（${fmtTokens(win.used)} / ${fmtTokens(win.budget)}），接近上限阈值，建议适时执行 /compact 或拆分新会话以保持响应速度。`
+        );
+      } else if (pct >= 72) {
+        takeaway.classList.add('warn');
+        setText(
+          takeaway,
+          `当前窗口已使用 ${pct.toFixed(1)}%（${fmtTokens(win.used)} / ${fmtTokens(win.budget)}），缓存命中率 ${ctx.cacheHitPercent ?? 0}%，后续长输出轮次可能触发自动摘要。`
         );
       } else {
-        const compareNote = win.isOverridden && !win.isSameAsServer && pct !== null
-          ? `（当前按 ${fmtTokens(win.budget, 0)} 对比基准折算为 ${pct.toFixed(1)}%）`
-          : '';
-        if (healthPct >= 88) {
-          takeaway.classList.add('danger');
-          const realPrefix = compareNote
-            ? `当前真实窗口已使用 ${win.serverPct.toFixed(1)}%（${fmtTokens(win.used)} / ${fmtTokens(win.serverBudget)}）`
-            : `当前窗口已使用 ${healthPct.toFixed(1)}%`;
-          setText(takeaway, `${realPrefix}，接近上限阈值，建议适时执行 /compact 或拆分新会话以保持响应速度。${compareNote}`);
-        } else if (healthPct >= 72) {
-          takeaway.classList.add('warn');
-          const realPrefix = compareNote
-            ? `当前真实窗口已用 ${win.serverPct.toFixed(1)}%（${fmtTokens(win.used)} / ${fmtTokens(win.serverBudget)}）`
-            : `当前窗口已用 ${healthPct.toFixed(1)}%`;
-          setText(takeaway, `${realPrefix}，缓存命中率 ${ctx.cacheHitPercent ?? 0}%，后续长输出轮次可能触发自动摘要。${compareNote}`);
-        } else {
-          const cacheNote = ctx.cacheHitPercent !== null && ctx.cacheHitPercent >= 50
-            ? `缓存命中高达 ${ctx.cacheHitPercent.toFixed(1)}%，显著降低首字延迟与折算成本。`
-            : '上下文容量充裕，推理与工具调用处于最佳窗口区间。';
-          const realSummary = compareNote
-            ? `真实窗口健康（${win.serverPct.toFixed(1)}%，已用 ${fmtTokens(win.used)} / ${fmtTokens(win.serverBudget)}）`
-            : `窗口健康（已用 ${fmtTokens(win.used)} / ${fmtTokens(win.serverBudget || win.budget)}）`;
-          setText(takeaway, `会话「${snap.conversationTitle}」${realSummary}。${cacheNote}${compareNote}`);
-        }
+        const cacheNote = ctx.cacheHitPercent !== null && ctx.cacheHitPercent >= 50
+          ? `缓存命中高达 ${ctx.cacheHitPercent.toFixed(1)}%，显著降低首字延迟与折算成本。`
+          : '上下文容量充裕，推理与工具调用处于最佳窗口区间。';
+        setText(
+          takeaway,
+          `会话「${snap.conversationTitle}」窗口健康（已用 ${fmtTokens(win.used)} / ${fmtTokens(win.budget)}）。${cacheNote}`
+        );
       }
     }
 
@@ -2230,21 +2203,6 @@
       }, { passive: true });
     }
 
-    // Context budget limit override buttons (Auto / 200K / 256K / 1M)
-    document.querySelectorAll('#budget-seg .seg-btn').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        state.ui.budgetOverride = Number(btn.dataset.budget || 0);
-        document.querySelectorAll('#budget-seg .seg-btn').forEach((b) =>
-          b.classList.toggle('active', b === btn)
-        );
-        persistUiPreferences();
-        if (state.contextData) {
-          renderContextPanel(state.contextData);
-          renderTopCapsules();
-        }
-      });
-    });
-
     // Per-turn timeline filter buttons
     document.querySelectorAll('#turns-filter-seg .seg-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -2590,7 +2548,7 @@
     });
 
     $('btn-reset-appearance')?.addEventListener('click', () => {
-      state.ui = { themeMode: 'auto', preset: 'violet', customLevels: null, customAccent: '', budgetOverride: 0 };
+      state.ui = { themeMode: 'auto', preset: 'violet', customLevels: null, customAccent: '' };
       applyAppearanceToDom();
       persistUiPreferences();
       if (state.contextData) {

@@ -363,6 +363,10 @@ async function main() {
       indexHtmlSrc.includes(`/app.js?v=${manifest.version}`),
     `index.html 静态资源版本查询参数未同步至 v${manifest.version}`
   );
+  assert(
+    !indexHtmlSrc.includes('id="budget-seg"') && indexHtmlSrc.includes('id="ctx-budget-chip"'),
+    'index.html 应移除手动 budget-seg 档位并改用动态 ctx-budget-chip 胶囊'
+  );
   for (const f of ['styles.css', 'app.js']) {
     const p = join(ROOT, 'sidecars', 'dashboard', f);
     const s = readFileSync(p, 'utf-8');
@@ -816,7 +820,7 @@ async function main() {
         turnsFilter: 'all',
         contextData: null,
         historyData: null,
-        ui: { budgetOverride: 0 }
+        ui: {}
       },
       fmtLocalTime: () => '10:00'
     };
@@ -1557,25 +1561,28 @@ async function main() {
     assert(
       t3Harness.getEl('ctx-used').textContent === '101.0K' &&
         t3Harness.getEl('ctx-budget').textContent === '未知' &&
+        t3Harness.getEl('ctx-budget-chip').textContent === '上限未记录' &&
         t3Harness.getEl('ctx-rem').textContent === '--' &&
         t3Harness.getEl('ctx-pct-big').textContent === '--%' &&
         t3Harness.getEl('ctx-health-pill').textContent === '容量未知' &&
-        !t3Harness.getEl('ctx-takeaway').textContent.includes('窗口健康'),
-      `T3 Auto 模式未知容量 UI 误显示硬编码上限或运行健康：pill=${t3Harness.getEl('ctx-health-pill').textContent}, budget=${t3Harness.getEl('ctx-budget').textContent}`
+        !t3Harness.getEl('ctx-takeaway').textContent.includes('窗口健康') &&
+        !t3Harness.getEl('ctx-takeaway').textContent.includes('对比基准'),
+      `T3 Auto 模式未知容量 UI 渲染异常：pill=${t3Harness.getEl('ctx-health-pill').textContent}, chip=${t3Harness.getEl('ctx-budget-chip').textContent}, budget=${t3Harness.getEl('ctx-budget').textContent}`
     );
 
-    // T3b: User explicitly picks 256K comparison benchmark -> computes 39.5% & clearly labels as user benchmark
+    // T3b: Legacy persisted budgetOverride must be ignored completely (no manual benchmark override)
     t3Harness.vmCtx.state.ui.budgetOverride = 256000;
     t3Harness.vmCtx.renderContextPanel(t3Offline);
     assert(
-      t3Harness.getEl('ctx-pct-big').textContent === '39.5%' &&
-        t3Harness.getEl('ctx-budget').textContent === '256.0K' &&
-        t3Harness.getEl('ctx-budget-sub').textContent.includes('用户对比基准') &&
-        t3Harness.getEl('ctx-health-pill').textContent === '按对比基准',
-      `T3 用户手动基准模式未与服务端真实阈值区分：sub=${t3Harness.getEl('ctx-budget-sub').textContent}, pill=${t3Harness.getEl('ctx-health-pill').textContent}`
+      t3Harness.getEl('ctx-budget').textContent === '未知' &&
+        t3Harness.getEl('ctx-budget-chip').textContent === '上限未记录' &&
+        t3Harness.getEl('ctx-pct-big').textContent === '--%' &&
+        t3Harness.getEl('ctx-health-pill').textContent === '容量未知',
+      `T3 遗留 budgetOverride 字段不应继续覆盖或折算：chip=${t3Harness.getEl('ctx-budget-chip').textContent}, pct=${t3Harness.getEl('ctx-pct-big').textContent}`
     );
 
-    // T3c: Server GetCascadeTrajectoryGeneratorMetadata provides maxContextTokens=200000 -> server budget=200000, 50.5%
+    // T3c: Server GetCascadeTrajectoryGeneratorMetadata dynamically updates maxContextTokens (200K -> 512K)
+    let t3MaxContextTokens = 200000;
     const t3GenServer = http.createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       if (req.url?.includes('GetCascadeTrajectoryGeneratorMetadata')) {
@@ -1588,7 +1595,7 @@ async function main() {
                 usage: { inputTokens: 100000, outputTokens: 1000 },
                 chatStartMetadata: {
                   contextWindowMetadata: {
-                    maxContextTokens: 200000,
+                    maxContextTokens: t3MaxContextTokens,
                     estimatedTokensUsed: 101000
                   }
                 }
@@ -1613,79 +1620,111 @@ async function main() {
           t3ServerSnap.context?.percent === 50.5,
         `T3 服务端返回 maxContextTokens=200000 时计算异常：${JSON.stringify(t3ServerSnap.context)}`
       );
-      t3Harness.vmCtx.state.ui.budgetOverride = 0;
       t3Harness.vmCtx.renderContextPanel(t3ServerSnap);
       assert(
         t3Harness.getEl('ctx-budget').textContent === '200.0K' &&
+          t3Harness.getEl('ctx-budget-chip').textContent === '上限 200.0K' &&
           t3Harness.getEl('ctx-pct-big').textContent === '50.5%' &&
           t3Harness.getEl('ctx-health-pill').textContent === '运行健康',
-        'T3 服务端真实上限 Auto 模式渲染异常'
+        'T3 服务端 200K 动态上限渲染异常'
       );
 
-      // U1: Manual benchmark must NEVER mask or fabricate real server health alerts
-      const u1NearFullSnap = {
-        ...t3ServerSnap,
+      // Server hot-expands maxContextTokens from 200K -> 512K without hardcoding
+      t3MaxContextTokens = 512000;
+      const t3ExpandedSnap = await scanConversation(t3ConvId, { force: true });
+      assert(
+        t3ExpandedSnap.context?.budget === 512000 &&
+          t3ExpandedSnap.context?.budgetSource === 'server' &&
+          t3ExpandedSnap.context?.remaining === 411000 &&
+          t3ExpandedSnap.context?.percent === 19.7,
+        `T3 服务端热扩容至 512000 时计算异常：${JSON.stringify(t3ExpandedSnap.context)}`
+      );
+      t3Harness.vmCtx.state.contextData = t3ExpandedSnap;
+      t3Harness.vmCtx.renderTopCapsules();
+      t3Harness.vmCtx.renderContextPanel(t3ExpandedSnap);
+      assert(
+        t3Harness.getEl('ctx-budget').textContent === '512.0K' &&
+          t3Harness.getEl('ctx-budget-chip').textContent === '上限 512.0K' &&
+          t3Harness.getEl('ctx-pct-big').textContent === '19.7%' &&
+          t3Harness.getEl('ctx-health-pill').textContent === '运行健康',
+        `T3 服务端 512K 动态上限渲染异常：chip=${t3Harness.getEl('ctx-budget-chip').textContent}, pct=${t3Harness.getEl('ctx-pct-big').textContent}`
+      );
+
+      // U1: Dynamic server threshold transitions (512K high usage -> 1M expansion -> empty session awaiting sync)
+      const u1High512Snap = {
+        ...t3ExpandedSnap,
         context: {
-          ...t3ServerSnap.context,
-          used: 190000,
-          budget: 200000,
+          ...t3ExpandedSnap.context,
+          used: 480000,
+          budget: 512000,
           budgetSource: 'server',
-          remaining: 10000,
-          percent: 95
+          remaining: 32000,
+          percent: 93.8
         }
       };
-      t3Harness.vmCtx.state.contextData = u1NearFullSnap;
-      t3Harness.vmCtx.state.ui.budgetOverride = 1000000;
+      t3Harness.vmCtx.state.contextData = u1High512Snap;
       t3Harness.vmCtx.renderTopCapsules();
-      t3Harness.vmCtx.renderContextPanel(u1NearFullSnap);
+      t3Harness.vmCtx.renderContextPanel(u1High512Snap);
       assert(
-        t3Harness.getEl('ctx-pct-big').textContent === '19.0%' &&
-          t3Harness.getEl('ctx-budget-sub').textContent.includes('服务端默认 200.0K') &&
+        t3Harness.getEl('ctx-budget-chip').textContent === '上限 512.0K' &&
+          t3Harness.getEl('ctx-pct-big').textContent === '93.8%' &&
           t3Harness.getEl('ctx-health-pill').textContent === '临近上限' &&
           t3Harness.getEl('ctx-health-pill').className.includes('danger') &&
           t3Harness.getEl('hero-ring-fill').style.stroke === 'var(--danger)' &&
           t3Harness.getEl('mini-ring-fill').style.stroke === 'var(--danger)' &&
           t3Harness.getEl('ctx-takeaway').classList.contains('danger') &&
-          t3Harness.getEl('ctx-takeaway').textContent.includes('95.0%') &&
-          !t3Harness.getEl('ctx-takeaway').textContent.includes('上下文容量充裕'),
-        `U1 真实 95% 被 1M 对比基准掩盖：pill=${t3Harness.getEl('ctx-health-pill').textContent}, takeaway=${t3Harness.getEl('ctx-takeaway').textContent}`
+          t3Harness.getEl('ctx-takeaway').textContent.includes('93.8%'),
+        `U1 512K 高水位告警渲染异常：pill=${t3Harness.getEl('ctx-health-pill').textContent}, chip=${t3Harness.getEl('ctx-budget-chip').textContent}`
       );
-      // U1 reverse: real 19% (1M server) + 200K override must remain healthy instead of false danger alert
-      const u1LowRatioSnap = {
-        ...t3ServerSnap,
+
+      const u1Expanded1MSnap = {
+        ...t3ExpandedSnap,
         context: {
-          ...t3ServerSnap.context,
-          used: 190000,
+          ...t3ExpandedSnap.context,
+          used: 480000,
           budget: 1000000,
           budgetSource: 'server',
-          remaining: 810000,
-          percent: 19
+          remaining: 520000,
+          percent: 48
         }
       };
-      t3Harness.vmCtx.state.contextData = u1LowRatioSnap;
-      t3Harness.vmCtx.state.ui.budgetOverride = 200000;
+      t3Harness.vmCtx.state.contextData = u1Expanded1MSnap;
       t3Harness.vmCtx.renderTopCapsules();
-      t3Harness.vmCtx.renderContextPanel(u1LowRatioSnap);
+      t3Harness.vmCtx.renderContextPanel(u1Expanded1MSnap);
       assert(
-        t3Harness.getEl('ctx-pct-big').textContent === '95.0%' &&
+        t3Harness.getEl('ctx-budget-chip').textContent === '上限 1.00M' &&
+          t3Harness.getEl('ctx-budget').textContent === '1.00M' &&
+          t3Harness.getEl('ctx-pct-big').textContent === '48.0%' &&
           t3Harness.getEl('ctx-health-pill').textContent === '运行健康' &&
           t3Harness.getEl('hero-ring-fill').style.stroke === 'var(--cv-accent)' &&
           !t3Harness.getEl('ctx-takeaway').classList.contains('danger') &&
-          !t3Harness.getEl('ctx-takeaway').classList.contains('warn') &&
-          t3Harness.getEl('ctx-takeaway').textContent.includes('19.0%'),
-        `U1 反向组合（真实 19% + 200K 基准）产生误告警：pill=${t3Harness.getEl('ctx-health-pill').textContent}`
+          !t3Harness.getEl('ctx-takeaway').classList.contains('warn'),
+        `U1 扩容至 1M 动态跟随异常：pill=${t3Harness.getEl('ctx-health-pill').textContent}, chip=${t3Harness.getEl('ctx-budget-chip').textContent}`
       );
-      // U1 equal: 200K server + 200K override should behave as direct 95% alert without redundant note
-      t3Harness.vmCtx.state.contextData = u1NearFullSnap;
-      t3Harness.vmCtx.state.ui.budgetOverride = 200000;
-      t3Harness.vmCtx.renderContextPanel(u1NearFullSnap);
+
+      const u1EmptySnap = {
+        ...t3ExpandedSnap,
+        context: {
+          ...t3ExpandedSnap.context,
+          used: null,
+          budget: null,
+          budgetSource: 'unknown',
+          remaining: null,
+          percent: null
+        }
+      };
+      t3Harness.vmCtx.state.contextData = u1EmptySnap;
+      t3Harness.vmCtx.renderTopCapsules();
+      t3Harness.vmCtx.renderContextPanel(u1EmptySnap);
       assert(
-        t3Harness.getEl('ctx-health-pill').textContent === '临近上限' &&
-          t3Harness.getEl('ctx-takeaway').classList.contains('danger') &&
-          !t3Harness.getEl('ctx-takeaway').textContent.includes('对比基准折算'),
-        `U1 同容量覆盖不应附带冗余折算提示：${t3Harness.getEl('ctx-takeaway').textContent}`
+        t3Harness.getEl('ctx-budget-chip').textContent === '上限待同步' &&
+          t3Harness.getEl('ctx-budget').textContent === '--' &&
+          t3Harness.getEl('ctx-budget-sub').textContent === '待首轮同步' &&
+          t3Harness.getEl('ctx-health-pill').textContent === '待首轮请求' &&
+          t3Harness.getEl('ctx-pct-big').textContent === '--%',
+        `U1 空会话待同步胶囊渲染异常：chip=${t3Harness.getEl('ctx-budget-chip').textContent}, budget=${t3Harness.getEl('ctx-budget').textContent}`
       );
-      t3Harness.vmCtx.state.ui.budgetOverride = 0;
+      delete t3Harness.vmCtx.state.ui.budgetOverride;
     } finally {
       delete process.env.ANTIGRAVITY_LS_ADDRESS;
       delete process.env.ANTIGRAVITY_CSRF_TOKEN;
