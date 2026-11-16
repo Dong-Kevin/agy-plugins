@@ -1982,9 +1982,13 @@ function withAuxTriggerLock(fn, options = {}) {
 }
 
 export function writeAuxPaneTrigger({ targetPlugin = 'context-viewer', uri = '', action = 'toggle', convId = '', revealPath = '' } = {}) {
+  const explicitConvId = (typeof convId === 'string' && CONV_ID_RE.test(convId.trim())) ? convId.trim() : '';
+  if (!explicitConvId) {
+    // Warm read-only transcript metadata cache outside the cross-process lock
+    try { listRecentConversations(24); } catch {}
+  }
   return withAuxTriggerLock((filePath) => {
     const cur = readAuxPaneTrigger();
-    const explicitConvId = (typeof convId === 'string' && CONV_ID_RE.test(convId.trim())) ? convId.trim() : '';
     const batchMeta = {};
     const resolvedActive = explicitConvId || resolveDesktopForegroundConversationId({ curTrigger: cur, persistViewBatch: batchMeta });
     const next = {
@@ -2681,7 +2685,16 @@ export function listRecentConversations(limit = 24, nowMs = Date.now()) {
     noteObservedTranscriptActivity(maxMtimeMs, nowMs);
   }
 
-  const enriched = entries.map((item) => {
+  entries.sort((a, b) => {
+    const aEff = Math.max(a.viewTimeMs || 0, a.mtimeMs || 0);
+    const bEff = Math.max(b.viewTimeMs || 0, b.mtimeMs || 0);
+    if (bEff !== aEff) return bEff - aEff;
+    return (b.mtimeMs || 0) - (a.mtimeMs || 0);
+  });
+
+  const enriched = [];
+  let nonSubCount = 0;
+  for (const item of entries) {
     const cacheKey = `${item.mtimeMs}:${item.size}`;
     let meta = recentConvMetaCache.get(item.logPath);
     if (!meta || meta.key !== cacheKey) {
@@ -2728,7 +2741,7 @@ export function listRecentConversations(limit = 24, nowMs = Date.now()) {
       ? 0
       : Math.max(item.viewTimeMs || 0, item.mtimeMs || 0);
 
-    return {
+    enriched.push({
       id: item.id,
       shortId: item.id.slice(0, 8),
       source: item.source,
@@ -2742,8 +2755,10 @@ export function listRecentConversations(limit = 24, nowMs = Date.now()) {
       effectiveActiveMs,
       updatedAtMs: item.mtimeMs,
       updatedAt: new Date(item.mtimeMs).toISOString()
-    };
-  });
+    });
+    if (!meta.isSubagent) nonSubCount++;
+    if (Number.isFinite(limit) && limit > 0 && nonSubCount >= limit) break;
+  }
 
   enriched.sort((a, b) => {
     if (a.isSubagent !== b.isSubagent) return a.isSubagent ? 1 : -1;

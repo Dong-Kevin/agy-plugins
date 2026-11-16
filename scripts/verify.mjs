@@ -372,6 +372,11 @@ function verifyRootInstaller() {
 
 async function verifyCrossPluginAuxTriggerLock() {
   const auxDir = mkdtempSync(join(tmpdir(), 'agy-plugins-auxlock-'));
+  const fakeHome = join(auxDir, 'home');
+  const fakeAgDir = join(fakeHome, '.gemini', 'antigravity');
+  const fakeExecDataDir = join(auxDir, 'exec-data');
+  mkdirSync(join(fakeAgDir, 'brain'), { recursive: true });
+  mkdirSync(fakeExecDataDir, { recursive: true });
   const triggerPath = join(auxDir, 'agy_aux_pane_trigger.json');
   const finderModUrl = pathToFileURL(join(ROOT, 'plugins', 'agy-finder', 'sidecars', 'tree', 'drawer.mjs')).href;
   const cvModUrl = pathToFileURL(join(ROOT, 'plugins', 'agy-context-viewer', 'sidecars', 'dashboard', 'collector.mjs')).href;
@@ -379,7 +384,15 @@ async function verifyCrossPluginAuxTriggerLock() {
   const spawnWorker = (workerScript, extraEnv = {}) =>
     new Promise((resolvePromise, rejectPromise) => {
       const child = spawn(process.execPath, ['--input-type=module', '-e', workerScript], {
-        env: { ...process.env, AGY_AUX_TRIGGER_PATH: triggerPath, ...extraEnv },
+        env: {
+          ...process.env,
+          HOME: fakeHome,
+          USERPROFILE: fakeHome,
+          AG_DIR: fakeAgDir,
+          ANTIGRAVITY_EXECUTABLE_DATA_DIR: fakeExecDataDir,
+          AGY_AUX_TRIGGER_PATH: triggerPath,
+          ...extraEnv
+        },
         stdio: ['ignore', 'pipe', 'pipe']
       });
       let out = '';
@@ -539,6 +552,10 @@ async function verifyCrossPluginAuxTriggerLock() {
       const child = spawn(process.execPath, ['--input-type=module', '-e', workerScript], {
         env: {
           ...process.env,
+          HOME: fakeHome,
+          USERPROFILE: fakeHome,
+          AG_DIR: fakeAgDir,
+          ANTIGRAVITY_EXECUTABLE_DATA_DIR: fakeExecDataDir,
           AGY_AUX_TRIGGER_PATH: trigger,
           AGY_AUX_LOCK_TIMEOUT_MS: String(timeoutMs)
         },
