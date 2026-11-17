@@ -3056,6 +3056,17 @@ function hasCompleteGenStepMetrics(entry, sMeta = null) {
   return hasModel && srvTotal > 0;
 }
 
+function isGenListFullySettled(generatorList = [], stepMetaMap = null) {
+  if (!Array.isArray(generatorList)) return true;
+  for (const entry of generatorList) {
+    if (!entry || typeof entry !== 'object') continue;
+    const stepNums = getGenEntryStepNums(entry);
+    const sMeta = stepNums.length && stepMetaMap ? stepMetaMap.get(stepNums[0]) : null;
+    if (!hasCompleteGenStepMetrics(entry, sMeta)) return false;
+  }
+  return true;
+}
+
 function shouldReplaceGenStepEntry(prevEntry, nextEntry) {
   if (!prevEntry) return true;
   const prevComplete = hasCompleteGenStepMetrics(prevEntry);
@@ -3585,6 +3596,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       memGen.logMtimeMs === logStatMtime &&
       memGen.generatorList?.length &&
       requiredModelSteps.every((stepNum) => hasCompleteGenStepMetrics(memGen.callsByStep?.get(stepNum), stepMetaMap.get(stepNum))) &&
+      isGenListFullySettled(memGen.generatorList, stepMetaMap) &&
       (latestErrorStepIdx < 0 || getMaxGenStepIdx(memGen.generatorList) >= latestErrorStepIdx)
     );
     if (memCovers) {
@@ -3605,7 +3617,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         const callsByStep = buildCallsByStepFromList(diskList);
         const diskAllRequiredCovered = requiredModelSteps.every((stepNum) => (
           hasCompleteGenStepMetrics(callsByStep.get(stepNum), stepMetaMap.get(stepNum))
-        ));
+        )) && isGenListFullySettled(diskList, stepMetaMap);
         const diskMaxGenStepIdx = getMaxGenStepIdx(diskList);
         const diskErrorCovered = (
           latestErrorStepIdx < 0 ||
@@ -3660,7 +3672,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   const genRpcSucceeded = Boolean(genMetaBundle && !genMetaBundle.rpcFailed);
   const allRequiredCovered = requiredModelSteps.every((stepNum) => (
     hasCompleteGenStepMetrics(bundleCallsByStep.get(stepNum), stepMetaMap.get(stepNum))
-  ));
+  )) && isGenListFullySettled(bundleList, stepMetaMap);
   const errorCovered = (
     latestErrorStepIdx < 0 ||
     maxGenStepIdx >= latestErrorStepIdx ||
@@ -3691,7 +3703,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   }
 
   // Build turn-by-turn metrics combining GeneratorMetadata + Transcript steps
-  const turns = [];
+  const turnCandidates = [];
   let sessionCostUSD = 0;
   let turnCandidateSeq = 0;
 
@@ -3725,7 +3737,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     const promptSum = input + cache;
     const turnCachePct = promptSum > 0 ? Number(((cache / promptSum) * 100).toFixed(1)) : 0;
 
-    turns.push({
+    turnCandidates.push({
       turnIndex: 0,
       stepIndex: sIdx,
       _arrayIdx: arrayIdx,
@@ -3842,7 +3854,9 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       const turnCachePct = promptSum > 0 ? Number(((cache / promptSum) * 100).toFixed(1)) : 0;
 
       const ctxMeta = cm.chatStartMetadata?.contextWindowMetadata || null;
-      turns.push({
+      const turnError = getGenStepServerError(gm)
+        || (timingMeta?.isError ? String(rawSteps[timingMeta.arrayIdx]?.content || '请求报错') : '');
+      turnCandidates.push({
         turnIndex: 0,
         stepIndex: stepIdx,
         _arrayIdx: maxMatchedArrayIdx >= 0 ? maxMatchedArrayIdx : (timingMeta?.arrayIdx ?? -1),
@@ -3873,7 +3887,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         streamingTps,
         costUSD: costInfo.costUSD ?? 0,
         isPriced: costInfo.isPriced,
-        error: getGenStepServerError(gm),
+        error: turnError,
         contextBreakdown: null,
         _isServerExact: Boolean(hasServerUsage && hasServerTiming)
       });
@@ -3901,14 +3915,39 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     }
   }
 
-  // Restore chronological transcript order before computing sequential turnIndex, deltaTokens, contextBreakdown, cache persistence & latestTurn
+  // Restore chronological transcript order before filtering completed/error turns and computing turnIndex, deltaTokens, contextBreakdown, cache persistence & latestTurn
   let latestTurnSourceGm = null;
-  if (turns.length > 0) {
-    for (const t of turns) {
+  let latestCandidate = null;
+  let candidateContextBreakdown = null;
+  const turns = [];
+  if (turnCandidates.length > 0) {
+    for (const t of turnCandidates) {
       t._sortKey = computeChronoSortKey(t._minArrayIdx, t._minStepIdx, t._orderSeq, stepArrayIdxByStepNum);
     }
-    turns.sort((a, b) => compareChronoSortKeys(a._sortKey, b._sortKey));
-    latestTurnSourceGm = turns[turns.length - 1]._sourceGm || null;
+    turnCandidates.sort((a, b) => compareChronoSortKeys(a._sortKey, b._sortKey));
+    latestCandidate = turnCandidates[turnCandidates.length - 1] || null;
+    for (const t of turnCandidates) {
+      if (t.totalTokens > 0 || Boolean(t.error)) {
+        turns.push(t);
+      }
+    }
+    const latestTurnObj = turns.length ? turns[turns.length - 1] : null;
+    const latestCandidateBreakdown = latestCandidate?._rawCtxMeta
+      ? extractContextBreakdown(latestCandidate._rawCtxMeta)
+      : null;
+    const latestTurnBreakdown = latestTurnObj?._rawCtxMeta
+      ? extractContextBreakdown(latestTurnObj._rawCtxMeta)
+      : null;
+    if (latestCandidateBreakdown) {
+      candidateContextBreakdown = latestCandidateBreakdown;
+      latestTurnSourceGm = latestCandidate?._sourceGm || null;
+    } else if (latestTurnBreakdown) {
+      candidateContextBreakdown = latestTurnBreakdown;
+      latestTurnSourceGm = latestTurnObj?._sourceGm || null;
+    } else {
+      latestTurnSourceGm = latestCandidate?._sourceGm || latestTurnObj?._sourceGm || null;
+    }
+
     let prevTotalTokens = 0;
     for (let idx = 0; idx < turns.length; idx++) {
       const t = turns[idx];
@@ -3917,7 +3956,9 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         ? (prevTotalTokens > 0 ? t.totalTokens - prevTotalTokens : t.totalTokens)
         : 0;
       if (t.totalTokens > 0) prevTotalTokens = t.totalTokens;
-      t.contextBreakdown = (idx === turns.length - 1 && t._rawCtxMeta) ? extractContextBreakdown(t._rawCtxMeta) : null;
+      t.contextBreakdown = idx === turns.length - 1 ? candidateContextBreakdown : null;
+    }
+    for (const t of turnCandidates) {
       delete t._minArrayIdx;
       delete t._minStepIdx;
       delete t._orderSeq;
@@ -3993,7 +4034,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     : null;
 
   // Populate system & tool definition token estimates from server contextBreakdown if present
-  const contextBreakdown = latestTurn?.contextBreakdown || null;
+  const contextBreakdown = candidateContextBreakdown;
   if (contextBreakdown?.groups?.length) {
     const sysG = contextBreakdown.groups.find((g) => g.name === 'System Prompt');
     const toolG = contextBreakdown.groups.find((g) => g.name === 'Tools');
@@ -4023,18 +4064,20 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       ? latestStepError.text
       : ''
   );
+  const modelSourceTurn = (latestCandidate?.hasRecordedModel ? latestCandidate : latestTurn) || latestCandidate;
+  const refStepIdx = modelSourceTurn?.stepIndex ?? latestTurn?.stepIndex ?? null;
   const switchedAfterLatestTurn = Boolean(
     activeSettingModel &&
     lastSettingStepIdx >= 0 &&
-    (latestTurn?.stepIndex == null || lastSettingStepIdx > Number(latestTurn.stepIndex))
+    (refStepIdx == null || lastSettingStepIdx > Number(refStepIdx))
   );
   const currentModelKey = switchedAfterLatestTurn
     ? (normalizeModelId(activeSettingModel, host.dynamicModelMap) || null)
-    : (latestTurn?.modelKey || normalizeModelId(activeSettingModel, host.dynamicModelMap) || null);
+    : (modelSourceTurn?.modelKey || normalizeModelId(activeSettingModel, host.dynamicModelMap) || null);
   const currentModelDisplay = switchedAfterLatestTurn
     ? formatModelDisplayName(activeSettingModel, currentModelKey)
-    : (latestTurn?.hasRecordedModel
-        ? latestTurn.model
+    : (modelSourceTurn?.hasRecordedModel
+        ? modelSourceTurn.model
         : (activeSettingModel ? formatModelDisplayName(activeSettingModel, currentModelKey) : '未记录模型'));
   const errorInfo = classifyRequestError(activeErrorText, {
     currentModel: currentModelDisplay,
@@ -4047,8 +4090,9 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   if (latestValidTurn && latestValidTurn.totalTokens > 0 && !latestValidTurn.error) {
     lastCoveredArrayIdx = Math.max(lastCoveredArrayIdx, latestValidTurn._arrayIdx ?? -1);
   }
-  if (errorInfo.kind === 'context_overflow' && latestTurn?.estimate > 0) {
-    lastCoveredArrayIdx = Math.max(lastCoveredArrayIdx, latestTurn._arrayIdx ?? -1);
+  const latestEstimateTurn = (latestCandidate?.estimate > 0 ? latestCandidate : null) || latestTurn;
+  if (errorInfo.kind === 'context_overflow' && latestEstimateTurn?.estimate > 0) {
+    lastCoveredArrayIdx = Math.max(lastCoveredArrayIdx, latestEstimateTurn._arrayIdx ?? -1);
   }
   const pendingMeasure = emptyMeasure();
   let pendingStepsCount = 0;
@@ -4067,20 +4111,20 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     : 0;
 
   const baseUsedTokens = errorInfo.kind === 'context_overflow'
-    ? (latestTurn?.estimate || latestValidTurn?.totalTokens || null)
-    : (latestValidTurn?.totalTokens ?? latestTurn?.estimate ?? null);
+    ? (latestEstimateTurn?.estimate || latestValidTurn?.totalTokens || null)
+    : (latestValidTurn?.totalTokens ?? latestEstimateTurn?.estimate ?? null);
   const usedTokens = baseUsedTokens !== null ? baseUsedTokens + pendingTokens : null;
   const curNormDisplay = String(currentModelDisplay || '').trim().toLowerCase();
   const isTurnMatchingCurrentModel = (t) => {
     if (!t || !(t.budget > 0)) return false;
-    if (!switchedAfterLatestTurn && t === latestTurn) return true;
+    if (!switchedAfterLatestTurn && (t === modelSourceTurn || t === latestTurn)) return true;
     if (currentModelKey && t.modelKey && t.modelKey === currentModelKey) return true;
     if (t.hasRecordedModel && curNormDisplay && curNormDisplay !== '未记录模型') {
       return String(t.model || '').trim().toLowerCase() === curNormDisplay;
     }
     return false;
   };
-  const matchedBudgetTurn = [...turns].reverse().find(isTurnMatchingCurrentModel);
+  const matchedBudgetTurn = [...turnCandidates].reverse().find(isTurnMatchingCurrentModel);
   const budgetTokens = matchedBudgetTurn?.budget || null;
   const budgetSource = budgetTokens ? 'server' : 'unknown';
   const remainingTokens = usedTokens !== null && budgetTokens !== null && budgetTokens > 0
@@ -4124,7 +4168,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     pendingTokens,
     pendingStepsCount,
     actual: latestValidTurn?.totalTokens ?? null,
-    estimate: latestTurn?.estimate ?? null,
+    estimate: latestEstimateTurn?.estimate ?? null,
     budget: budgetTokens,
     budgetSource,
     remaining: remainingTokens,

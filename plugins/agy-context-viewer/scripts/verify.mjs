@@ -2562,6 +2562,7 @@ async function main() {
     const i1ConvG = '00000000-0000-4000-8000-000000000307';
     const i1ConvH = '00000000-0000-4000-8000-000000000308';
     const i1ConvI = '00000000-0000-4000-8000-000000000309';
+    const i1ConvJ = '00000000-0000-4000-8000-000000000310';
     const i1Csrf = 'i1-ls-csrf-secret-tok';
     const i1ChildCsrf = 'i1-ls-csrf-child-scoped-tok';
     const i1RawEmail = ['i1test', 'example.com'].join('@');
@@ -3427,6 +3428,140 @@ async function main() {
         makeFullMetaEntry(10, 2000, 200, 1100)
       ];
       await verifyAb1WarmFreshCold(i1ConvI, tK4, 1900, '[5,10]', 8500, '非单调 transcript 顺序');
+
+      // Case L: In-flight 0-token generatorMetadata placeholders must not enter turns/sparkline/turnsCount or prematurely settle, while preserving budget/estimate/breakdown until completion
+      const writeCaseLTranscript = (mtimeMs, completedThirdTurn = false) => {
+        const d = join(isolatedAgDir, 'brain', i1ConvJ, '.system_generated', 'logs');
+        mkdirSync(d, { recursive: true });
+        const tp = join(d, 'transcript.jsonl');
+        const rows = [
+          { step_index: 1, type: 'USER_INPUT', created_at: new Date(mtimeMs - 5000).toISOString(), content: `i1 inflight task ${i1ConvJ}` },
+          { step_index: 2, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(mtimeMs - 4000).toISOString(), input_tokens: 2000, output_tokens: 200, model: 'gemini-3.8-flash', content: 'turn 1 reply' },
+          { step_index: 3, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(mtimeMs - 3000).toISOString(), input_tokens: 6000, output_tokens: 300, model: 'gemini-3.8-flash', content: 'turn 2 reply' },
+          { step_index: 4, type: 'USER_INPUT', created_at: new Date(mtimeMs - 1000).toISOString(), content: 'new turn prompt awaiting model response' }
+        ];
+        if (completedThirdTurn) {
+          rows.push({
+            step_index: 5,
+            type: 'PLANNER_RESPONSE',
+            status: 'DONE',
+            created_at: new Date(mtimeMs).toISOString(),
+            input_tokens: 8500,
+            output_tokens: 350,
+            model: 'gemini-3.8-flash',
+            content: 'turn 3 completed reply'
+          });
+        }
+        writeFileSync(tp, rows.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf-8');
+        utimesSync(tp, new Date(mtimeMs), new Date(mtimeMs));
+        return statSync(tp).mtimeMs;
+      };
+
+      const tL0 = writeCaseLTranscript(tK4 + 5000, false);
+      i1ConvCustomList[i1ConvJ] = [
+        makeFullMetaEntry(2, 2000, 200, 1200),
+        makeFullMetaEntry(3, 6000, 300, 1600),
+        {
+          chatModel: {
+            modelDisplayName: 'Gemini 3.8 Flash',
+            responseModel: 'gemini-3.8-flash',
+            chatStartMetadata: {
+              contextWindowMetadata: {
+                maxContextTokens: 512000,
+                estimatedTokensUsed: 6500
+              }
+            }
+          }
+        }
+      ];
+      const snapL1 = await scanConversation(i1ConvJ, { force: true, nowMs: tL0 });
+      const diskAfterL1 = JSON.parse(readFileSync(convDiskFile, 'utf-8')).convs?.[i1ConvJ];
+      const coldL1 = await runI1Child(
+        `const m = await import(${JSON.stringify(i1CollectorUrl)});
+         const s = await m.scanConversation(${JSON.stringify(i1ConvJ)}, { background: true, nowMs: ${tL0 + 500} });
+         console.log(JSON.stringify({ turnsLen: s.turns?.length, turnsCount: s.audit?.turnsCount, budget: s.context?.budget, estimate: s.context?.estimate, breakdownSys: s.context?.breakdown?.groups?.[0]?.tokens }));`
+      );
+      assert(
+        snapL1.turns?.length === 2 &&
+          snapL1.audit?.turnsCount === 2 &&
+          snapL1.turns.every((t) => t.totalTokens > 0) &&
+          JSON.stringify(snapL1.turns.map((t) => t.turnIndex)) === '[2,1]' &&
+          snapL1.sparkline?.length === 2 &&
+          snapL1.sparkline.every((p) => p.total > 0) &&
+          snapL1.context?.inputTokens === 6000 &&
+          snapL1.context?.budget === 512000 &&
+          snapL1.context?.estimate === 6500 &&
+          snapL1.context?.breakdown?.groups?.[0]?.tokens === 1600 &&
+          diskAfterL1?.settled === false &&
+          coldL1.turnsLen === 2 &&
+          coldL1.turnsCount === 2 &&
+          coldL1.budget === 512000 &&
+          coldL1.estimate === 6500 &&
+          coldL1.breakdownSys === 1600,
+        `I1 Case L.1 生成中 0 tok 占位不应进入已完成轮次或丢失分组明细/提前收敛：snapTurns=${JSON.stringify(snapL1.turns)}, ctx=${JSON.stringify(snapL1.context)}, diskSettled=${diskAfterL1?.settled}, cold=${JSON.stringify(coldL1)}`
+      );
+      const l1Harness = createAppRenderHarness();
+      l1Harness.vmCtx.renderContextPanel(snapL1);
+      const l1TimelineHtml = l1Harness.getEl('turns-timeline').innerHTML;
+      assert(
+        !l1TimelineHtml.includes('第 #3 轮') && !l1TimelineHtml.includes('入 0 / 出 0'),
+        `I1 Case L.1 时间线 DOM 不应渲染第 #3 轮或入 0 / 出 0 占位行：${l1TimelineHtml}`
+      );
+
+      // L.2: Pre-allocated stepIndices:[5] with 0 usage and updated tokenBreakdown (1750) still stays excluded from turns/sparkline
+      i1ConvCustomList[i1ConvJ] = [
+        makeFullMetaEntry(2, 2000, 200, 1200),
+        makeFullMetaEntry(3, 6000, 300, 1600),
+        {
+          stepIndices: [5],
+          chatModel: {
+            modelDisplayName: 'Gemini 3.8 Flash',
+            responseModel: 'gemini-3.8-flash',
+            chatStartMetadata: {
+              contextWindowMetadata: {
+                maxContextTokens: 512000,
+                estimatedTokensUsed: 6800,
+                tokenBreakdown: {
+                  totalTokens: 6800,
+                  groups: [{ name: 'System Prompt', numTokens: 1750 }]
+                }
+              }
+            }
+          }
+        }
+      ];
+      const snapL2 = await scanConversation(i1ConvJ, { background: true, nowMs: tL0 + 4500 });
+      assert(
+        snapL2.turns?.length === 2 &&
+          snapL2.audit?.turnsCount === 2 &&
+          snapL2.sparkline?.length === 2 &&
+          snapL2.sparkline.every((p) => p.total > 0) &&
+          snapL2.context?.budget === 512000 &&
+          snapL2.context?.breakdown?.groups?.[0]?.tokens === 1750,
+        `I1 Case L.2 预分配 stepIndices 且 0 用量生成中记录应继续过滤并更新分组明细：turns=${JSON.stringify(snapL2.turns)}, breakdown=${JSON.stringify(snapL2.context?.breakdown)}`
+      );
+
+      // L.3: Once model completes and transcript writes Step 5 + usage arrives, regular scan settles to 3 turns
+      const tL2 = writeCaseLTranscript(tL0 + 6000, true);
+      const step5Meta = makeFullMetaEntry(5, 8500, 350, 1850);
+      step5Meta.chatModel.chatStartMetadata.contextWindowMetadata.maxContextTokens = 512000;
+      i1ConvCustomList[i1ConvJ] = [
+        makeFullMetaEntry(2, 2000, 200, 1200),
+        makeFullMetaEntry(3, 6000, 300, 1600),
+        step5Meta
+      ];
+      const snapL3 = await scanConversation(i1ConvJ, { background: true, nowMs: tL2 + 500 });
+      const diskAfterL3 = JSON.parse(readFileSync(convDiskFile, 'utf-8')).convs?.[i1ConvJ];
+      assert(
+        snapL3.turns?.length === 3 &&
+          snapL3.audit?.turnsCount === 3 &&
+          snapL3.turns[0].turnIndex === 3 &&
+          snapL3.turns[0].stepIndex === 5 &&
+          snapL3.turns[0].totalTokens === 8850 &&
+          snapL3.context?.breakdown?.groups?.[0]?.tokens === 1850 &&
+          diskAfterL3?.settled === true,
+        `I1 Case L.3 模型输出完成后常规扫描应收敛为 3 轮完整记录：turns=${JSON.stringify(snapL3.turns)}, diskSettled=${diskAfterL3?.settled}`
+      );
     } finally {
       if (prevI1StateDir === undefined) delete process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR; else process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR = prevI1StateDir;
       if (prevI1Ls === undefined) delete process.env.ANTIGRAVITY_LS_ADDRESS; else process.env.ANTIGRAVITY_LS_ADDRESS = prevI1Ls;
@@ -3442,6 +3577,7 @@ async function main() {
       rmSync(join(isolatedAgDir, 'brain', i1ConvG), { recursive: true, force: true });
       rmSync(join(isolatedAgDir, 'brain', i1ConvH), { recursive: true, force: true });
       rmSync(join(isolatedAgDir, 'brain', i1ConvI), { recursive: true, force: true });
+      rmSync(join(isolatedAgDir, 'brain', i1ConvJ), { recursive: true, force: true });
       rmSync(i1StateDir, { recursive: true, force: true });
       rmSync(join(isolatedStateDir, 'gen_step_models_v1.json'), { force: true });
       rmSync(join(isolatedStateDir, 'host_status_cache_v1.json'), { force: true });
