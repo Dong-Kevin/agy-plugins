@@ -3562,6 +3562,71 @@ async function main() {
           diskAfterL3?.settled === true,
         `I1 Case L.3 模型输出完成后常规扫描应收敛为 3 轮完整记录：turns=${JSON.stringify(snapL3.turns)}, diskSettled=${diskAfterL3?.settled}`
       );
+
+      // L.4: Historical stepless 0-token cancel/timeout errors must NOT render 0 tok rows, pin to top, or pollute healthy completed sessions, while genuine trailing failures still surface top error banner
+      const noStepStreamTimeoutErr = {
+        chatModel: {
+          model: 'MODEL_PLACEHOLDER_M667',
+          usage: { model: 'MODEL_PLACEHOLDER_M667' },
+          error: 'request failed: stream idle timeout (5m0s)'
+        }
+      };
+      for (const [labelL4, customListL4] of [
+        ['中间穿插无步骤报错', [makeFullMetaEntry(2, 2000, 200, 1200), noStepStreamTimeoutErr, makeFullMetaEntry(3, 6000, 300, 1600), step5Meta]],
+        ['末尾残留历史无步骤报错', [makeFullMetaEntry(2, 2000, 200, 1200), makeFullMetaEntry(3, 6000, 300, 1600), step5Meta, noStepStreamTimeoutErr]]
+      ]) {
+        i1ConvCustomList[i1ConvJ] = customListL4;
+        const snapL4a = await scanConversation(i1ConvJ, { force: true, nowMs: tL2 + 1000 });
+        assert(
+          snapL4a.turns?.length === 3 &&
+            snapL4a.audit?.turnsCount === 3 &&
+            snapL4a.turns.every((t) => t.totalTokens > 0) &&
+            snapL4a.turns[0].stepIndex === 5 &&
+            snapL4a.context?.error?.kind === 'none' &&
+            snapL4a.context?.breakdown?.groups?.[0]?.tokens === 1850,
+          `I1 Case L.4 (${labelL4}) 不应保留 0 tok 幽灵轮次或污染健康会话错误状态：turns=${JSON.stringify(snapL4a.turns)}, err=${JSON.stringify(snapL4a.context?.error)}, bd=${JSON.stringify(snapL4a.context?.breakdown)}`
+        );
+        const l4Harness = createAppRenderHarness();
+        l4Harness.vmCtx.renderContextPanel(snapL4a);
+        const l4Html = l4Harness.getEl('turns-timeline').innerHTML;
+        assert(
+          !l4Html.includes('>0 tok<') && !l4Html.includes('入 0 / 出 0') && !l4Html.includes('第 #4 轮'),
+          `I1 Case L.4 (${labelL4}) 时间线 DOM 不应出现 0 tok 卡片：${l4Html}`
+        );
+      }
+
+      // Genuine trailing failure after Step 6 USER_INPUT -> turns remain 3 non-zero rows, top context.error surfaces 503
+      const l4LogPath = join(isolatedAgDir, 'brain', i1ConvJ, '.system_generated', 'logs', 'transcript.jsonl');
+      const tL4b = tL2 + 2000;
+      const existingRowsL4 = readFileSync(l4LogPath, 'utf-8').trim().split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l));
+      existingRowsL4.push({
+        step_index: 6,
+        type: 'USER_INPUT',
+        created_at: new Date(tL4b).toISOString(),
+        content: 'trailing request that hits 503'
+      });
+      writeFileSync(l4LogPath, existingRowsL4.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf-8');
+      utimesSync(l4LogPath, new Date(tL4b), new Date(tL4b));
+      i1ConvCustomList[i1ConvJ] = [
+        makeFullMetaEntry(2, 2000, 200, 1200),
+        makeFullMetaEntry(3, 6000, 300, 1600),
+        step5Meta,
+        {
+          chatModel: {
+            modelDisplayName: 'Gemini 3.8 Flash',
+            error: 'UNAVAILABLE (code 503): No capacity available'
+          }
+        }
+      ];
+      const snapL4b = await scanConversation(i1ConvJ, { force: true, nowMs: tL4b + 500 });
+      assert(
+        snapL4b.turns?.length === 3 &&
+          snapL4b.audit?.turnsCount === 3 &&
+          snapL4b.turns.every((t) => t.totalTokens > 0) &&
+          snapL4b.context?.error?.kind !== 'none' &&
+          snapL4b.context?.breakdown?.groups?.[0]?.tokens === 1850,
+        `I1 Case L.4 (末尾真实 503 失败) 应保持 3 轮非零记录同时顶部识别错误：turns=${JSON.stringify(snapL4b.turns)}, err=${JSON.stringify(snapL4b.context?.error)}`
+      );
     } finally {
       if (prevI1StateDir === undefined) delete process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR; else process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR = prevI1StateDir;
       if (prevI1Ls === undefined) delete process.env.ANTIGRAVITY_LS_ADDRESS; else process.env.ANTIGRAVITY_LS_ADDRESS = prevI1Ls;

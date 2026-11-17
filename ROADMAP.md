@@ -1,17 +1,18 @@
 # agy-plugins ROADMAP
 
-更新时间：2026-11-17 10:46（Asia/Shanghai）。
+更新时间：2026-11-17 12:00（Asia/Shanghai）。
 
 ## 本次交付目标
 
-1. 移除 `context-viewer` 手动对比档位按钮组（`自动 | 200K | 256K | 1M`）与 `budgetOverride` 逻辑，改为纯动态跟随服务端下发的实时上下文窗口上限（如 `256K` / `512K` / `840K` / `1M`），消除跨插件触发锁内全量会话扫描导致的锁超时，并过滤 `GetCascadeTrajectoryGeneratorMetadata` 生成中（in-flight）`0 tok` 占位轮次，完成 `v1.7.11` 仓库校验、打包与本机 `./install.sh context-viewer` 热同步。
+1. 移除 `context-viewer` 手动对比档位按钮组（`自动 | 200K | 256K | 1M`）与 `budgetOverride` 逻辑，改为纯动态跟随服务端下发的实时上下文窗口上限（如 `256K` / `512K` / `840K` / `1M`），消除跨插件触发锁内全量会话扫描导致的锁超时，过滤生成中（in-flight）与历史无步骤取消/超时 `0 tok` 占位记录，完成 `v1.7.11` 全仓校验、打包与本机 `./install.sh context-viewer` 热同步。
 2. 保留既有双插件基线与发布交接记录（`agy-finder v0.2.8` / `context-viewer v1.7.10` 于 `v2026.11.15.1` 已完成）。
 
 ## 当前阶段与状态
 
-- **已完成 `context-viewer v1.7.11` 生成中（in-flight）`0 tok` 占位轮次过滤修复、全仓校验、打包与本机 `./install.sh context-viewer` 热同步（已同步 `main`，待后续按需发布 Release）**：
-  - **过滤生成中 `0 tok` 占位轮次并保持顶部实时元数据与缓存完整性**（[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs)）：新增 `isGenListFullySettled()` 并在 `memCovers` / `diskAllRequiredCovered` / `allRequiredCovered` 联合校验完整列表，防止带空 `stepIndices` 或 `0` 用量的生成中条目过早标记 `settled: true`；`scanConversation()` 先按时序重排 `turnCandidates`，再以 `totalTokens > 0 || Boolean(t.error)` 过滤掉未完成占位条目（不进入时间线 `turns`、`sparkline` 与 `turnsCount`，同时保留报错轮次）；对缺失 `tokenBreakdown` 的生成中条目优先回退保留上一轮已完成明细及 `latestTurnSourceGm`，并允许顶部 `budget` / `estimate` / `model` / `contextBreakdown` 实时读取生成中 `chatStartMetadata`（保持 `U2` 跨模型预算隔离不变）。
-  - **新增 `I1 Case L` 回归断言**（[context-viewer/scripts/verify.mjs](./plugins/agy-context-viewer/scripts/verify.mjs)）：覆盖无 `stepIndices` 且无 `tokenBreakdown` 的生成中占位 + `512K` 扩容、`stepIndices` 预分配但 `0` 用量并携带新 `tokenBreakdown`、DOM 不渲染 `第 #3 轮` / `入 0 / 出 0`、冷子进程分组明细保留及完成后常规扫描收敛为 `3` 轮等场景。
+- **已完成 `context-viewer v1.7.11` 历史无步骤 `0 tok` 报错记录过滤与时序插值修复、全仓校验、打包及本机 `./install.sh context-viewer` 热同步（已同步 `main`，待后续按需发布 Release）**：
+  - **彻底消除 `0 tok` 幽灵轮次并防历史报错污染健康会话**（[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs)）：提取 `computeGenListSortKeys()`，为无 `stepIndices` 的中途取消/超时/503 报错条目按前后真实步骤相对时序插值定位（同步修正 `mergeGeneratorMetadataLists()`）；将 `scanConversation()` 轮次过滤收紧为 `t.totalTokens > 0`（任何 `0 tok` 条目均不再进入时间线 `turns`、`sparkline` 与 `turnsCount`），通过 `latestInFlight` 与 `hasTrailingZeroTokError` 隔离生成中占位、历史无步骤报错与末尾真实失败请求，避免中途历史报错覆盖健康会话的 `error` 状态及末尾 `tokenBreakdown`；同步将 `ACTIVE_CONV_GEN_DISK_CACHE_VERSION` 升至 `2` 以使旧缓存自动重拉自愈。
+  - **新增 `I1 Case L.4` 回归断言**（[context-viewer/scripts/verify.mjs](./plugins/agy-context-viewer/scripts/verify.mjs)）：覆盖中间穿插无步骤 `stream idle timeout`、末尾残留历史无步骤报错对后续已完成会话的无害化（`turns` 非零、`error.kind === 'none'`、保留 `tokenBreakdown` 且 DOM 无 `>0 tok<` 卡片），以及会话末尾真实 `503` 失败时顶部异常提示保留。
+- **已同步基线 `818028c`**：`context-viewer v1.7.11` 生成中（in-flight）`0 tok` 占位轮次过滤修复（`isGenListFullySettled()` + `turnCandidates` 过滤 + `I1 Case L.1–L.3`）已提交推送至 `main`。
 - **已完成 `context-viewer v1.7.11` 纯动态窗口上限展示与跨插件锁外预热优化、全仓校验、打包、本机 `./install.sh context-viewer` 热更新（待完成推送与后续按需发布 Release）**：
   - **移除手动对比档位、动态跟随服务端真实上限**（[index.html](./plugins/agy-context-viewer/sidecars/dashboard/index.html)、[app.js](./plugins/agy-context-viewer/sidecars/dashboard/app.js)、[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs)）：将 `#budget-seg`（`自动 | 200K | 256K | 1M`）替换为只读动态胶囊 `#ctx-budget-chip`（实时显示 `上限 512.0K` 等，空会话显示 `上限待同步`，无服务端上限归档显示 `上限未记录`），移除 `budgetOverride` 分支、偏好恢复与事件监听，并在 `saveSettings()` 中顺手清理历史遗留的 `uiPreferences.budgetOverride` 字段；版本同步升至 `1.7.11`（含 [plugin.json](./plugins/agy-context-viewer/plugin.json)、[cli.mjs](./plugins/agy-context-viewer/sidecars/dashboard/cli.mjs) 及双侧中英文 README）。
   - **跨插件触发锁临界区瘦身与压测环境隔离**（[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs)、[scripts/verify.mjs](./scripts/verify.mjs)）：`listRecentConversations(limit)` 改为先按有效时间预排序并在收集满 `limit` 个非子代理会话后提前截断，`writeAuxPaneTrigger()` 在无显式 `convId` 时先于锁外预热只读缓存，避免 8 进程并发持锁期间重复扫描全部会话导致超越 `1200ms` 锁超时（锁内 `resolveDesktopForegroundConversationId()` 耗时实测由 `450ms` 降至 `1ms`）；`verifyCrossPluginAuxTriggerLock()` 同步补齐 `HOME` / `USERPROFILE` / `AG_DIR` / `ANTIGRAVITY_EXECUTABLE_DATA_DIR` 隔离环境，不触碰或扫描真实宿主会话目录。
@@ -79,6 +80,7 @@
 
 ## 最近验证
 
+- `context-viewer v1.7.11` 历史无步骤 `0 tok` 报错过滤、热同步与实盘旧会话验收：`node plugins/agy-context-viewer/scripts/verify.mjs` `6/6` 通过（含 `I1 Case L.4`）；`node scripts/verify.mjs --strict-git-identity && node scripts/package-all.mjs` 全仓门禁与打包通过，产出 `dist/context-viewer-v1.7.11.zip`（`181.6 KB` / 20 个文件 / SHA-256 `d2c7d533f9e8a921c12d45710a55b2af1ccd08cfab89bd683d5ba1e8522fbc24`）；`./install.sh context-viewer` 完成本机热同步且 `diff -q` 确认已安装 `collector.mjs` 与源码一致；只读核查最近 8 个实盘会话显示全部 `zeroTurns: 0`（此前置顶报错的旧会话已恢复末轮正常 `step`、`errKind: 'none'` 与 `hasBd: true`，真实末尾失败会话仍保留顶部错误识别）。时间：`2026-11-17 11:38`（Asia/Shanghai）。
 - `context-viewer v1.7.11` 本机热同步与收口校验：执行 `./install.sh context-viewer` 完成本机插件热更新，`diff -q` 核对已安装 `collector.mjs` 与仓库源码完全一致，`~/.local/bin/agy-context --help` 输出 `v1.7.11`；重跑 `node scripts/verify.mjs --strict-git-identity` 全仓门禁通过（Windows PowerShell、Linux 桌面端与 Node.js 18 未实测）。时间：`2026-11-17 10:46`（Asia/Shanghai）。
 - `context-viewer v1.7.11` 生成中 `0 tok` 占位轮次过滤修复验收：`node plugins/agy-context-viewer/scripts/verify.mjs` `6/6` 通过（含新增 `I1 Case L`），`node scripts/verify.mjs --strict-git-identity && node scripts/package-all.mjs` 全仓门禁与打包通过，产出 `dist/context-viewer-v1.7.11.zip`（`180.7 KB` / 20 个文件 / SHA-256 `6cff79c009a64b6d5a93d60dacf7e31fe077f5c262aaca897576ec5eea28d667`）与 `dist/agy-finder-v0.2.8.zip`（`94.7 KB` / 20 个文件）。时间：`2026-11-17 10:10`（Asia/Shanghai）。
 - `context-viewer v1.7.11` 跨插件锁外预热与环境隔离收口验收：实测 `collector.mjs` 锁内 `resolveDesktopForegroundConversationId()` 耗时由 `450ms` 降至 `1ms`（锁外预热 `412ms`）；`node plugins/agy-context-viewer/scripts/verify.mjs` `6/6` 通过，`node scripts/verify.mjs --strict-git-identity && node scripts/package-all.mjs` 全仓门禁（含隔离后 `verifyCrossPluginAuxTriggerLock` 8 进程压测）与打包通过，产出 `dist/context-viewer-v1.7.11.zip`（`180.3 KB` / 20 条目 / SHA-256 `964e11ba01958b81310e0a2a01d1a3134fbc059d3a2e3ed103601f2310daf590`，`shasum -a 256 -c` 与 Python `ZipFile.testzip()` 通过）；`./install.sh context-viewer` 完成本机热同步且 `diff -q` 确认已安装 `collector.mjs` 与源码一致（未实测 Windows PowerShell、Linux 桌面与 Node.js 18）。时间：`2026-11-16 12:13`（Asia/Shanghai）。

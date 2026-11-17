@@ -80,7 +80,7 @@ const inFlightGenMeta = new Map();
 const observedActivityByRoot = new Map();
 const HOST_STATUS_DISK_CACHE_VERSION = 1;
 const HOST_STATUS_CACHE_MAX_ENTRIES = 4;
-const ACTIVE_CONV_GEN_DISK_CACHE_VERSION = 1;
+const ACTIVE_CONV_GEN_DISK_CACHE_VERSION = 2;
 const ACTIVE_CONV_GEN_CACHE_MAX_CONVS = 6;
 const CONV_META_SETTLE_AGE_MS = 180_000;
 const CONV_META_RETRY_DELAYS_MS = [4000, 8000, 18000, 60000];
@@ -3210,27 +3210,74 @@ function compareChronoSortKeys(a, b) {
   return a.primary - b.primary || a.secondary - b.secondary || a.seq - b.seq;
 }
 
+function computeGenListSortKeys(generatorList = [], stepArrayIdxByStepNum = null, stepMetaMap = null) {
+  const valid = Array.isArray(generatorList) ? generatorList : [];
+  const directKeys = valid.map((entry, idx) => {
+    if (!entry || typeof entry !== 'object') return null;
+    const numericSteps = getGenEntryStepNums(entry);
+    if (!numericSteps.length) return null;
+    let minMatchedArrayIdx = -1;
+    for (const n of numericSteps) {
+      const matchedArr = stepArrayIdxByStepNum?.has(n)
+        ? stepArrayIdxByStepNum.get(n)
+        : (stepMetaMap?.get(n)?.arrayIdx ?? -1);
+      if (matchedArr >= 0 && (minMatchedArrayIdx < 0 || matchedArr < minMatchedArrayIdx)) {
+        minMatchedArrayIdx = matchedArr;
+      }
+    }
+    const minStepIdx = Math.min(...numericSteps);
+    return computeChronoSortKey(minMatchedArrayIdx, minStepIdx, idx, stepArrayIdxByStepNum);
+  });
+
+  const nonNullKeys = directKeys.filter(Boolean);
+  const firstDirect = nonNullKeys.length ? nonNullKeys[0] : null;
+  const lastDirect = nonNullKeys.length > 1 ? nonNullKeys[nonNullKeys.length - 1] : firstDirect;
+  const isDescending = Boolean(
+    firstDirect &&
+    lastDirect &&
+    compareChronoSortKeys(firstDirect, lastDirect) > 0
+  );
+
+  return valid.map((entry, idx) => {
+    if (directKeys[idx]) return directKeys[idx];
+    let prevDirect = null;
+    for (let p = idx - 1; p >= 0; p--) {
+      if (directKeys[p]) {
+        prevDirect = directKeys[p];
+        break;
+      }
+    }
+    let nextDirect = null;
+    for (let q = idx + 1; q < valid.length; q++) {
+      if (directKeys[q]) {
+        nextDirect = directKeys[q];
+        break;
+      }
+    }
+    let primary = Number.MAX_SAFE_INTEGER;
+    let secondary = idx;
+    if (prevDirect && nextDirect) {
+      if (prevDirect.primary !== nextDirect.primary) {
+        primary = (prevDirect.primary + nextDirect.primary) / 2;
+      } else {
+        primary = prevDirect.primary;
+        secondary = (prevDirect.secondary + nextDirect.secondary) / 2;
+      }
+    } else if (!prevDirect && nextDirect) {
+      primary = isDescending ? Number.MAX_SAFE_INTEGER : (nextDirect.primary - 0.5);
+    } else if (prevDirect && !nextDirect) {
+      primary = isDescending ? (prevDirect.primary - 0.5) : Number.MAX_SAFE_INTEGER;
+    }
+    return { primary, secondary, seq: idx };
+  });
+}
+
 function orderGeneratorListChronologically(generatorList = [], stepArrayIdxByStepNum = null, stepMetaMap = null) {
   const valid = Array.isArray(generatorList) ? generatorList.filter((e) => e && typeof e === 'object') : [];
   if (valid.length <= 1) return valid.slice();
+  const keys = computeGenListSortKeys(valid, stepArrayIdxByStepNum, stepMetaMap);
   return valid
-    .map((entry, idx) => {
-      const numericSteps = getGenEntryStepNums(entry);
-      let minMatchedArrayIdx = -1;
-      for (const n of numericSteps) {
-        const matchedArr = stepArrayIdxByStepNum?.has(n)
-          ? stepArrayIdxByStepNum.get(n)
-          : (stepMetaMap?.get(n)?.arrayIdx ?? -1);
-        if (matchedArr >= 0 && (minMatchedArrayIdx < 0 || matchedArr < minMatchedArrayIdx)) {
-          minMatchedArrayIdx = matchedArr;
-        }
-      }
-      const minStepIdx = numericSteps.length ? Math.min(...numericSteps) : null;
-      return {
-        entry,
-        key: computeChronoSortKey(minMatchedArrayIdx, minStepIdx, idx, stepArrayIdxByStepNum)
-      };
-    })
+    .map((entry, idx) => ({ entry, key: keys[idx] }))
     .sort((a, b) => compareChronoSortKeys(a.key, b.key))
     .map((item) => item.entry);
 }
@@ -3241,15 +3288,41 @@ function mergeGeneratorMetadataLists(baseList = [], incomingList = []) {
   if (!base.length) return orderGeneratorListChronologically(incoming);
   if (!incoming.length) return orderGeneratorListChronologically(base);
 
+  const orderedIncoming = orderGeneratorListChronologically(incoming);
+  const incomingStepBounds = orderedIncoming.map((e) => {
+    const steps = getGenEntryStepNums(e);
+    return steps.length ? Math.min(...steps) : null;
+  });
   const baseByStep = buildCallsByStepFromList(base);
   const accepted = [];
   const coveredSteps = new Set();
   let seq = 0;
 
-  for (const entry of incoming) {
+  for (let i = 0; i < orderedIncoming.length; i++) {
+    const entry = orderedIncoming[i];
     const steps = getGenEntryStepNums(entry);
     if (!steps.length) {
-      accepted.push({ entry, minStep: Number.MAX_SAFE_INTEGER, seq: seq++ });
+      let prevStep = null;
+      for (let p = i - 1; p >= 0; p--) {
+        if (incomingStepBounds[p] !== null) {
+          prevStep = incomingStepBounds[p];
+          break;
+        }
+      }
+      let nextStep = null;
+      for (let q = i + 1; q < orderedIncoming.length; q++) {
+        if (incomingStepBounds[q] !== null) {
+          nextStep = incomingStepBounds[q];
+          break;
+        }
+      }
+      let interpStep = Number.MAX_SAFE_INTEGER;
+      if (prevStep !== null && nextStep !== null) {
+        interpStep = (prevStep + nextStep) / 2;
+      } else if (prevStep === null && nextStep !== null) {
+        interpStep = nextStep - 0.5;
+      }
+      accepted.push({ entry, minStep: interpStep, seq: seq++ });
       continue;
     }
     const keptSteps = steps.filter((s) => shouldReplaceGenStepEntry(baseByStep.get(s), entry));
@@ -3667,6 +3740,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
 
   const rawBundleList = Array.isArray(genMetaBundle?.generatorList) ? genMetaBundle.generatorList : [];
   const bundleList = orderGeneratorListChronologically(rawBundleList, stepArrayIdxByStepNum, stepMetaMap);
+  const bundleSortKeys = computeGenListSortKeys(bundleList, stepArrayIdxByStepNum, stepMetaMap);
   const bundleCallsByStep = buildCallsByStepFromList(bundleList);
   const maxGenStepIdx = getMaxGenStepIdx(bundleList);
   const genRpcSucceeded = Boolean(genMetaBundle && !genMetaBundle.rpcFailed);
@@ -3863,6 +3937,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         _minArrayIdx: minMatchedArrayIdx,
         _minStepIdx: minGmStepIdx,
         _orderSeq: turnCandidateSeq++,
+        _precomputedSortKey: bundleSortKeys[idx] || null,
         _rawCtxMeta: ctxMeta || null,
         _sourceGm: gm,
         createdAt: timingMeta?.createdAt || '',
@@ -3915,37 +3990,41 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     }
   }
 
-  // Restore chronological transcript order before filtering completed/error turns and computing turnIndex, deltaTokens, contextBreakdown, cache persistence & latestTurn
+  // Restore chronological transcript order before filtering completed turns and computing turnIndex, deltaTokens, contextBreakdown, cache persistence & latestTurn
   let latestTurnSourceGm = null;
   let latestCandidate = null;
+  let latestInFlight = null;
   let candidateContextBreakdown = null;
   const turns = [];
   if (turnCandidates.length > 0) {
     for (const t of turnCandidates) {
-      t._sortKey = computeChronoSortKey(t._minArrayIdx, t._minStepIdx, t._orderSeq, stepArrayIdxByStepNum);
+      t._sortKey = t._precomputedSortKey || computeChronoSortKey(t._minArrayIdx, t._minStepIdx, t._orderSeq, stepArrayIdxByStepNum);
     }
     turnCandidates.sort((a, b) => compareChronoSortKeys(a._sortKey, b._sortKey));
     latestCandidate = turnCandidates[turnCandidates.length - 1] || null;
     for (const t of turnCandidates) {
-      if (t.totalTokens > 0 || Boolean(t.error)) {
+      if (t.totalTokens > 0) {
         turns.push(t);
       }
     }
     const latestTurnObj = turns.length ? turns[turns.length - 1] : null;
-    const latestCandidateBreakdown = latestCandidate?._rawCtxMeta
-      ? extractContextBreakdown(latestCandidate._rawCtxMeta)
+    latestInFlight = (latestCandidate && latestCandidate.totalTokens <= 0 && !latestCandidate.error)
+      ? latestCandidate
+      : null;
+    const latestInFlightBreakdown = latestInFlight?._rawCtxMeta
+      ? extractContextBreakdown(latestInFlight._rawCtxMeta)
       : null;
     const latestTurnBreakdown = latestTurnObj?._rawCtxMeta
       ? extractContextBreakdown(latestTurnObj._rawCtxMeta)
       : null;
-    if (latestCandidateBreakdown) {
-      candidateContextBreakdown = latestCandidateBreakdown;
-      latestTurnSourceGm = latestCandidate?._sourceGm || null;
+    if (latestInFlightBreakdown) {
+      candidateContextBreakdown = latestInFlightBreakdown;
+      latestTurnSourceGm = latestInFlight?._sourceGm || null;
     } else if (latestTurnBreakdown) {
       candidateContextBreakdown = latestTurnBreakdown;
       latestTurnSourceGm = latestTurnObj?._sourceGm || null;
     } else {
-      latestTurnSourceGm = latestCandidate?._sourceGm || latestTurnObj?._sourceGm || null;
+      latestTurnSourceGm = latestInFlight?._sourceGm || latestTurnObj?._sourceGm || latestCandidate?._sourceGm || null;
     }
 
     let prevTotalTokens = 0;
@@ -3962,6 +4041,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       delete t._minArrayIdx;
       delete t._minStepIdx;
       delete t._orderSeq;
+      delete t._precomputedSortKey;
       delete t._rawCtxMeta;
       delete t._sortKey;
       delete t._sourceGm;
@@ -4059,12 +4139,21 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   for (const g of Object.values(groups)) addMeasure(localTotal, g);
   addMeasure(localTotal, attachmentTotal);
 
-  const activeErrorText = latestTurn?.error || (
-    latestStepError && (!latestTurn?.stepIndex || latestStepError.stepIndex >= latestTurn.stepIndex)
-      ? latestStepError.text
-      : ''
+  const lastRawStep = rawSteps.length ? rawSteps[rawSteps.length - 1] : null;
+  const hasTrailingZeroTokError = Boolean(
+    latestCandidate?.error &&
+    latestCandidate !== latestTurn && (
+      !latestTurn ||
+      (latestCandidate.stepIndex != null && (latestTurn.stepIndex == null || latestCandidate.stepIndex >= latestTurn.stepIndex)) ||
+      lastRawStep?.type === 'USER_INPUT' ||
+      lastRawStep?.type === 'ERROR_MESSAGE' ||
+      lastRawStep?.status === 'ERROR'
+    )
   );
-  const modelSourceTurn = (latestCandidate?.hasRecordedModel ? latestCandidate : latestTurn) || latestCandidate;
+  const activeErrorText = latestTurn?.error
+    || (latestStepError && (latestTurn?.stepIndex == null || latestStepError.stepIndex >= latestTurn.stepIndex) ? latestStepError.text : '')
+    || (hasTrailingZeroTokError ? latestCandidate.error : '');
+  const modelSourceTurn = (latestInFlight?.hasRecordedModel ? latestInFlight : latestTurn) || latestInFlight || latestCandidate;
   const refStepIdx = modelSourceTurn?.stepIndex ?? latestTurn?.stepIndex ?? null;
   const switchedAfterLatestTurn = Boolean(
     activeSettingModel &&
@@ -4090,7 +4179,12 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   if (latestValidTurn && latestValidTurn.totalTokens > 0 && !latestValidTurn.error) {
     lastCoveredArrayIdx = Math.max(lastCoveredArrayIdx, latestValidTurn._arrayIdx ?? -1);
   }
-  const latestEstimateTurn = (latestCandidate?.estimate > 0 ? latestCandidate : null) || latestTurn;
+  const latestEstimateTurn = (
+    latestCandidate?.estimate > 0 &&
+    (latestCandidate === latestInFlight || latestCandidate === latestTurn || !latestTurn || hasTrailingZeroTokError)
+  )
+    ? latestCandidate
+    : latestTurn;
   if (errorInfo.kind === 'context_overflow' && latestEstimateTurn?.estimate > 0) {
     lastCoveredArrayIdx = Math.max(lastCoveredArrayIdx, latestEstimateTurn._arrayIdx ?? -1);
   }
@@ -4124,7 +4218,10 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     }
     return false;
   };
-  const matchedBudgetTurn = [...turnCandidates].reverse().find(isTurnMatchingCurrentModel);
+  const budgetLookupTurns = latestInFlight
+    ? [...turns, latestInFlight]
+    : (hasTrailingZeroTokError && latestCandidate ? [...turns, latestCandidate] : turns);
+  const matchedBudgetTurn = [...budgetLookupTurns].reverse().find(isTurnMatchingCurrentModel);
   const budgetTokens = matchedBudgetTurn?.budget || null;
   const budgetSource = budgetTokens ? 'server' : 'unknown';
   const remainingTokens = usedTokens !== null && budgetTokens !== null && budgetTokens > 0
