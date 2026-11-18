@@ -1367,6 +1367,7 @@ async function main() {
 
     // T2: Language Server failure / partial degradation / continued outage / recovery state machine & ETag
     let t2Mode = 'error'; // 'error' -> 'live' -> 'summary-fail' -> 'error' -> 'live'
+    let t2ResetIso = '2026-11-12T14:00:00Z';
     const t2LsServer = http.createServer((req, res) => {
       if (t2Mode === 'error') {
         res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -1383,7 +1384,7 @@ async function main() {
                 {
                   label: 'Gemini 3.8 Flash',
                   modelOrAlias: { model: 'MODEL_PLACEHOLDER_M318' },
-                  quotaInfo: { poolId: 'g-flash', remainingFraction: 0.8, resetTime: '2026-11-12T14:00:00Z' }
+                  quotaInfo: { poolId: 'g-flash', remainingFraction: 0.8, resetTime: t2ResetIso }
                 }
               ]
             }
@@ -1405,7 +1406,7 @@ async function main() {
               displayName: 'Gemini Flash Pool',
               modelIds: ['MODEL_PLACEHOLDER_M318'],
               buckets: [
-                { bucketId: 'g-flash-5h', window: '5h', remainingFraction: 0.8, resetTime: '2026-11-12T14:00:00Z' },
+                { bucketId: 'g-flash-5h', window: '5h', remainingFraction: 0.8, resetTime: t2ResetIso },
                 { bucketId: 'g-flash-wk', window: 'weekly', remainingFraction: 0.6, resetTime: '2026-11-16T00:00:00Z' }
               ]
             }
@@ -1533,10 +1534,45 @@ async function main() {
         t2Harness.getEl('quota-sync-pill').classList.contains('hidden'),
         'T2 服务恢复后未隐藏过期提示标签'
       );
+
+      // 7) Outage crossing quota reset boundary must clear expired cached quotas while keeping plan
+      const resetBaseMs = Date.now();
+      t2ResetIso = new Date(resetBaseMs + 60_000).toISOString();
+      t2Mode = 'live';
+      const cBeforeReset = await scanConversation(convId, { force: true, nowMs: resetBaseMs });
+      assert(cBeforeReset.quotas?.length === 1, 'T2 重置边界测试前应先建立有效配额缓存');
+      t2Mode = 'error';
+      const cStalePreReset = await scanConversation(convId, { force: true, nowMs: resetBaseMs + 10_000 });
+      assert(
+        cStalePreReset.quotaStatus?.state === 'stale' && cStalePreReset.quotas?.length === 1,
+        'T2 未跨过重置边界前断连应保留缓存配额'
+      );
+      const cCrossedReset = await scanConversation(convId, { force: true, nowMs: resetBaseMs + 120_000 });
+      const hCrossedReset = await collectTokenHistory({ force: true, nowMs: resetBaseMs + 120_000 });
+      assert(
+        cCrossedReset.quotaStatus?.state === 'error' &&
+          cCrossedReset.quotas?.length === 0 &&
+          hCrossedReset.quotaStatus?.state === 'error' &&
+          hCrossedReset.modelQuotas?.length === 0 &&
+          hCrossedReset.planStatus?.tierKey === 'pro' &&
+          hCrossedReset.quotaStatus?.reason?.includes('重置时间'),
+        `T2 跨过重置时间后断连不应继续展示过期配额：${JSON.stringify(hCrossedReset.quotaStatus)}`
+      );
+      await new Promise((r) => t2LsServer.close(r));
+      const hDeadHost = await collectTokenHistory({ force: true, nowMs: resetBaseMs + 120_000 });
+      assert(
+        hDeadHost.quotaStatus?.state === 'error' &&
+          (hDeadHost.quotaStatus?.errorCode === 'ECONNREFUSED' || hDeadHost.quotaStatus?.errorCode === 'ECONNRESET') &&
+          hDeadHost.modelQuotas?.length === 0 &&
+          hDeadHost.quotaStatus?.reason?.includes('原宿主语言服务已退出'),
+        `T2 原宿主退出 (ECONNREFUSED/ECONNRESET) 提示异常：${JSON.stringify(hDeadHost.quotaStatus)}`
+      );
     } finally {
       delete process.env.ANTIGRAVITY_LS_ADDRESS;
       delete process.env.ANTIGRAVITY_CSRF_TOKEN;
-      await new Promise((r) => t2LsServer.close(r));
+      if (t2LsServer.listening) {
+        await new Promise((r) => t2LsServer.close(r));
+      }
     }
 
     // T3: Unknown model context window budget vs user benchmark vs server maxContextTokens

@@ -1,16 +1,17 @@
 # agy-plugins ROADMAP
 
-更新时间：2026-11-18 17:30（Asia/Shanghai）。
+更新时间：2026-11-18 17:52（Asia/Shanghai）。
 
 ## 本次交付目标
 
 1. 修复 `context-viewer` 与 `agy-finder` 在 `agy` CLI 环境（含沙箱受限终端工具与外部终端）下的适配问题：正确识别 CLI 会话来源、诚实提示沙箱网络与目录遍历限制并补录当前活跃 CLI 会话、更新 CLI 侧 Skill/Rules 引导，完成全仓校验与打包。
-2. 修复 `context-viewer` 独立窗口 / CLI 离线缓存复用、未识别套餐误套 `$19.99/月` 与 `unavailable` 状态提示，以及 `agy-context statusline` 缓存命中率显示与宽度裁剪优先级。
+2. 修复 `context-viewer` 独立窗口 / CLI 离线缓存复用、未识别套餐误套 `$19.99/月`、`unavailable` 与断连跨重置边界过期配额处理，以及 `agy-context statusline` 缓存命中率显示与宽度裁剪优先级。
 3. 保留既有双插件基线与发布交接记录（`agy-finder v0.2.8` / `context-viewer v1.7.10` 于 `v2026.11.15.1` 已完成；`context-viewer v1.7.11` 历史无步骤 `0 tok` 过滤已同步 `main`）。
 
 ## 当前阶段与状态
 
-- **已完成 `context-viewer` 独立窗口离线缓存兜底、`statusline` 缓存命中率展示修复、全仓校验、打包与本机 `./install.sh context-viewer` 热同步（已同步提交推送 `main`）**：
+- **已完成 `context-viewer` 断连跨重置边界过期配额清理、离线缓存兜底、`statusline` 缓存命中率展示修复、全仓校验、打包与本机 `./install.sh context-viewer` 热同步（已同步提交推送 `main`）**：
+  - **断连跨重置边界清理与宿主退出引导**（[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs)、[app.js](./plugins/agy-context-viewer/sidecars/dashboard/app.js)、[context-viewer/scripts/verify.mjs](./plugins/agy-context-viewer/scripts/verify.mjs)）：统一 `buildOutageFallbackHostStatus()` 处理内存 `cachedGood` 与磁盘缓存回退，校验 `hasCrossedQuotaResetBoundary()` 与 30 分钟有效期，防止原宿主已退出或断连跨过 `resetTime` 后仍反复展示重置前的过期余量，并对 `ECONNREFUSED` / `ECONNRESET` 给出重启独立窗口重连提示。
   - **独立窗口 / CLI / 独立 Web 缓存兜底与套餐计价修复**（[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs)、[pricing.mjs](./plugins/agy-context-viewer/sidecars/dashboard/pricing.mjs)、[float_window.mjs](./plugins/agy-context-viewer/sidecars/dashboard/float_window.mjs)、[main.mjs](./plugins/agy-context-viewer/sidecars/dashboard/main.mjs)、[cli.mjs](./plugins/agy-context-viewer/sidecars/dashboard/cli.mjs)、[app.js](./plugins/agy-context-viewer/sidecars/dashboard/app.js)）：抽出 `readLatestDiskHostFallback()` 并为 `collectTokenHistory`、`float_window.mjs`、`main.mjs --standalone` 与 `cli.mjs` 统一透传 `allowDiskCacheWithoutLs: true`，在未连接语言服务或本地 RPC 失败时复用 `host_status_cache_v1.json` 的账号/套餐与 30 分钟内有效配额快照；修复 `getRegionTierMonthlyPrice()` 与 `resolveEffectivePlanStatus()` 对 `tierKey === 'unknown'` 误落回美区 `$19.99/月` 的问题；在 `app.js` 显式展示 `quotaStatus.state === 'unavailable'` 状态与引导文案。
   - **CLI 底部状态栏缓存命中率展示与宽度裁剪优化**（[cli.mjs](./plugins/agy-context-viewer/sidecars/dashboard/cli.mjs)）：管道调用未传 `terminal_width` 时默认宽度由 `80` 放宽至 `104`，将 `C xx%` 优先级由 `4` 调至 `3`（单次费用调至 `4`），并支持 `cacheHitPercent >= 0`（缓存过期时显示黄色 `C 0%`），补充对应回归用例至 [context-viewer/scripts/verify.mjs](./plugins/agy-context-viewer/scripts/verify.mjs)。
 - **已完成双插件 `agy` CLI 适配修复、回归验证、全仓打包及本机 `./install.sh` 热同步**：

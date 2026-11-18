@@ -1859,7 +1859,12 @@
     const quotaStatus = hist.quotaStatus || null;
     if (quotaStatus?.stale) {
       const tStr = fmtSyncClock(quotaStatus.lastSuccessAt);
-      planRows.push(['配额同步状态', `语言服务暂不可达，展示上次缓存${tStr ? `（${tStr}）` : ''}`]);
+      planRows.push([
+        '配额同步状态',
+        (quotaStatus.errorCode === 'ECONNREFUSED' || quotaStatus.errorCode === 'ECONNRESET')
+          ? `原宿主连接已断开，展示上次缓存${tStr ? `（${tStr} · 重启独立窗口可重新绑定）` : ''}`
+          : `语言服务暂不可达，展示上次缓存${tStr ? `（${tStr}）` : ''}`
+      ]);
     } else if (quotaStatus?.summaryStale) {
       planRows.push(['配额同步状态', '多窗口配额摘要暂不可用，仅展示基础池']);
     } else if (quotaStatus?.state === 'error') {

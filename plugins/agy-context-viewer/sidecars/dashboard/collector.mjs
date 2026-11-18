@@ -871,6 +871,73 @@ function hydrateHostDiskEntry(diskEntry) {
   };
 }
 
+function buildOutageFallbackHostStatus({
+  lsKey,
+  fetchedAtMs,
+  snapshot,
+  source,
+  summaryStale,
+  errCode,
+  isSandboxBlocked
+}) {
+  const cachedAtMs = Date.parse(snapshot.fetchedAt || '') || 0;
+  const ageMs = cachedAtMs > 0 ? Math.max(0, fetchedAtMs - cachedAtMs) : 0;
+  const crossed = hasCrossedQuotaResetBoundary(snapshot.quotas, cachedAtMs, fetchedAtMs);
+  const quotaFresh = !crossed && ageMs <= 30 * 60_000;
+  const isConnRefused = errCode === 'ECONNREFUSED' || errCode === 'ECONNRESET';
+  const quotaStatus = quotaFresh
+    ? makeQuotaStatus('stale', {
+        stale: true,
+        summaryStale,
+        source,
+        lastSuccessAt: snapshot.fetchedAt || null,
+        summaryLastSuccessAt: snapshot.summaryFetchedAt || null,
+        reason: isSandboxBlocked
+          ? '受当前运行环境沙箱限制无法连接本地语言服务，当前展示上次成功同步数据'
+          : isConnRefused
+            ? '原宿主连接已断开，当前展示上次成功同步数据（重启独立窗口可重新绑定）'
+            : '语言服务连接失败，当前展示上次成功同步数据',
+        errorCode: errCode
+      })
+    : makeQuotaStatus('error', {
+        stale: false,
+        summaryStale: false,
+        source: 'none',
+        lastSuccessAt: snapshot.fetchedAt || null,
+        summaryLastSuccessAt: snapshot.summaryFetchedAt || null,
+        reason: isSandboxBlocked
+          ? '沙箱限制无法连接本地语言服务（EPERM），请在外部终端运行 agy-context 查看实时配额与窗口上限'
+          : crossed
+            ? (isConnRefused
+                ? '原宿主语言服务已退出且配额已过重置时间，请重启独立窗口重新绑定宿主'
+                : '配额已过重置时间且语言服务请求失败，暂未获取到最新余量')
+            : (isConnRefused
+                ? '原宿主语言服务已退出，请重启独立窗口重新绑定宿主'
+                : '语言服务请求失败，暂未获取到配额数据'),
+        errorCode: errCode
+      });
+  const { updatedAt: _planUpdatedAt, ...stablePlan } = snapshot.plan || {};
+  const quotas = quotaFresh ? snapshot.quotas : [];
+  const sig = computeContentEtag('host', {
+    plan: stablePlan,
+    quotas,
+    dynamicModelMap: snapshot.dynamicModelMap,
+    quotaState: toStableQuotaState(quotaStatus)
+  });
+  return {
+    at: fetchedAtMs,
+    lsKey,
+    sig,
+    raw: null,
+    plan: snapshot.plan,
+    quotas,
+    modelConfigs: snapshot.modelConfigs,
+    quotaSummaryGroups: snapshot.quotaSummaryGroups,
+    dynamicModelMap: snapshot.dynamicModelMap,
+    quotaStatus
+  };
+}
+
 function readLatestDiskHostFallback(nowMs) {
   const diskCache = loadHostStatusDiskCache();
   const entries = Object.values(diskCache?.entries || {})
@@ -1032,85 +1099,34 @@ async function getHostUserStatus(force = false, options = {}) {
     const cachedGood = (lastGoodHostData?.lsKey === lsKey ? lastGoodHostData : null) || diskGoodFallback;
     if (!res) {
       if (cachedGood) {
-        const quotaStatus = makeQuotaStatus('stale', {
-          stale: true,
-          summaryStale: true,
-          source: 'cache',
-          lastSuccessAt: cachedGood.fetchedAt,
-          summaryLastSuccessAt: cachedGood.summaryFetchedAt,
-          reason: isSandboxBlocked
-            ? '受当前运行环境沙箱限制无法连接本地语言服务，当前展示上次成功同步数据'
-            : '语言服务连接失败，当前展示上次成功同步数据',
-          errorCode: errCode
-        });
-        const { updatedAt: _planUpdatedAt, ...stablePlan } = cachedGood.plan || {};
-        const sig = computeContentEtag('host', {
-          plan: stablePlan,
-          quotas: cachedGood.quotas,
-          dynamicModelMap: cachedGood.dynamicModelMap,
-          quotaState: toStableQuotaState(quotaStatus)
-        });
-        cachedHostStatus = {
-          at: fetchedAtMs,
+        cachedHostStatus = buildOutageFallbackHostStatus({
           lsKey,
-          sig,
-          raw: null,
-          plan: cachedGood.plan,
-          quotas: cachedGood.quotas,
-          modelConfigs: cachedGood.modelConfigs,
-          quotaSummaryGroups: cachedGood.quotaSummaryGroups,
-          dynamicModelMap: cachedGood.dynamicModelMap,
-          quotaStatus
-        };
+          fetchedAtMs,
+          snapshot: cachedGood,
+          source: 'cache',
+          summaryStale: true,
+          errCode,
+          isSandboxBlocked
+        });
         return cachedHostStatus;
       }
       if (options.allowDiskCacheWithoutLs) {
         const fb = readLatestDiskHostFallback(fetchedAtMs);
         if (fb) {
-          const { diskEntry, hydrated, quotaFresh } = fb;
-          const quotaStatus = quotaFresh
-            ? makeQuotaStatus('stale', {
-                stale: true,
-                summaryStale: Boolean(diskEntry.quotaStatus?.summaryStale),
-                source: 'disk_cache',
-                lastSuccessAt: diskEntry.fetchedAt || null,
-                summaryLastSuccessAt: diskEntry.summaryFetchedAt || null,
-                reason: isSandboxBlocked
-                  ? '受当前运行环境沙箱限制无法连接本地语言服务，当前展示离线缓存数据'
-                  : '语言服务连接失败，当前展示离线缓存数据',
-                errorCode: errCode
-              })
-            : makeQuotaStatus('error', {
-                stale: false,
-                summaryStale: false,
-                source: 'none',
-                lastSuccessAt: diskEntry.fetchedAt || null,
-                summaryLastSuccessAt: diskEntry.summaryFetchedAt || null,
-                reason: isSandboxBlocked
-                  ? '沙箱限制无法连接本地语言服务（EPERM），请在外部终端运行 agy-context 查看实时配额与窗口上限'
-                  : '语言服务请求失败，暂未获取到配额数据',
-                errorCode: errCode
-              });
-          const { updatedAt: _planUpdatedAt, ...stablePlan } = hydrated.plan || {};
-          const quotas = quotaFresh ? hydrated.quotas : [];
-          const sig = computeContentEtag('host', {
-            plan: stablePlan,
-            quotas,
-            dynamicModelMap: hydrated.dynamicModelMap,
-            quotaState: toStableQuotaState(quotaStatus)
-          });
-          cachedHostStatus = {
-            at: fetchedAtMs,
+          const { diskEntry, hydrated } = fb;
+          cachedHostStatus = buildOutageFallbackHostStatus({
             lsKey,
-            sig,
-            raw: null,
-            plan: hydrated.plan,
-            quotas,
-            modelConfigs: hydrated.modelConfigs,
-            quotaSummaryGroups: hydrated.quotaSummaryGroups,
-            dynamicModelMap: hydrated.dynamicModelMap,
-            quotaStatus
-          };
+            fetchedAtMs,
+            snapshot: {
+              ...hydrated,
+              fetchedAt: diskEntry.fetchedAt || null,
+              summaryFetchedAt: diskEntry.summaryFetchedAt || null
+            },
+            source: 'disk_cache',
+            summaryStale: Boolean(diskEntry.quotaStatus?.summaryStale),
+            errCode,
+            isSandboxBlocked
+          });
           return cachedHostStatus;
         }
       }
@@ -1123,7 +1139,9 @@ async function getHostUserStatus(force = false, options = {}) {
         summaryLastSuccessAt: null,
         reason: isSandboxBlocked
           ? '沙箱限制无法连接本地语言服务（EPERM），请在外部终端运行 agy-context 查看实时配额与窗口上限'
-          : '语言服务请求失败，暂未获取到配额数据',
+          : (errCode === 'ECONNREFUSED' || errCode === 'ECONNRESET')
+            ? '原宿主语言服务已退出，请重启独立窗口重新绑定宿主'
+            : '语言服务请求失败，暂未获取到配额数据',
         errorCode: errCode
       });
       const sig = computeContentEtag('host', { quotaState: toStableQuotaState(quotaStatus) });
