@@ -2316,31 +2316,45 @@ function getAppDataDir() {
   return process.env.ANTIGRAVITY_APPDATA_DIR || process.env.AG_DIR || join(homedir(), '.gemini', 'antigravity');
 }
 
+function findCliDataDir() {
+  if (process.env.AG_CLI_DIR) return process.env.AG_CLI_DIR;
+  const appDataDir = String(process.env.ANTIGRAVITY_APP_DATA_DIR || '').trim();
+  if (appDataDir && basename(appDataDir).toLowerCase() === 'antigravity-cli') {
+    return appDataDir;
+  }
+  return join(homedir(), '.gemini', 'antigravity-cli');
+}
+
 let cachedRecentConv = { at: 0, convId: '' };
 function findLatestBrainConversationId() {
   if (Date.now() - cachedRecentConv.at < 2500 && cachedRecentConv.convId) {
     return cachedRecentConv.convId;
   }
-  const brainDir = join(getAppDataDir(), 'brain');
-  if (!existsSync(brainDir)) return '';
+  const brainDirs = [join(getAppDataDir(), 'brain'), join(findCliDataDir(), 'brain')];
   let bestId = '';
   let bestMtime = 0;
-  try {
-    for (const entry of readdirSync(brainDir, { withFileTypes: true })) {
-      if (!entry.isDirectory() || !CONV_ID_RE.test(entry.name)) continue;
-      const logFull = join(brainDir, entry.name, '.system_generated', 'logs', 'transcript_full.jsonl');
-      const logMini = join(brainDir, entry.name, '.system_generated', 'logs', 'transcript.jsonl');
-      const target = existsSync(logFull) ? logFull : (existsSync(logMini) ? logMini : '');
-      if (!target) continue;
-      try {
-        const m = statSync(target).mtimeMs;
-        if (m > bestMtime) {
-          bestMtime = m;
-          bestId = entry.name;
-        }
-      } catch {}
-    }
-  } catch {}
+  for (const brainDir of brainDirs) {
+    if (!existsSync(brainDir)) continue;
+    try {
+      for (const entry of readdirSync(brainDir, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !CONV_ID_RE.test(entry.name)) continue;
+        const logFull = join(brainDir, entry.name, '.system_generated', 'logs', 'transcript_full.jsonl');
+        const logMini = join(brainDir, entry.name, '.system_generated', 'logs', 'transcript.jsonl');
+        const logDirect = join(brainDir, entry.name, 'transcript.jsonl');
+        const target = existsSync(logFull)
+          ? logFull
+          : (existsSync(logMini) ? logMini : (existsSync(logDirect) ? logDirect : ''));
+        if (!target) continue;
+        try {
+          const m = statSync(target).mtimeMs;
+          if (m > bestMtime) {
+            bestMtime = m;
+            bestId = entry.name;
+          }
+        } catch {}
+      }
+    } catch {}
+  }
   cachedRecentConv = { at: Date.now(), convId: bestId };
   return bestId;
 }
@@ -2365,7 +2379,13 @@ function resolveDaemonRoots(data = {}, hint = {}) {
     for (const part of data.root.split(',')) addRoot(part);
   }
 
-  const convId = String(data.conversationId || hint.conversationId || findLatestBrainConversationId() || '').trim();
+  const convId = String(
+    data.conversationId ||
+    process.env.ANTIGRAVITY_CONVERSATION_ID ||
+    hint.conversationId ||
+    findLatestBrainConversationId() ||
+    ''
+  ).trim();
   const exe = hint.agentApiExe || process.env.ANTIGRAVITY_AGENTAPI_EXE || '';
   if (convId && CONV_ID_RE.test(convId) && exe && existsSync(exe)) {
     try {

@@ -58,9 +58,11 @@ node "<skill-dir>/scripts/status.mjs" --json "<conversation-id>"
      也可点击看板右上角的 `📌` 按钮切换置顶，或在看板右上角调色盘设置抽屉中分别点击录制「独立悬浮窗快捷键」与「AGY 侧栏看板键」。
 
 ### 在终端 `agy` CLI 中
-1. 直接汇报终端统计摘要（也可以运行不带 `--json` 的 `node "<skill-dir>/scripts/status.mjs"` 查看彩色终端进度条看板，或传 `turns` 查看逐轮消耗表）。
-2. 若用户希望在屏幕右侧常驻一个独立可视化置顶小窗，可运行 `node "<skill-dir>/scripts/status.mjs" float`；若希望在浏览器标签页查看完整热力图面板，可运行：
+1. 直接汇报终端统计摘要（注意：`agy` CLI 不加载桌面端 Sidecar，**不要**输出 `sidecar://` 或 `customization://` 链接；也可以运行不带 `--json` 的 `node "<skill-dir>/scripts/status.mjs"` 查看彩色终端进度条看板，或传 `turns` 查看逐轮消耗表）。
+2. 若返回 `historyStatus.state === "restricted"` 或 `quotaStatus.errorCode === "EPERM"`（常见于 `agy` CLI 沙箱环境），先如实汇报当前会话的已用 Token、缓存命中率、生成速度、最近轮次增量与参考费用，再提示用户在**外部终端标签页**运行以下命令查看完整跨会话热力图、实时配额与图形界面：
    ```bash
-   node "<skill-dir>/scripts/status.mjs" web
+   agy-context                   # 外部终端查看桌面端 + CLI 全量汇总与实时状态
+   agy-context menubar on        # (macOS) 开启顶部菜单栏常驻图标，切换会话自动跟随
+   agy-context float             # 弹出屏幕右侧独立置顶小窗（可配 agy-context shortcut --global 在终端前台用 ⌥⌘K 呼出）
+   agy-context web               # 在 127.0.0.1:18970 启动完整 Web 热力图与双池配额看板并打开浏览器
    ```
-   该命令会在本地回环地址 `http://127.0.0.1:18970` 启动看板并自动唤起系统浏览器。

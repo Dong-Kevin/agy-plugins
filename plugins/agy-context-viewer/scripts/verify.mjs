@@ -7,6 +7,7 @@
 
 import { execFileSync, spawn } from 'node:child_process';
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -4532,6 +4533,77 @@ async function main() {
         busTrig.seq === cliAuxJson.trigger.seq,
       `cli.mjs aux --json 触发写入异常：${cliAuxRaw}`
     );
+
+    // CLI runtime source attribution & restricted-scandir fallback checks
+    const cliEnvRoot = mkdtempSync(join(tmpdir(), 'agy-ctx-cli-env-'));
+    const cliAppDataDir = join(cliEnvRoot, 'antigravity-cli');
+    const cliBrainRoot = join(cliAppDataDir, 'brain');
+    const cliTestConvId = 'd1e2c3b4a5f60009';
+    const cliConvLogDir = join(cliBrainRoot, cliTestConvId, '.system_generated', 'logs');
+    try {
+      mkdirSync(cliConvLogDir, { recursive: true });
+      writeFileSync(
+        join(cliConvLogDir, 'transcript.jsonl'),
+        [
+          JSON.stringify({ step_index: 0, type: 'USER_INPUT', created_at: '2026-11-18T03:00:00Z', content: 'CLI test' }),
+          JSON.stringify({
+            step_index: 1,
+            type: 'PLANNER_RESPONSE',
+            created_at: '2026-11-18T03:00:02Z',
+            model: 'Gemini 4 Hydrogen',
+            input_tokens: 1500,
+            cache_read_tokens: 500,
+            output_tokens: 120
+          })
+        ].join('\n') + '\n',
+        'utf-8'
+      );
+      const cliRuntimeEnv = {
+        ...isolatedEnv,
+        ANTIGRAVITY_APP_DATA_DIR: cliAppDataDir,
+        ANTIGRAVITY_LS_VERSION: 'cli-1.5.10',
+        ANTIGRAVITY_CONVERSATION_ID: cliTestConvId
+      };
+      delete cliRuntimeEnv.AG_CLI_DIR;
+
+      if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+        chmodSync(cliBrainRoot, 0o111);
+      }
+      const cliAdaptedRaw = execFileSync(process.execPath, [cliEntryPath, 'json'], {
+        encoding: 'utf-8',
+        env: cliRuntimeEnv,
+        timeout: 15000
+      });
+      const cliAdaptedJson = JSON.parse(cliAdaptedRaw);
+      assert(
+        cliAdaptedJson.runtimeEnv === 'cli' &&
+          cliAdaptedJson.conversation?.id === cliTestConvId &&
+          cliAdaptedJson.conversation?.source === 'cli' &&
+          Number(cliAdaptedJson.globalHistory?.cliConversations || 0) >= 1,
+        `CLI 运行时来源识别或直读会话补录异常：${cliAdaptedRaw}`
+      );
+      if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+        assert(
+          cliAdaptedJson.historyStatus?.state === 'restricted' &&
+            cliAdaptedJson.historyStatus?.restrictedSources?.includes('cli'),
+          `scandir 受限时应标记 historyStatus.state=restricted：${cliAdaptedRaw}`
+        );
+      }
+      const cliPrettyOut = execFileSync(process.execPath, [cliEntryPath], {
+        encoding: 'utf-8',
+        env: cliRuntimeEnv,
+        timeout: 15000
+      });
+      assert(
+        cliPrettyOut.includes('[CLI]') && !cliPrettyOut.includes('[Desktop]'),
+        `CLI 终端看板不应误标为 [Desktop]：\n${cliPrettyOut}`
+      );
+    } finally {
+      if (process.platform !== 'win32' && existsSync(cliBrainRoot)) {
+        try { chmodSync(cliBrainRoot, 0o755); } catch {}
+      }
+      rmSync(cliEnvRoot, { recursive: true, force: true });
+    }
 
     // Aux Pane freshness resolution vs stale activeConvId + opening/deferred ack state machine
     const staleConvId = 'b2000000-0000-4000-8000-000000000002';

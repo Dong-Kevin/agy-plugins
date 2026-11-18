@@ -302,7 +302,24 @@ export function findAppDataDir() {
 }
 
 export function findCliDataDir() {
-  return process.env.AG_CLI_DIR || join(homedir(), '.gemini', 'antigravity-cli');
+  if (process.env.AG_CLI_DIR) return process.env.AG_CLI_DIR;
+  const appDataDir = String(process.env.ANTIGRAVITY_APP_DATA_DIR || '').trim();
+  if (appDataDir && basename(appDataDir).toLowerCase() === 'antigravity-cli') {
+    return appDataDir;
+  }
+  return join(homedir(), '.gemini', 'antigravity-cli');
+}
+
+export function isCliRuntimeEnv() {
+  const lsVer = String(process.env.ANTIGRAVITY_LS_VERSION || '').trim().toLowerCase();
+  if (lsVer.startsWith('cli')) return true;
+  const appDataBase = basename(String(process.env.ANTIGRAVITY_APP_DATA_DIR || '').trim()).toLowerCase();
+  if (appDataBase === 'antigravity-cli') return true;
+  if (!process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR) {
+    const exeBase = basename(String(process.env.ANTIGRAVITY_AGENTAPI_EXE || '').trim()).toLowerCase();
+    if (exeBase === 'agy' || exeBase === 'agy.exe') return true;
+  }
+  return false;
 }
 
 export function getPluginStateDir() {
@@ -584,18 +601,20 @@ function getObservedActivityMs() {
 // Official Language Server Connect RPC (uses env vars injected by Sidecar SDK)
 // ---------------------------------------------------------------------------
 
-function callLanguageServer(method, payload = {}, timeoutMs = 4500, options = {}) {
+function callLanguageServerWithStatus(method, payload = {}, timeoutMs = 4500, options = {}) {
   const lsAddr = process.env.ANTIGRAVITY_LS_ADDRESS;
   const csrf = process.env.ANTIGRAVITY_CSRF_TOKEN;
   const signal = options?.signal || null;
-  if (!lsAddr || !csrf || signal?.aborted) return Promise.resolve(null);
+  if (!lsAddr || !csrf || signal?.aborted) {
+    return Promise.resolve({ data: null, errorCode: signal?.aborted ? 'ABORTED' : 'NO_CONFIG' });
+  }
 
   return new Promise((resolvePromise) => {
     let settled = false;
     let req = null;
     const onAbort = () => {
       try { req?.destroy(); } catch {}
-      finish(null);
+      finish({ data: null, errorCode: 'ABORTED' });
     };
     const finish = (val) => {
       if (!settled) {
@@ -632,20 +651,20 @@ function callLanguageServer(method, payload = {}, timeoutMs = 4500, options = {}
             total += chunk.length;
             if (total > 32 * 1024 * 1024) {
               req.destroy();
-              finish(null);
+              finish({ data: null, errorCode: 'RESPONSE_TOO_LARGE' });
               return;
             }
             chunks.push(chunk);
           });
           res.on('end', () => {
             if (res.statusCode !== 200) {
-              finish(null);
+              finish({ data: null, errorCode: `HTTP_${res.statusCode}` });
               return;
             }
             try {
-              finish(JSON.parse(Buffer.concat(chunks).toString('utf-8')));
+              finish({ data: JSON.parse(Buffer.concat(chunks).toString('utf-8')), errorCode: '' });
             } catch {
-              finish(null);
+              finish({ data: null, errorCode: 'INVALID_JSON' });
             }
           });
         }
@@ -657,14 +676,19 @@ function callLanguageServer(method, payload = {}, timeoutMs = 4500, options = {}
       }
       req.setTimeout(timeoutMs, () => {
         req.destroy();
-        finish(null);
+        finish({ data: null, errorCode: 'ETIMEDOUT' });
       });
-      req.on('error', () => finish(null));
+      req.on('error', (err) => finish({ data: null, errorCode: String(err?.code || 'ERR_NETWORK') }));
       req.end(bodyStr);
-    } catch {
-      finish(null);
+    } catch (err) {
+      finish({ data: null, errorCode: String(err?.code || 'ERR_REQUEST') });
     }
   });
+}
+
+async function callLanguageServer(method, payload = {}, timeoutMs = 4500, options = {}) {
+  const res = await callLanguageServerWithStatus(method, payload, timeoutMs, options);
+  return res.data;
 }
 
 function makeQuotaStatus(state, opts = {}) {
@@ -675,7 +699,8 @@ function makeQuotaStatus(state, opts = {}) {
     source: opts.source || 'none',
     lastSuccessAt: opts.lastSuccessAt || null,
     summaryLastSuccessAt: opts.summaryLastSuccessAt || null,
-    reason: opts.reason || ''
+    reason: opts.reason || '',
+    ...(opts.errorCode ? { errorCode: opts.errorCode } : {})
   };
 }
 
@@ -933,10 +958,14 @@ async function getHostUserStatus(force = false, options = {}) {
   }
 
   const runFetch = (async () => {
-    const [res, quotaSummaryRes] = await Promise.all([
-      callLanguageServer('GetUserStatus', {}),
-      callLanguageServer('RetrieveUserQuotaSummary', {})
+    const [statusResp, summaryResp] = await Promise.all([
+      callLanguageServerWithStatus('GetUserStatus', {}),
+      callLanguageServerWithStatus('RetrieveUserQuotaSummary', {})
     ]);
+    const res = statusResp.data;
+    const quotaSummaryRes = summaryResp.data;
+    const errCode = statusResp.errorCode || summaryResp.errorCode || '';
+    const isSandboxBlocked = errCode === 'EPERM' || errCode === 'EACCES';
     const fetchedAtMs = Number(options.nowMs) || Date.now();
     const cachedGood = (lastGoodHostData?.lsKey === lsKey ? lastGoodHostData : null) || diskGoodFallback;
     if (!res) {
@@ -947,7 +976,10 @@ async function getHostUserStatus(force = false, options = {}) {
           source: 'cache',
           lastSuccessAt: cachedGood.fetchedAt,
           summaryLastSuccessAt: cachedGood.summaryFetchedAt,
-          reason: '语言服务连接失败，当前展示上次成功同步数据'
+          reason: isSandboxBlocked
+            ? '受当前运行环境沙箱限制无法连接本地语言服务，当前展示上次成功同步数据'
+            : '语言服务连接失败，当前展示上次成功同步数据',
+          errorCode: errCode
         });
         const { updatedAt: _planUpdatedAt, ...stablePlan } = cachedGood.plan || {};
         const sig = computeContentEtag('host', {
@@ -977,7 +1009,10 @@ async function getHostUserStatus(force = false, options = {}) {
         source: 'none',
         lastSuccessAt: null,
         summaryLastSuccessAt: null,
-        reason: '语言服务请求失败，暂未获取到配额数据'
+        reason: isSandboxBlocked
+          ? '沙箱限制无法连接本地语言服务（EPERM），请在外部终端运行 agy-context 查看实时配额与窗口上限'
+          : '语言服务请求失败，暂未获取到配额数据',
+        errorCode: errCode
       });
       const sig = computeContentEtag('host', { quotaState: toStableQuotaState(quotaStatus) });
       cachedHostStatus = {
@@ -3466,14 +3501,30 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   }
 
   const recentConversations = listRecentConversations(24, nowMs);
-  const convId = (requestedConvId && CONV_ID_RE.test(requestedConvId))
+  const cliMode = isCliRuntimeEnv();
+  const cliDataDir = findCliDataDir();
+  let convId = (requestedConvId && CONV_ID_RE.test(requestedConvId))
     ? requestedConvId
     : resolveActiveConversationId(recentConversations);
+
+  if (!convId) {
+    const envConvId = String(process.env.ANTIGRAVITY_CONVERSATION_ID || '').trim();
+    if (CONV_ID_RE.test(envConvId)) {
+      const hasEnvLog =
+        existsSync(join(agDir, 'brain', envConvId, '.system_generated', 'logs', 'transcript.jsonl')) ||
+        existsSync(join(agDir, 'brain', envConvId, '.system_generated', 'logs', 'transcript_full.jsonl')) ||
+        existsSync(join(cliDataDir, 'brain', envConvId, '.system_generated', 'logs', 'transcript.jsonl')) ||
+        existsSync(join(cliDataDir, 'brain', envConvId, '.system_generated', 'logs', 'transcript_full.jsonl')) ||
+        existsSync(join(cliDataDir, 'brain', envConvId, 'transcript.jsonl'));
+      if (hasEnvLog) convId = envConvId;
+    }
+  }
 
   if (!convId) {
     return {
       ok: true,
       conversationId: null,
+      conversationSource: cliMode ? 'cli' : 'desktop',
       recentConversations: [],
       empty: true,
       etag: 'empty'
@@ -3481,9 +3532,13 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   }
 
   const desktopLogsDir = join(agDir, 'brain', convId, '.system_generated', 'logs');
-  const cliLogsDir = join(findCliDataDir(), 'brain', convId, '.system_generated', 'logs');
-  const cliDirectLog = join(findCliDataDir(), 'brain', convId, 'transcript.jsonl');
-  const brainBase = existsSync(desktopLogsDir) ? desktopLogsDir : cliLogsDir;
+  const cliLogsDir = join(cliDataDir, 'brain', convId, '.system_generated', 'logs');
+  const cliDirectLog = join(cliDataDir, 'brain', convId, 'transcript.jsonl');
+  const hasDesktopLogs = existsSync(desktopLogsDir);
+  const hasCliLogs = existsSync(cliLogsDir) || existsSync(cliDirectLog);
+  const useCliLogs = (cliMode && hasCliLogs) || (!hasDesktopLogs && hasCliLogs);
+  const conversationSource = useCliLogs ? 'cli' : (cliMode && !hasDesktopLogs ? 'cli' : 'desktop');
+  const brainBase = useCliLogs ? cliLogsDir : (hasDesktopLogs ? desktopLogsDir : cliLogsDir);
   const fullPath = join(brainBase, 'transcript_full.jsonl');
   const compactPath = join(brainBase, 'transcript.jsonl');
   const targetLogPath = (existsSync(fullPath) && statSync(fullPath).size <= 32 * 1024 * 1024)
@@ -4347,6 +4402,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     etag,
     scannedAt: nowMs,
     conversationId: convId,
+    conversationSource,
     conversationTitle: resolvedTitle,
     workspacePath,
     recentConversations,
@@ -4377,7 +4433,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
 // Global Token History & Multi-Source Cost Aggregator
 // ---------------------------------------------------------------------------
 
-function walkTranscriptFiles(rootBrainDir, sourceName) {
+function walkTranscriptFiles(rootBrainDir, sourceName, scanMeta = null) {
   const jobs = [];
   if (!existsSync(rootBrainDir)) return jobs;
   const visited = new Set();
@@ -4385,12 +4441,22 @@ function walkTranscriptFiles(rootBrainDir, sourceName) {
   const walk = (dir, depth) => {
     if (depth > 4) return;
     let real;
-    try { real = realpathSync(dir); } catch { return; }
+    try { real = realpathSync(dir); } catch (err) {
+      if (scanMeta && depth === 0 && (err?.code === 'EPERM' || err?.code === 'EACCES')) {
+        scanMeta.restrictedRoots.push({ dir, source: sourceName, code: err.code });
+      }
+      return;
+    }
     if (visited.has(real)) return;
     visited.add(real);
 
     let entries;
-    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch (err) {
+      if (scanMeta && depth === 0 && (err?.code === 'EPERM' || err?.code === 'EACCES')) {
+        scanMeta.restrictedRoots.push({ dir, source: sourceName, code: err.code });
+      }
+      return;
+    }
     for (const ent of entries) {
       if (SKIP_SCAN_DIRS.has(ent.name)) continue;
       const full = join(dir, ent.name);
@@ -4738,9 +4804,39 @@ export async function collectTokenHistory(options = {}) {
 
   const agDir = findAppDataDir();
   const cliDir = findCliDataDir();
-  const desktopJobs = walkTranscriptFiles(join(agDir, 'brain'), 'desktop');
-  const cliJobs = walkTranscriptFiles(join(cliDir, 'brain'), 'cli');
+  const scanMeta = { restrictedRoots: [] };
+  const desktopJobs = walkTranscriptFiles(join(agDir, 'brain'), 'desktop', scanMeta);
+  const cliJobs = walkTranscriptFiles(join(cliDir, 'brain'), 'cli', scanMeta);
+  const activeHintConvId = String(options.convId || process.env.ANTIGRAVITY_CONVERSATION_ID || '').trim();
+  if (CONV_ID_RE.test(activeHintConvId)) {
+    const appendDirectConvJob = (baseDir, targetJobs, sourceName) => {
+      if (targetJobs.some((j) => j.convId === activeHintConvId)) return;
+      const std = join(baseDir, 'brain', activeHintConvId, '.system_generated', 'logs', 'transcript.jsonl');
+      const direct = join(baseDir, 'brain', activeHintConvId, 'transcript.jsonl');
+      const p = existsSync(std) ? std : (existsSync(direct) ? direct : '');
+      if (!p) return;
+      try {
+        statSync(p);
+        targetJobs.push({ path: p, convId: activeHintConvId, source: sourceName });
+      } catch {}
+    };
+    if (isCliRuntimeEnv()) {
+      appendDirectConvJob(cliDir, cliJobs, 'cli');
+      appendDirectConvJob(agDir, desktopJobs, 'desktop');
+    } else {
+      appendDirectConvJob(agDir, desktopJobs, 'desktop');
+      appendDirectConvJob(cliDir, cliJobs, 'cli');
+    }
+  }
   const allJobs = [...desktopJobs, ...cliJobs];
+  const restrictedSources = [...new Set(scanMeta.restrictedRoots.map((r) => r.source))];
+  const historyStatus = restrictedSources.length > 0
+    ? {
+        state: 'restricted',
+        restrictedSources,
+        reason: '受当前运行环境沙箱限制，无法扫描全量历史会话目录；请在外部终端运行 agy-context 查看跨会话汇总'
+      }
+    : { state: 'ok', restrictedSources: [], reason: '' };
 
   const desktopSessionFiles = countSessionFiles(join(agDir, 'conversations'));
   const cliSessionFiles = countSessionFiles(join(cliDir, 'conversations'));
@@ -5109,6 +5205,7 @@ export async function collectTokenHistory(options = {}) {
     currentPeriod,
     firstUseDate,
     sources,
+    historyStatus,
     planStatus: effectivePlan,
     modelQuotas: host.quotas,
     quotaStatus: host.quotaStatus,

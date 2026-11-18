@@ -1,13 +1,18 @@
 # agy-plugins ROADMAP
 
-更新时间：2026-11-17 12:00（Asia/Shanghai）。
+更新时间：2026-11-18 12:22（Asia/Shanghai）。
 
 ## 本次交付目标
 
-1. 移除 `context-viewer` 手动对比档位按钮组（`自动 | 200K | 256K | 1M`）与 `budgetOverride` 逻辑，改为纯动态跟随服务端下发的实时上下文窗口上限（如 `256K` / `512K` / `840K` / `1M`），消除跨插件触发锁内全量会话扫描导致的锁超时，过滤生成中（in-flight）与历史无步骤取消/超时 `0 tok` 占位记录，完成 `v1.7.11` 全仓校验、打包与本机 `./install.sh context-viewer` 热同步。
-2. 保留既有双插件基线与发布交接记录（`agy-finder v0.2.8` / `context-viewer v1.7.10` 于 `v2026.11.15.1` 已完成）。
+1. 修复 `context-viewer` 与 `agy-finder` 在 `agy` CLI 环境（含沙箱受限终端工具与外部终端）下的适配问题：正确识别 CLI 会话来源、诚实提示沙箱网络与目录遍历限制并补录当前活跃 CLI 会话、更新 CLI 侧 Skill/Rules 引导，完成全仓校验与打包。
+2. 保留既有双插件基线与发布交接记录（`agy-finder v0.2.8` / `context-viewer v1.7.10` 于 `v2026.11.15.1` 已完成；`context-viewer v1.7.11` 历史无步骤 `0 tok` 过滤已同步 `main`）。
 
 ## 当前阶段与状态
+
+- **已完成双插件 `agy` CLI 适配修复、回归验证、全仓打包及本机 `./install.sh` 热同步（待按需提交推送）**：
+  - **`context-viewer` CLI 来源归属与沙箱降级**（[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs)、[cli.mjs](./plugins/agy-context-viewer/sidecars/dashboard/cli.mjs)、[context-viewer/SKILL.md](./plugins/agy-context-viewer/skills/context-viewer/SKILL.md)）：新增 `isCliRuntimeEnv()` 并让 `findCliDataDir()` 支持 `ANTIGRAVITY_APP_DATA_DIR`（`antigravity-cli`），在 `scanConversation()` 正确输出 `conversationSource` 并修正 `cli.mjs` 对 CLI 会话误标 `[Desktop]` 的问题；为 `callLanguageServerWithStatus()` 与 `walkTranscriptFiles()` 补齐 `EPERM` / `EACCES` 诊断与 `historyStatus` 标记，在沙箱禁止 `scandir` 时直读当前 `ANTIGRAVITY_CONVERSATION_ID` 计入 CLI 统计并给出外部终端 `agy-context` / `menubar` / `float` / `web` 操作提示；更新 `SKILL.md` 禁止在 CLI 输出不可点击的 `sidecar://` 链接。
+  - **`agy-finder` CLI 会话定位与规则约束区分**（[drawer.mjs](./plugins/agy-finder/sidecars/tree/drawer.mjs)、[rules/AGENTS.md](./plugins/agy-finder/rules/AGENTS.md)、[agy-finder/SKILL.md](./plugins/agy-finder/skills/agy-finder/SKILL.md)）：新增 `findCliDataDir()` 并让 `findLatestBrainConversationId()` / `resolveDaemonRoots()` 同时兼容 `ANTIGRAVITY_APP_DATA_DIR` 与 `ANTIGRAVITY_CONVERSATION_ID`（同时保持 `getSharedAuxTriggerPath()` 仍指向桌面端共享目录）；在 `rules/AGENTS.md` 与 `SKILL.md` 区分桌面端（`sidecar://` 胶囊）与 `agy` CLI（纯 `file://` + `agy-finder` 终端命令）。
+  - **新增 CLI 运行时与受限目录回归校验**（[context-viewer/scripts/verify.mjs](./plugins/agy-context-viewer/scripts/verify.mjs)）：新增 `0o111` 模拟 `scandir` 受限目录与 `ANTIGRAVITY_APP_DATA_DIR` / `ANTIGRAVITY_LS_VERSION` CLI 环境变量断言，验证 `[CLI]` 来源识别、直读会话补录与 `historyStatus.state === 'restricted'`。
 
 - **已完成 `context-viewer v1.7.11` 历史无步骤 `0 tok` 报错记录过滤与时序插值修复、全仓校验、打包及本机 `./install.sh context-viewer` 热同步（已同步 `main`，待后续按需发布 Release）**：
   - **彻底消除 `0 tok` 幽灵轮次并防历史报错污染健康会话**（[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs)）：提取 `computeGenListSortKeys()`，为无 `stepIndices` 的中途取消/超时/503 报错条目按前后真实步骤相对时序插值定位（同步修正 `mergeGeneratorMetadataLists()`）；将 `scanConversation()` 轮次过滤收紧为 `t.totalTokens > 0`（任何 `0 tok` 条目均不再进入时间线 `turns`、`sparkline` 与 `turnsCount`），通过 `latestInFlight` 与 `hasTrailingZeroTokError` 隔离生成中占位、历史无步骤报错与末尾真实失败请求，避免中途历史报错覆盖健康会话的 `error` 状态及末尾 `tokenBreakdown`；同步将 `ACTIVE_CONV_GEN_DISK_CACHE_VERSION` 升至 `2` 以使旧缓存自动重拉自愈。
@@ -79,6 +84,8 @@
 - 已迁移插件：[plugins/agy-finder](./plugins/agy-finder) 、[plugins/agy-context-viewer](./plugins/agy-context-viewer)
 
 ## 最近验证
+
+- `agy` CLI 适配修复全仓门禁与打包验收：`node scripts/verify.mjs --strict-git-identity` 全部通过（覆盖双插件自检、新增 CLI 运行时来源识别与受限 `scandir` 回归断言、跨插件 8 进程锁压测、隐私与 Git 身份门禁；其中 `verify.mjs` 因沙箱拦截回环测试 `127.0.0.1`，在放行沙箱后跑通全部断言）；`node scripts/package-all.mjs` 在沙箱内通过，产出 `dist/agy-finder-v0.2.8.zip`（`95.4 KB` / 20 个文件）与 `dist/context-viewer-v1.7.11.zip`（`183.5 KB` / 20 个文件 / SHA-256 `2bdaa6ca543e3371b0b01870bf67b54a8791f08ad3707a9a6e1a4accb957401a`）；已执行 `bash ./install.sh` 完成本机热同步（`diff -q` 核对 `collector.mjs`、`cli.mjs`、`drawer.mjs`、`rules/AGENTS.md` 与仓库源码一致），实测 `agy-context` 正确输出 `[CLI]`、`1` 个活跃 CLI 会话统计及沙箱限制提示（Windows PowerShell、Linux 桌面端与 Node.js 18 最低版本未在本机实测）。时间：`2026-11-18 12:29`（Asia/Shanghai）。
 
 - `context-viewer v1.7.11` 历史无步骤 `0 tok` 报错过滤、热同步与实盘旧会话验收：`node plugins/agy-context-viewer/scripts/verify.mjs` `6/6` 通过（含 `I1 Case L.4`）；`node scripts/verify.mjs --strict-git-identity && node scripts/package-all.mjs` 全仓门禁与打包通过，产出 `dist/context-viewer-v1.7.11.zip`（`181.6 KB` / 20 个文件 / SHA-256 `d2c7d533f9e8a921c12d45710a55b2af1ccd08cfab89bd683d5ba1e8522fbc24`）；`./install.sh context-viewer` 完成本机热同步且 `diff -q` 确认已安装 `collector.mjs` 与源码一致；只读核查最近 8 个实盘会话显示全部 `zeroTurns: 0`（此前置顶报错的旧会话已恢复末轮正常 `step`、`errKind: 'none'` 与 `hasBd: true`，真实末尾失败会话仍保留顶部错误识别）。时间：`2026-11-17 11:38`（Asia/Shanghai）。
 - `context-viewer v1.7.11` 本机热同步与收口校验：执行 `./install.sh context-viewer` 完成本机插件热更新，`diff -q` 核对已安装 `collector.mjs` 与仓库源码完全一致，`~/.local/bin/agy-context --help` 输出 `v1.7.11`；重跑 `node scripts/verify.mjs --strict-git-identity` 全仓门禁通过（Windows PowerShell、Linux 桌面端与 Node.js 18 未实测）。时间：`2026-11-17 10:46`（Asia/Shanghai）。

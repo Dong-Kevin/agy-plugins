@@ -20,3 +20,10 @@ description: 在右侧辅助栏打开项目目录树面板，或生成点击直�
    - macOS 默认在 Antigravity 内按 `⌘⇧E` 秒开/收回独立右侧目录树抽屉，按 `⌥⌘E` 直接拉起或切到 Antigravity 原生右侧辅助栏并显示目录树；
    - 在面板右上角 `⌨` 可分别点击录制**独立抽屉**与 **AGY 侧栏**快捷键，并切换「仅 AGY 前台 / 全局生效」或内置预设；
    - Windows / Linux 可将 `agy-finder toggle`（独立抽屉）或 `agy-finder aux`（AGY 侧栏）绑定到系统快捷键（PowerToys / AutoHotkey / GNOME / KDE）。
+
+## 终端 `agy` CLI 用法
+
+- `agy` CLI 不加载桌面端 Sidecar 面板，也不支持点击 `sidecar://` 协议链接；在 CLI 会话中仅输出标准 `[文件名](file:///绝对路径)` 链接。
+- 如需在终端外使用独立目录树抽屉或直接用浏览器打开本地 HTML，可在终端标签页运行：
+  - `agy-finder` / `agy-finder open <path>`：开关右侧独立目录树抽屉并高亮目标路径（macOS 如需在终端前台按 `⌘⇧E` 呼出，可执行 `agy-finder shortcut --global`）
+  - `agy-finder browser <path>`：用系统默认浏览器打开本地 HTML 文件

@@ -23,6 +23,7 @@ import {
   getMenubarMode,
   getShortcutConfig,
   getSidebarEntryStatus,
+  isCliRuntimeEnv,
   MENUBAR_MODES,
   scanConversation,
   setSidebarEntrypoint,
@@ -383,9 +384,12 @@ function buildCompactSummary(ctx, hist) {
   const costAll = hist.analyticsBySource?.all?.costs?.allTime?.hybrid || {};
   const plan = hist.planStatus || {};
   const activeConvMeta = (ctx.recentConversations || []).find((item) => item.id === ctx.conversationId);
+  const runtimeEnv = isCliRuntimeEnv() ? 'cli' : 'desktop';
+  const convSource = activeConvMeta?.source || ctx.conversationSource || runtimeEnv;
 
   return {
     pluginDirId: PLUGIN_DIR_ID,
+    runtimeEnv,
     entrypoints: {
       sidecarAuxPane: `sidecar://${PLUGIN_DIR_ID}/dashboard/`,
       sidebarFullPane: `sidecar://${PLUGIN_DIR_ID}/dashboard/sidebar`,
@@ -395,7 +399,7 @@ function buildCompactSummary(ctx, hist) {
     floatWindow: getFloatWindowStatus(),
     conversation: {
       id: ctx.conversationId || null,
-      source: activeConvMeta?.source || 'desktop',
+      source: convSource,
       title: ctx.conversationTitle || '未命名会话',
       model: cx.model || '未识别模型',
       usedTokens: cx.used ?? null,
@@ -450,6 +454,7 @@ function buildCompactSummary(ctx, hist) {
       allTimeHybridCostUSD: Number((costAll.totalCostUSD || 0).toFixed(2)),
       plan: `${plan.tierName || '未连接宿主'} (${plan.symbol || '$'}${plan.effectivePrice ?? '--'}/${plan.billingCycle || '月'})`
     },
+    historyStatus: hist.historyStatus || { state: 'ok', restrictedSources: [], reason: '' },
     quotaStatus: hist.quotaStatus || ctx.quotaStatus || null,
     quotas: (hist.modelQuotas || []).map((q) => {
       const p5 = typeof q.fiveHour?.remainingPercent === 'number' ? q.fiveHour.remainingPercent : null;
@@ -489,7 +494,10 @@ function printPrettyStatus(ctx, hist) {
     out.push(`活跃模型  ${c.bold}${cv.model}${c.reset}  ·  状态：${cv.status}`);
     const budgetText = cv.budgetTokens ? fmtTok(cv.budgetTokens) : '未知上限';
     const pctText = cv.usagePercent != null ? `${cv.usagePercent}%` : (cv.usedTokens != null ? '容量未知' : '--%');
-    out.push(`窗口水位  ${renderBar(cv.usagePercent)} ${c.bold}${pctText}${c.reset}  (${fmtTok(cv.usedTokens)} / ${budgetText}${cv.pendingTokens > 0 ? `，含待发送 +${fmtTok(cv.pendingTokens)}` : ''})`);
+    const lsBlockedNote = !cv.budgetTokens && (s.quotaStatus?.errorCode === 'EPERM' || s.quotaStatus?.errorCode === 'EACCES')
+      ? ' · 沙箱限制暂不可查询语言服务'
+      : '';
+    out.push(`窗口水位  ${renderBar(cv.usagePercent)} ${c.bold}${pctText}${c.reset}  (${fmtTok(cv.usedTokens)} / ${budgetText}${cv.pendingTokens > 0 ? `，含待发送 +${fmtTok(cv.pendingTokens)}` : ''}${lsBlockedNote})`);
     out.push(`缓存速度  单轮缓存命中 ${c.bold}${cv.cacheHitPercent != null ? `${cv.cacheHitPercent}%` : '--'}${c.reset}  ·  最新 ${c.cyan}${cv.speed.latestTps ? `${cv.speed.latestTps} tok/s` : '--'}${c.reset} (均值 ${cv.speed.avgTps ?? '--'} / 峰值 ${cv.speed.peakTps ?? '--'} tok/s, TTFT ${cv.speed.ttftSec ?? '--'}s)`);
     out.push(`会话吞吐  共 ${cv.sessionTotals.turnsCount} 轮  ·  累计总吞吐 ${c.bold}${fmtTok(cv.sessionTotals.grossTokens)}${c.reset} (缓存 ${fmtTok(cv.sessionTotals.cacheReadTokens)} · 新增输入 ${fmtTok(cv.sessionTotals.freshInputTokens)} · 输出 ${fmtTok(cv.sessionTotals.outputTokens)})`);
     out.push(`参考折算  本轮 ${c.bold}${fmtUsd(cv.roundApiCostUSD, 4)}${c.reset}  ·  全会话累计 ${c.bold}${fmtUsd(cv.sessionApiCostUSD, 4)}${c.reset}`);
@@ -507,7 +515,11 @@ function printPrettyStatus(ctx, hist) {
   }
 
   out.push('');
-  out.push(`${c.bold}本机多源历史汇总${c.reset} ${c.dim}(共 ${gh.conversations} 个会话：桌面端 ${gh.desktopConversations} / CLI ${gh.cliConversations} · 活跃 ${gh.activeDays} 天)${c.reset}`);
+  if (s.historyStatus?.state === 'restricted') {
+    out.push(`${c.bold}本机多源历史汇总${c.reset} ${c.yellow}(受沙箱限制仅统计当前可读会话：共 ${gh.conversations} 个 · 请在外部终端运行 agy-context 查看完整汇总)${c.reset}`);
+  } else {
+    out.push(`${c.bold}本机多源历史汇总${c.reset} ${c.dim}(共 ${gh.conversations} 个会话：桌面端 ${gh.desktopConversations} / CLI ${gh.cliConversations} · 活跃 ${gh.activeDays} 天)${c.reset}`);
+  }
   out.push(`  累计总计 ${c.bold}${gh.totalTokens}${c.reset} (桌面 ${gh.desktopTokens} / CLI ${gh.cliTokens})  ·  今日 ${c.bold}${gh.todayTokens}${c.reset}  ·  本月 ${c.bold}${gh.monthTokens}${c.reset}  ·  本年 ${gh.yearTokens}`);
   out.push(`  费用参考 本月 ${c.bold}${fmtUsd(gh.monthHybridCostUSD)}${c.reset}  ·  历史累计 ${c.bold}${fmtUsd(gh.allTimeHybridCostUSD)}${c.reset}  ·  订阅 ${gh.plan}`);
 
@@ -534,11 +546,15 @@ function printPrettyStatus(ctx, hist) {
     }
   } else if (s.quotaStatus?.state === 'error') {
     out.push('');
-    out.push(`${c.bold}实时配额池余量${c.reset} ${c.yellow}(宿主语言服务请求失败，暂未获取到配额池)${c.reset}`);
+    out.push(`${c.bold}实时配额池余量${c.reset} ${c.yellow}(${s.quotaStatus.reason || '宿主语言服务请求失败，暂未获取到配额池'})${c.reset}`);
   }
 
   out.push(`${c.dim}${'─'.repeat(64)}${c.reset}`);
-  out.push(`${c.dim}提示：agy-context menubar [context|speed|quota] 切换顶部菜单栏显示内容；agy-context float 弹出右侧置顶小窗。${c.reset}`);
+  if (s.runtimeEnv === 'cli' || cv.source === 'cli') {
+    out.push(`${c.dim}提示：可在外部终端运行 agy-context web 打开完整面板、agy-context float 打开右侧置顶小窗（agy-context shortcut --global 开启终端前台热键）、agy-context menubar on 开启菜单栏常驻。${c.reset}`);
+  } else {
+    out.push(`${c.dim}提示：agy-context menubar [context|speed|quota] 切换顶部菜单栏显示内容；agy-context float 弹出右侧置顶小窗。${c.reset}`);
+  }
 
   console.log(out.map(formatZh).join('\n'));
 }
@@ -627,7 +643,7 @@ async function main() {
 
   const [ctx, hist] = await Promise.all([
     scanConversation(convArg, { force: true }),
-    collectTokenHistory({ force: true })
+    collectTokenHistory({ force: true, convId: convArg })
   ]);
 
   if (wantJson) {
