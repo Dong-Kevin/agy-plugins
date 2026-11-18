@@ -62,6 +62,8 @@ node "<skill-dir>/scripts/status.mjs" --json "<conversation-id>"
 2. 若返回 `historyStatus.state === "restricted"` 或 `quotaStatus.errorCode === "EPERM"`（常见于 `agy` CLI 沙箱环境），先如实汇报当前会话的已用 Token、缓存命中率、生成速度、最近轮次增量与参考费用，再提示用户在**外部终端标签页**运行以下命令查看完整跨会话热力图、实时配额与图形界面：
    ```bash
    agy-context                   # 外部终端查看桌面端 + CLI 全量汇总与实时状态
+   agy-context statusline install # 为 agy CLI 开启底部原生实时状态栏（实时显示模型、水位%、速率、费用与 5h/Week 配额）
+   agy-context watch             # 终端实时盯盘面板（适配 tmux 分屏，随会话归档变化自动刷新）
    agy-context menubar on        # (macOS) 开启顶部菜单栏常驻图标，切换会话自动跟随
    agy-context float             # 弹出屏幕右侧独立置顶小窗（可配 agy-context shortcut --global 在终端前台用 ⌥⌘K 呼出）
    agy-context web               # 在 127.0.0.1:18970 启动完整 Web 热力图与双池配额看板并打开浏览器

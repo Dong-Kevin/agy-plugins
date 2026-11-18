@@ -44,7 +44,8 @@ const STATIC_ASSETS = {
 
 const NO_CACHE_HEADERS = { 'Cache-Control': 'no-store, must-revalidate' };
 
-function createHandlers(getDefaultConvId, makeResponse) {
+function createHandlers(getDefaultConvId, makeResponse, handlerOpts = {}) {
+  const allowDiskCacheWithoutLs = Boolean(handlerOpts.allowDiskCacheWithoutLs);
   return {
     indexHtml: () => makeResponse(readFileSync(join(__dirname, 'index.html'), 'utf-8'), {
       contentType: 'text/html; charset=utf-8',
@@ -59,7 +60,7 @@ function createHandlers(getDefaultConvId, makeResponse) {
     apiContext: async (data = {}) => {
       const convId = data.conversationId || getDefaultConvId() || '';
       const force = data.force === '1' || data.force === 'true' || data.force === true;
-      const snap = await scanConversation(convId, { force });
+      const snap = await scanConversation(convId, { force, allowDiskCacheWithoutLs });
       if (!force && data.etag && snap.etag && data.etag === snap.etag) {
         return {
           ok: true,
@@ -74,14 +75,14 @@ function createHandlers(getDefaultConvId, makeResponse) {
 
     apiHistory: async (data = {}) => {
       const force = data.force === '1' || data.force === 'true' || data.force === true;
-      const hist = await collectTokenHistory({ force });
+      const hist = await collectTokenHistory({ force, allowDiskCacheWithoutLs });
       if (!force && data.etag && hist.etag && data.etag === hist.etag) {
         return { ok: true, unchanged: true, etag: hist.etag };
       }
       return hist;
     },
 
-    apiGetSettings: async () => getSettings(),
+    apiGetSettings: async () => getSettings({ allowDiskCacheWithoutLs }),
     apiSaveSettings: async (data = {}) => saveSettings(data),
     apiLaunchCli: async (data = {}) => launchCliTerminal(data),
     apiFloatStatus: async () => getFloatWindowStatus(),
@@ -324,7 +325,8 @@ async function startStandaloneServer() {
   const sessionToken = createLoopbackSessionToken();
   const h = createHandlers(
     () => process.env.ANTIGRAVITY_CONVERSATION_ID || '',
-    (body, opts) => ({ __rawResponse: true, body, ...opts })
+    (body, opts) => ({ __rawResponse: true, body, ...opts }),
+    { allowDiskCacheWithoutLs: true }
   );
 
   const serveStandaloneHtml = async () => ({

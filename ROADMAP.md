@@ -1,15 +1,19 @@
 # agy-plugins ROADMAP
 
-更新时间：2026-11-18 12:22（Asia/Shanghai）。
+更新时间：2026-11-18 17:30（Asia/Shanghai）。
 
 ## 本次交付目标
 
 1. 修复 `context-viewer` 与 `agy-finder` 在 `agy` CLI 环境（含沙箱受限终端工具与外部终端）下的适配问题：正确识别 CLI 会话来源、诚实提示沙箱网络与目录遍历限制并补录当前活跃 CLI 会话、更新 CLI 侧 Skill/Rules 引导，完成全仓校验与打包。
-2. 保留既有双插件基线与发布交接记录（`agy-finder v0.2.8` / `context-viewer v1.7.10` 于 `v2026.11.15.1` 已完成；`context-viewer v1.7.11` 历史无步骤 `0 tok` 过滤已同步 `main`）。
+2. 修复 `context-viewer` 独立窗口 / CLI 离线缓存复用、未识别套餐误套 `$19.99/月` 与 `unavailable` 状态提示，以及 `agy-context statusline` 缓存命中率显示与宽度裁剪优先级。
+3. 保留既有双插件基线与发布交接记录（`agy-finder v0.2.8` / `context-viewer v1.7.10` 于 `v2026.11.15.1` 已完成；`context-viewer v1.7.11` 历史无步骤 `0 tok` 过滤已同步 `main`）。
 
 ## 当前阶段与状态
 
-- **已完成双插件 `agy` CLI 适配修复、回归验证、全仓打包及本机 `./install.sh` 热同步（待按需提交推送）**：
+- **已完成 `context-viewer` 独立窗口离线缓存兜底、`statusline` 缓存命中率展示修复、全仓校验、打包与本机 `./install.sh context-viewer` 热同步（已同步提交推送 `main`）**：
+  - **独立窗口 / CLI / 独立 Web 缓存兜底与套餐计价修复**（[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs)、[pricing.mjs](./plugins/agy-context-viewer/sidecars/dashboard/pricing.mjs)、[float_window.mjs](./plugins/agy-context-viewer/sidecars/dashboard/float_window.mjs)、[main.mjs](./plugins/agy-context-viewer/sidecars/dashboard/main.mjs)、[cli.mjs](./plugins/agy-context-viewer/sidecars/dashboard/cli.mjs)、[app.js](./plugins/agy-context-viewer/sidecars/dashboard/app.js)）：抽出 `readLatestDiskHostFallback()` 并为 `collectTokenHistory`、`float_window.mjs`、`main.mjs --standalone` 与 `cli.mjs` 统一透传 `allowDiskCacheWithoutLs: true`，在未连接语言服务或本地 RPC 失败时复用 `host_status_cache_v1.json` 的账号/套餐与 30 分钟内有效配额快照；修复 `getRegionTierMonthlyPrice()` 与 `resolveEffectivePlanStatus()` 对 `tierKey === 'unknown'` 误落回美区 `$19.99/月` 的问题；在 `app.js` 显式展示 `quotaStatus.state === 'unavailable'` 状态与引导文案。
+  - **CLI 底部状态栏缓存命中率展示与宽度裁剪优化**（[cli.mjs](./plugins/agy-context-viewer/sidecars/dashboard/cli.mjs)）：管道调用未传 `terminal_width` 时默认宽度由 `80` 放宽至 `104`，将 `C xx%` 优先级由 `4` 调至 `3`（单次费用调至 `4`），并支持 `cacheHitPercent >= 0`（缓存过期时显示黄色 `C 0%`），补充对应回归用例至 [context-viewer/scripts/verify.mjs](./plugins/agy-context-viewer/scripts/verify.mjs)。
+- **已完成双插件 `agy` CLI 适配修复、回归验证、全仓打包及本机 `./install.sh` 热同步**：
   - **`context-viewer` CLI 来源归属与沙箱降级**（[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs)、[cli.mjs](./plugins/agy-context-viewer/sidecars/dashboard/cli.mjs)、[context-viewer/SKILL.md](./plugins/agy-context-viewer/skills/context-viewer/SKILL.md)）：新增 `isCliRuntimeEnv()` 并让 `findCliDataDir()` 支持 `ANTIGRAVITY_APP_DATA_DIR`（`antigravity-cli`），在 `scanConversation()` 正确输出 `conversationSource` 并修正 `cli.mjs` 对 CLI 会话误标 `[Desktop]` 的问题；为 `callLanguageServerWithStatus()` 与 `walkTranscriptFiles()` 补齐 `EPERM` / `EACCES` 诊断与 `historyStatus` 标记，在沙箱禁止 `scandir` 时直读当前 `ANTIGRAVITY_CONVERSATION_ID` 计入 CLI 统计并给出外部终端 `agy-context` / `menubar` / `float` / `web` 操作提示；更新 `SKILL.md` 禁止在 CLI 输出不可点击的 `sidecar://` 链接。
   - **`agy-finder` CLI 会话定位与规则约束区分**（[drawer.mjs](./plugins/agy-finder/sidecars/tree/drawer.mjs)、[rules/AGENTS.md](./plugins/agy-finder/rules/AGENTS.md)、[agy-finder/SKILL.md](./plugins/agy-finder/skills/agy-finder/SKILL.md)）：新增 `findCliDataDir()` 并让 `findLatestBrainConversationId()` / `resolveDaemonRoots()` 同时兼容 `ANTIGRAVITY_APP_DATA_DIR` 与 `ANTIGRAVITY_CONVERSATION_ID`（同时保持 `getSharedAuxTriggerPath()` 仍指向桌面端共享目录）；在 `rules/AGENTS.md` 与 `SKILL.md` 区分桌面端（`sidecar://` 胶囊）与 `agy` CLI（纯 `file://` + `agy-finder` 终端命令）。
   - **新增 CLI 运行时与受限目录回归校验**（[context-viewer/scripts/verify.mjs](./plugins/agy-context-viewer/scripts/verify.mjs)）：新增 `0o111` 模拟 `scandir` 受限目录与 `ANTIGRAVITY_APP_DATA_DIR` / `ANTIGRAVITY_LS_VERSION` CLI 环境变量断言，验证 `[CLI]` 来源识别、直读会话补录与 `historyStatus.state === 'restricted'`。

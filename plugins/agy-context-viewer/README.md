@@ -51,13 +51,15 @@ irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-co
 <summary>常用 <code>agy-context</code> 终端命令速查</summary>
 
 ```bash
-agy-context                  # 终端 ANSI 看板（上下文占比、生成速度、近 5 轮涨跌、双池配额）
-agy-context aux              # 唤醒 / 切至 Antigravity 右侧辅助栏看板
-agy-context float            # 显隐独立置顶小窗（close 关闭 / quit 退出守护进程）
-agy-context menubar quota    # 菜单栏切为配额剩余（可选 context / speed / quota / on / off / status）
-agy-context turns            # 查看近 20 轮上下文 Δ、缓存命中率与工具调用明细
-agy-context web              # 启动 127.0.0.1:18970 独立 Web 看板并打开浏览器
-agy-context json             # 输出结构化汇总 JSON（追加 --full 返回完整原始数据）
+agy-context                    # 终端 ANSI 看板（上下文占比、生成速度、近 5 轮涨跌、双池配额）
+agy-context statusline install # 为 agy CLI 开启底部原生实时状态栏（模型、水位%、tok/s、费用与双池配额）
+agy-context watch              # 终端实时盯盘面板（适配 tmux 分屏，自动跟随当前会话更新）
+agy-context aux                # 唤醒 / 切至 Antigravity 右侧辅助栏看板
+agy-context float              # 显隐独立置顶小窗（close 关闭 / quit 退出守护进程）
+agy-context menubar quota      # 菜单栏切为配额剩余（可选 context / speed / quota / on / off / status）
+agy-context turns              # 查看近 20 轮上下文 Δ、缓存命中率与工具调用明细
+agy-context web                # 启动 127.0.0.1:18970 独立 Web 看板并打开浏览器
+agy-context json               # 输出结构化汇总 JSON（追加 --full 返回完整原始数据）
 ```
 
 </details>

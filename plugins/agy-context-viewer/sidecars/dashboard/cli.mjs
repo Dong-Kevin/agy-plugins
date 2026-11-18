@@ -13,19 +13,23 @@
  */
 
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, watch } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
   collectTokenHistory,
+  findAppDataDir,
+  findCliDataDir,
   getAuxShortcutConfig,
+  getCliStatusLineConfig,
   getMenubarMode,
   getShortcutConfig,
   getSidebarEntryStatus,
   isCliRuntimeEnv,
   MENUBAR_MODES,
   scanConversation,
+  setCliStatusLineConfig,
   setSidebarEntrypoint,
   syncSidebarManifestFromSettings
 } from './collector.mjs';
@@ -113,6 +117,9 @@ function printHelp() {
     '',
     '用法：',
     '  agy-context [status] [conversationId]           终端可视化汇总（自动识别桌面端与 agy CLI 最新活跃会话）',
+    '  agy-context statusline install [--replace]      为 agy CLI 开启底部实时状态栏（写入 settings.json，默认与内置状态栏叠加）',
+    '  agy-context statusline [status|off|uninstall]   查看、暂停或移除 agy CLI 底部实时状态栏配置',
+    '  agy-context watch [conversationId] [--once]     终端实时盯盘面板（适配 tmux 分屏，自动跟随最新会话变化）',
     '  agy-context menubar [context|speed|quota]       定制 macOS 顶部菜单栏显示：上下文占比 / 速度与耗时 / 5h或Week额度',
     '  agy-context menubar [on|off|toggle|status]      开启、关闭或查看顶部菜单栏常驻图标（切换会话时自动跟随）',
     '  agy-context float [toggle|close|quit]           切换屏幕右侧独立置顶小窗（不受右侧栏切换影响，随时可取消置顶或收回）',
@@ -579,6 +586,434 @@ function printTurnsTable(ctx) {
   console.log(out.map(formatZh).join('\n'));
 }
 
+async function readStdinBounded(timeoutMs = 150) {
+  if (process.stdin.isTTY) return '';
+  return new Promise((resolvePromise) => {
+    const chunks = [];
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      process.stdin.removeListener('data', onData);
+      process.stdin.removeListener('end', onEnd);
+      process.stdin.removeListener('error', onErr);
+      try { process.stdin.pause(); } catch {}
+      resolvePromise(Buffer.concat(chunks).toString('utf8'));
+    };
+    const onData = (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const onEnd = () => finish();
+    const onErr = () => finish();
+    const timer = setTimeout(finish, timeoutMs);
+    process.stdin.on('data', onData);
+    process.stdin.on('end', onEnd);
+    process.stdin.on('error', onErr);
+    process.stdin.resume();
+  });
+}
+
+function getFlagValue(rawArgs, flagName) {
+  for (let i = 0; i < rawArgs.length; i++) {
+    const a = rawArgs[i];
+    if (a === flagName && rawArgs[i + 1] && !rawArgs[i + 1].startsWith('-')) {
+      return rawArgs[i + 1];
+    }
+    if (a.startsWith(`${flagName}=`)) {
+      return a.slice(flagName.length + 1);
+    }
+  }
+  return '';
+}
+
+function stripFormatTags(str) {
+  return String(str || '')
+    .replace(/\x1b\[[0-9;]*m/g, '')
+    .replace(/#\[[^\]]*\]/g, '');
+}
+
+function formatShortModel(modelName) {
+  const s = String(modelName || '').trim();
+  if (!s || s === '未记录模型' || s === '未识别模型') return '';
+  return s
+    .replace(/\s*\((?:high|medium|low|xhigh|max|minimal)\)\s*$/i, '')
+    .replace(/^Gemini\s+\d+(?:\.\d+)?\s+/i, '')
+    .replace(/^Claude\s+/i, '')
+    .trim();
+}
+
+function formatUsdCompact(usd) {
+  const n = Number(usd || 0);
+  if (!(n > 0)) return '';
+  if (n >= 10) return `$${n.toFixed(1)}`;
+  if (n >= 0.1) return `$${n.toFixed(2)}`;
+  return `$${n.toFixed(3)}`;
+}
+
+function pickQuotaPool(ctx, modelDisplay) {
+  if (ctx?.context?.quota) return ctx.context.quota;
+  const quotas = Array.isArray(ctx?.quotas) ? ctx.quotas : [];
+  if (!quotas.length) return null;
+  const lower = String(modelDisplay || '').toLowerCase();
+  const isThirdParty = /\b(?:claude|anthropic|opus|sonnet|haiku|gpt|openai)\b/.test(lower);
+  if (isThirdParty) {
+    return quotas.find((q) => /非\s*gemini|claude|gpt/i.test(String(q.displayTitle || q.title || q.label || ''))) || quotas[0];
+  }
+  return quotas.find((q) => /gemini/i.test(String(q.displayTitle || q.title || q.label || '')) && !/非\s*gemini/i.test(String(q.displayTitle || q.title || q.label || ''))) || quotas[0];
+}
+
+function paintTag(text, colorKey, format) {
+  if (!text) return '';
+  if (format === 'plain') return text;
+  if (format === 'tmux') {
+    const tmuxMap = {
+      cyan: '#[fg=cyan]',
+      green: '#[fg=green]',
+      yellow: '#[fg=yellow]',
+      red: '#[fg=red]',
+      magenta: '#[fg=magenta]',
+      dim: '#[fg=colour244]',
+      bold: '#[bold]'
+    };
+    const prefix = tmuxMap[colorKey] || '';
+    return prefix ? `${prefix}${text}#[default]` : text;
+  }
+  const ansiMap = {
+    cyan: '\x1b[36m',
+    green: '\x1b[32m',
+    yellow: '\x1b[33m',
+    red: '\x1b[31m',
+    magenta: '\x1b[35m',
+    dim: '\x1b[2m',
+    bold: '\x1b[1m'
+  };
+  const prefix = ansiMap[colorKey] || '';
+  return prefix ? `${prefix}${text}\x1b[0m` : text;
+}
+
+function buildStatuslineText(ctx, stdinPayload = {}, { format = 'ansi', terminalWidth = 80 } = {}) {
+  const cx = ctx?.context || {};
+  const sp = ctx?.speed || {};
+  const stdinCw = stdinPayload?.context_window || {};
+  const stdinCur = stdinCw?.current_usage || {};
+  const modelDisplay = (cx.model && cx.model !== '未记录模型')
+    ? cx.model
+    : (stdinPayload?.model?.display_name || stdinPayload?.model?.id || '');
+  const shortModel = formatShortModel(modelDisplay);
+
+  const curInput = Number(stdinCur.input_tokens || 0);
+  const curCacheRead = Number(stdinCur.cache_read_input_tokens || 0);
+  const curCacheCreate = Number(stdinCur.cache_creation_input_tokens || 0);
+  const curOutput = Number(stdinCur.output_tokens || 0);
+  const stdinCurTotal = curInput + curCacheRead + curCacheCreate + curOutput;
+
+  let usedTokens = cx.used ?? null;
+  if (usedTokens === null && stdinCurTotal > 0) {
+    usedTokens = stdinCurTotal;
+  } else if (stdinCurTotal > 0 && cx.actual != null && stdinCurTotal > cx.actual && !(cx.pendingTokens > 0)) {
+    usedTokens = stdinCurTotal;
+  }
+
+  const stdinBudget = Number(stdinCw.context_window_size || 0) > 0 ? Number(stdinCw.context_window_size) : null;
+  const budgetTokens = cx.budget || stdinBudget || null;
+  const usedPercent = (usedTokens !== null && budgetTokens > 0)
+    ? Number(((usedTokens / budgetTokens) * 100).toFixed(1))
+    : null;
+
+  const stdinPromptSum = curInput + curCacheCreate + curCacheRead;
+  const cacheHitPercent = cx.cacheHitPercent != null
+    ? cx.cacheHitPercent
+    : (stdinPromptSum > 0 ? Number(((curCacheRead / stdinPromptSum) * 100).toFixed(1)) : null);
+
+  const latestTps = sp.streamingTps ?? sp.tps ?? null;
+  const sessionCost = cx.sessionCostUSD > 0 ? cx.sessionCostUSD : null;
+  const quotaPool = pickQuotaPool(ctx, modelDisplay);
+
+  const pctColor = usedPercent == null
+    ? 'cyan'
+    : (usedPercent >= 90 ? 'red' : usedPercent >= 75 ? 'yellow' : 'green');
+
+  const compactMode = terminalWidth < 68;
+  const segments = [];
+
+  if (shortModel && !compactMode) {
+    segments.push({ prio: 2, text: paintTag(`◈ ${shortModel}`, 'magenta', format) });
+  }
+
+  if (usedTokens !== null && usedTokens > 0) {
+    const usedPart = budgetTokens > 0
+      ? (compactMode ? `${usedPercent}%` : `${fmtTok(usedTokens)}/${fmtTok(budgetTokens)} (${usedPercent}%)`)
+      : fmtTok(usedTokens);
+    const prefix = (shortModel && !compactMode) ? '' : '◈ ';
+    segments.push({ prio: 1, text: paintTag(`${prefix}${usedPart}`, pctColor, format) });
+  } else {
+    const prefix = (shortModel && !compactMode) ? '' : '◈ ';
+    segments.push({ prio: 1, text: paintTag(`${prefix}就绪`, 'dim', format) });
+  }
+
+  if (cacheHitPercent !== null && cacheHitPercent >= 0) {
+    segments.push({ prio: 3, text: paintTag(`C ${Math.round(cacheHitPercent)}%`, cacheHitPercent > 0 ? 'dim' : 'yellow', format) });
+  }
+
+  if (latestTps !== null && latestTps > 0) {
+    segments.push({ prio: 3, text: paintTag(`⚡ ${Math.round(latestTps)}t/s`, 'cyan', format) });
+  }
+
+  const costStr = formatUsdCompact(sessionCost);
+  if (costStr) {
+    segments.push({ prio: 4, text: paintTag(costStr, 'yellow', format) });
+  }
+
+  if (quotaPool) {
+    const p5 = typeof quotaPool.fiveHour?.remainingPercent === 'number'
+      ? Math.round(quotaPool.fiveHour.remainingPercent)
+      : (typeof quotaPool.baseRemainingPercent === 'number' ? Math.round(quotaPool.baseRemainingPercent) : null);
+    const pW = typeof quotaPool.weekly?.remainingPercent === 'number' ? Math.round(quotaPool.weekly.remainingPercent) : null;
+    if (p5 !== null || pW !== null) {
+      const qColor = Math.min(p5 ?? 100, pW ?? 100) <= 15 ? 'red' : Math.min(p5 ?? 100, pW ?? 100) <= 40 ? 'yellow' : 'green';
+      const qLabel = (p5 !== null && pW !== null && !compactMode)
+        ? `⏳ 5h ${p5}%·W ${pW}%`
+        : (p5 !== null ? `⏳ 5h ${p5}%` : `⏳ W ${pW}%`);
+      segments.push({ prio: 2, text: paintTag(qLabel, qColor, format) });
+    }
+  }
+
+  const sep = format === 'plain' ? ' | ' : paintTag(' · ', 'dim', format);
+  const maxWidth = Math.max(24, Number(terminalWidth || 80) - 4);
+  const kept = [...segments];
+  const renderList = (list) => list.map((s) => s.text).join(sep);
+
+  while (kept.length > 1 && stripFormatTags(renderList(kept)).length > maxWidth) {
+    let dropIdx = -1;
+    let maxPrio = -1;
+    for (let i = kept.length - 1; i >= 0; i--) {
+      if (kept[i].prio > maxPrio) {
+        maxPrio = kept[i].prio;
+        dropIdx = i;
+      }
+    }
+    if (dropIdx >= 0 && maxPrio > 1) {
+      kept.splice(dropIdx, 1);
+    } else {
+      break;
+    }
+  }
+
+  return renderList(kept);
+}
+
+async function runStatuslineCommand(rawArgs) {
+  const positionals = rawArgs.filter((a) => !a.startsWith('-'));
+  const sub = (positionals[1] || '').toLowerCase();
+  const wantJson = rawArgs.includes('--json');
+
+  if (['install', 'enable', 'on', 'off', 'disable', 'uninstall', 'remove', 'delete', 'status'].includes(sub)) {
+    const cliEntryPath = resolve(__dirname, 'cli.mjs');
+    const res = sub === 'status'
+      ? getCliStatusLineConfig()
+      : setCliStatusLineConfig({
+          action: sub,
+          stackWithDefault: !rawArgs.includes('--replace'),
+          cliEntryPath
+        });
+    if (wantJson) {
+      console.log(JSON.stringify(res, null, 2));
+      if (!res.ok) process.exitCode = 1;
+      return;
+    }
+    if (!res.ok) {
+      console.error(formatZh(`${c.red}✗${c.reset} ${res.error || '操作失败'}`));
+      process.exitCode = 1;
+      return;
+    }
+    if (sub === 'status') {
+      const stateIcon = res.enabled ? `${c.green}●${c.reset}` : `${c.dim}○${c.reset}`;
+      const stateText = res.enabled
+        ? `已开启（${res.stackWithDefault ? '与内置状态栏叠加' : '替换内置状态栏'}）`
+        : (res.configured ? '已配置但当前暂停' : '未配置');
+      console.log(formatZh(`${stateIcon} agy CLI 底部状态栏：${stateText}`));
+      if (res.command) console.log(formatZh(`  命令：${res.command}`));
+      console.log(formatZh(`  配置：${res.settingsPath}`));
+      return;
+    }
+    console.log(formatZh(`${c.green}✓${c.reset} ${res.message}`));
+    return;
+  }
+
+  const stdinRaw = await readStdinBounded(150);
+  let stdinPayload = {};
+  let hasStdinJson = false;
+  if (stdinRaw && stdinRaw.trim()) {
+    try {
+      const parsed = JSON.parse(stdinRaw);
+      if (parsed && typeof parsed === 'object') {
+        stdinPayload = parsed;
+        hasStdinJson = true;
+      }
+    } catch {}
+  }
+
+  const stdinConvId = String(stdinPayload.conversation_id || stdinPayload.session_id || '').trim();
+  const convArg = (
+    stdinConvId ||
+    (sub && sub !== 'render' ? positionals[1] : '') ||
+    (hasStdinJson ? '' : (process.env.ANTIGRAVITY_CONVERSATION_ID || ''))
+  ).trim();
+
+  const fmtFlag = getFlagValue(rawArgs, '--format').toLowerCase();
+  const format = (rawArgs.includes('--plain') || rawArgs.includes('--no-color') || fmtFlag === 'plain')
+    ? 'plain'
+    : ((rawArgs.includes('--tmux') || fmtFlag === 'tmux') ? 'tmux' : 'ansi');
+  const terminalWidth = Number(stdinPayload.terminal_width || getFlagValue(rawArgs, '--width') || process.stdout.columns || 104);
+
+  const ctx = await scanConversation(convArg, {
+    force: false,
+    allowDiskCacheWithoutLs: true,
+    skipRecentList: Boolean(convArg),
+    noFallbackToRecent: hasStdinJson && !stdinConvId,
+    skipWorkspaceLookup: true
+  });
+
+  const line = buildStatuslineText(ctx, stdinPayload, { format, terminalWidth });
+  process.stdout.write(`${line}\n`);
+}
+
+function renderWatchPanel(ctx, width = 60, intervalMs = 1500) {
+  const cols = Math.max(36, Math.min(92, Number(width || 60)));
+  const barW = Math.max(10, Math.min(24, cols - 30));
+  const cx = ctx?.context || {};
+  const sp = ctx?.speed || {};
+  const st = cx.sessionTotals || {};
+  const turns = ctx?.turns || [];
+  const quotas = ctx?.quotas || [];
+  const srcBadge = ctx?.conversationSource === 'cli' ? '[CLI]' : '[Desktop]';
+  const nowStr = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+
+  const lines = [];
+  lines.push(`${c.bold}${c.magenta}◈ 上下文实时监控${c.reset} ${c.dim}${nowStr}${c.reset}`);
+  lines.push(`${c.dim}${'─'.repeat(Math.min(cols, 72))}${c.reset}`);
+
+  if (!ctx?.conversationId) {
+    lines.push('暂无本地活跃会话归档。');
+  } else {
+    const maxTitleLen = Math.max(12, cols - 18);
+    const rawTitle = String(ctx.conversationTitle || '未命名会话');
+    const shortTitle = rawTitle.length > maxTitleLen ? `${rawTitle.slice(0, maxTitleLen - 1)}…` : rawTitle;
+    lines.push(`${c.cyan}${srcBadge}${c.reset} ${c.bold}${shortTitle}${c.reset} ${c.dim}(${ctx.conversationId.slice(0, 8)})${c.reset}`);
+    lines.push(`模型  ${c.bold}${cx.model || '未识别模型'}${c.reset}`);
+    const pctText = cx.percent != null ? `${cx.percent}%` : '容量未知';
+    const budgetText = cx.budget ? fmtTok(cx.budget) : '未知上限';
+    lines.push(`水位  ${renderBar(cx.percent, barW)} ${c.bold}${pctText}${c.reset} (${fmtTok(cx.used)}/${budgetText})`);
+    lines.push(`缓存  ${c.bold}${cx.cacheHitPercent != null ? `${cx.cacheHitPercent}%` : '--'}${c.reset} · 速度 ${c.cyan}${sp.streamingTps ?? sp.tps ?? '--'} t/s${c.reset} · 费用 ${c.yellow}${fmtUsd(cx.sessionCostUSD || 0, 3)}${c.reset}`);
+    lines.push(`吞吐  ${turns.length} 轮 · 累计 ${fmtTok(st.totalTokens)} (缓存 ${fmtTok(st.cacheTokens)} / 输出 ${fmtTok(st.outputTokens)})`);
+
+    if (turns.length > 0) {
+      lines.push('');
+      lines.push(`${c.bold}最近轮次（倒序）${c.reset}`);
+      for (const t of turns.slice(0, 6)) {
+        const d = Number(t.deltaTokens || 0);
+        const dStr = d > 0 ? `${c.yellow}+${fmtTok(d)}${c.reset}` : d < 0 ? `${c.green}${fmtTok(d)}${c.reset}` : `${c.dim}0${c.reset}`;
+        const tools = (t.tools || []).slice(0, 2).join(', ');
+        const toolText = tools ? ` ${c.dim}[${tools}]${c.reset}` : '';
+        lines.push(`  #${String(t.turnIndex).padEnd(2)} ${fmtTok(t.totalTokens).padStart(6)} (${dStr}) · ${t.tps ? `${t.tps}t/s` : '--'}${toolText}`);
+      }
+    }
+  }
+
+  if (quotas.length > 0) {
+    lines.push('');
+    lines.push(`${c.bold}配额池余量${c.reset}${ctx.quotaStatus?.stale ? ` ${c.yellow}(缓存)${c.reset}` : ''}`);
+    for (const q of quotas.slice(0, 3)) {
+      const p5 = typeof q.fiveHour?.remainingPercent === 'number' ? q.fiveHour.remainingPercent : q.baseRemainingPercent;
+      const pW = typeof q.weekly?.remainingPercent === 'number' ? q.weekly.remainingPercent : null;
+      const eff = p5 !== null && pW !== null ? Math.min(p5, pW) : (p5 ?? pW ?? q.remainingPercent ?? null);
+      const pctStr = (p5 !== null && pW !== null) ? `5h ${p5}% · 周 ${pW}%` : (p5 !== null ? `5h ${p5}%` : (pW !== null ? `周 ${pW}%` : '--'));
+      const qTitle = q.displayTitle || q.title || q.label || '模型池';
+      lines.push(`  ${renderBar(eff, Math.min(12, barW), true)} ${pctStr} ${c.dim}${qTitle}${c.reset}`);
+    }
+  }
+
+  lines.push(`${c.dim}${'─'.repeat(Math.min(cols, 72))}${c.reset}`);
+  lines.push(`${c.dim}Ctrl+C 退出 · 每 ${(intervalMs / 1000).toFixed(1)}s 自动刷新${c.reset}`);
+  return lines.map(formatZh);
+}
+
+async function runWatchCommand(rawArgs) {
+  const positionals = rawArgs.filter((a) => !a.startsWith('-'));
+  const convArg = (positionals[1] || process.env.ANTIGRAVITY_CONVERSATION_ID || '').trim();
+  const once = rawArgs.includes('--once');
+  const intervalRaw = Number(getFlagValue(rawArgs, '--interval') || 1500);
+  const intervalMs = Math.max(500, Math.min(30_000, Number.isFinite(intervalRaw) ? intervalRaw : 1500));
+
+  const fetchAndRender = async () => {
+    const ctx = await scanConversation(convArg, {
+      force: true,
+      allowDiskCacheWithoutLs: true,
+      skipWorkspaceLookup: true
+    });
+    const cols = process.stdout.columns || Number(getFlagValue(rawArgs, '--width') || 64);
+    return { ctx, lines: renderWatchPanel(ctx, cols, intervalMs) };
+  };
+
+  if (once) {
+    const { lines } = await fetchAndRender();
+    console.log(lines.join('\n'));
+    return;
+  }
+
+  let running = true;
+  let rendering = false;
+  let firstPaint = true;
+  const watchers = [];
+  let timer = null;
+  let debounceTimer = null;
+
+  const paint = async () => {
+    if (!running || rendering) return;
+    rendering = true;
+    try {
+      const { lines } = await fetchAndRender();
+      const prefix = firstPaint ? '\x1b[2J\x1b[H' : '\x1b[H';
+      firstPaint = false;
+      const body = lines.map((l) => `${l}\x1b[K`).join('\n');
+      process.stdout.write(`${prefix}${body}\x1b[J\n`);
+    } catch {} finally {
+      rendering = false;
+    }
+  };
+
+  const cleanup = () => {
+    if (!running) return;
+    running = false;
+    if (timer) clearInterval(timer);
+    if (debounceTimer) clearTimeout(debounceTimer);
+    for (const w of watchers) {
+      try { w.close(); } catch {}
+    }
+    if (process.stdout.isTTY) process.stdout.write('\x1b[?25h');
+  };
+
+  process.on('SIGINT', () => { cleanup(); process.exit(0); });
+  process.on('SIGTERM', () => { cleanup(); process.exit(0); });
+  if (process.stdout.isTTY) process.stdout.write('\x1b[?25l');
+
+  for (const base of [findCliDataDir(), findAppDataDir()]) {
+    const brainDir = join(base, 'brain');
+    if (!existsSync(brainDir)) continue;
+    try {
+      const w = watch(brainDir, { recursive: false }, () => {
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => { void paint(); }, 200);
+      });
+      w.on('error', () => {});
+      watchers.push(w);
+    } catch {}
+  }
+
+  await paint();
+  timer = setInterval(() => { void paint(); }, intervalMs);
+  await new Promise(() => {});
+}
+
 async function main() {
   const rawArgs = process.argv.slice(2);
   if (rawArgs.includes('--sync-manifest')) {
@@ -595,8 +1030,18 @@ async function main() {
   }
 
   const firstPositional = rawArgs.find((a) => !a.startsWith('-')) || 'status';
-  const knownCmds = new Set(['status', 'turns', 'json', 'web', 'serve', 'open', 'float', 'pin', 'aux', 'menubar', 'sidebar', 'shortcut', 'hotkey', 'aux-shortcut', 'aux-hotkey']);
+  const knownCmds = new Set(['status', 'statusline', 'watch', 'turns', 'json', 'web', 'serve', 'open', 'float', 'pin', 'aux', 'menubar', 'sidebar', 'shortcut', 'hotkey', 'aux-shortcut', 'aux-hotkey']);
   const cmd = knownCmds.has(firstPositional.toLowerCase()) ? firstPositional.toLowerCase() : 'status';
+
+  if (cmd === 'statusline') {
+    await runStatuslineCommand(rawArgs);
+    return;
+  }
+
+  if (cmd === 'watch') {
+    await runWatchCommand(rawArgs);
+    return;
+  }
 
   if (cmd === 'aux') {
     await runAuxCommand(rawArgs);
@@ -642,8 +1087,8 @@ async function main() {
   const wantFull = rawArgs.includes('--full');
 
   const [ctx, hist] = await Promise.all([
-    scanConversation(convArg, { force: true }),
-    collectTokenHistory({ force: true, convId: convArg })
+    scanConversation(convArg, { force: true, allowDiskCacheWithoutLs: true }),
+    collectTokenHistory({ force: true, convId: convArg, allowDiskCacheWithoutLs: true })
   ]);
 
   if (wantJson) {

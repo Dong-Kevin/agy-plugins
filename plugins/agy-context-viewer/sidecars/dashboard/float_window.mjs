@@ -1571,7 +1571,8 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
     const snap = await scanConversation(convId, {
       force,
       background: currentState?.windowVisible === false,
-      menubarMode: currentState?.menubarMode || 'context'
+      menubarMode: currentState?.menubarMode || 'context',
+      allowDiskCacheWithoutLs: true
     });
     if (hooks.onActiveContextSnap && (!convId || convId === currentState.pinnedConvId)) {
       hooks.onActiveContextSnap(snap);
@@ -1593,7 +1594,8 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
     const hist = await collectTokenHistory({
       force,
       background: currentState?.windowVisible === false,
-      menubarMode: currentState?.menubarMode || 'context'
+      menubarMode: currentState?.menubarMode || 'context',
+      allowDiskCacheWithoutLs: true
     });
     if (!force && data.etag && hist.etag && data.etag === hist.etag) {
       return { ok: true, unchanged: true, etag: hist.etag };
@@ -1602,7 +1604,7 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
   }
 
   if (u.pathname === '/api/settings' && method === 'GET') {
-    return getSettings({ background: true });
+    return getSettings({ background: true, allowDiskCacheWithoutLs: true });
   }
   if (u.pathname === '/api/settings' && method === 'POST') {
     return saveSettings(data);
@@ -1951,7 +1953,8 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
       const snap = await scanConversation('', {
         force: false,
         background: !state.windowVisible,
-        menubarMode: state.menubarMode || 'context'
+        menubarMode: state.menubarMode || 'context',
+        allowDiskCacheWithoutLs: true
       });
       lastBarScanAt = Date.now();
       applySnapToMenubar(snap);

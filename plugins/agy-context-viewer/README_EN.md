@@ -51,13 +51,15 @@ irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-co
 <summary>Quick <code>agy-context</code> Terminal Commands</summary>
 
 ```bash
-agy-context                  # Rich ANSI terminal summary (gauge, speed, last 5 turns, dual quota pools)
-agy-context aux              # Reveal and switch Antigravity's Right Aux Pane straight to Context Dashboard
-agy-context float            # Toggle pinned floating window ('close' to hide, 'quit' to stop daemon)
-agy-context menubar quota    # Switch Menu Bar mode ('context' | 'speed' | 'quota' | 'on' | 'off' | 'status')
-agy-context turns            # Inspect last 20 turns with context ±Delta, cache hit %, and tool calls
-agy-context web              # Launch standalone web dashboard on 127.0.0.1:18970
-agy-context json             # Output structured JSON summary (append --full for full telemetry)
+agy-context                    # Rich ANSI terminal summary (gauge, speed, last 5 turns, dual quota pools)
+agy-context statusline install # Enable native agy CLI bottom status bar (model, context %, tok/s, cost & 5h/W quota)
+agy-context watch              # Live terminal monitor panel (tmux-friendly, auto-refreshes with active session)
+agy-context aux                # Reveal and switch Antigravity's Right Aux Pane straight to Context Dashboard
+agy-context float              # Toggle pinned floating window ('close' to hide, 'quit' to stop daemon)
+agy-context menubar quota      # Switch Menu Bar mode ('context' | 'speed' | 'quota' | 'on' | 'off' | 'status')
+agy-context turns              # Inspect last 20 turns with context ±Delta, cache hit %, and tool calls
+agy-context web                # Launch standalone web dashboard on 127.0.0.1:18970
+agy-context json               # Output structured JSON summary (append --full for full telemetry)
 ```
 
 </details>

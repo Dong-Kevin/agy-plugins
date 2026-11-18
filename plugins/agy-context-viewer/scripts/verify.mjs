@@ -458,6 +458,7 @@ async function main() {
   // Pricing, S4 generational precision, R4 & F1 quota grouping / single-model parity checks
   const {
     classifyRequestError,
+    getRegionTierMonthlyPrice,
     groupModelQuotas,
     maskEmail,
     normalizeModelId,
@@ -465,6 +466,7 @@ async function main() {
     resolveEffectivePlanStatus,
     resolveModelQuota,
     sanitizeDiagnosticText,
+    SUBSCRIPTION_REGIONS_PRESET,
     summarizeApiCost
   } = await import(join(ROOT, 'sidecars', 'dashboard', 'pricing.mjs'));
 
@@ -583,6 +585,23 @@ async function main() {
   assert(ultraDefaultEff.effectivePrice === 249.99 && !ultraDefaultEff.isCustomized, `Ultra 默认参考价异常：${ultraDefaultEff.effectivePrice}`);
   const ultraFamilyEff = resolveEffectivePlanStatus(ultraParsed, { acquisitionId: 'family_sharing', zeroExtra: true });
   assert(ultraFamilyEff.monthlyNormalized === 0 && ultraFamilyEff.isCustomized, '家庭组免额外付费折算异常');
+  const unknownParsed = parseUserPlanStatus(null);
+  const unknownDefaultEff = resolveEffectivePlanStatus(unknownParsed, null);
+  assert(
+    unknownParsed.tierKey === 'unknown' &&
+      getRegionTierMonthlyPrice(SUBSCRIPTION_REGIONS_PRESET[0], 'unknown') === null &&
+      unknownDefaultEff.effectivePrice === null &&
+      unknownDefaultEff.monthlyNormalized === null &&
+      unknownDefaultEff.monthlyUSD === null,
+    `未识别套餐不应默认套用 $19.99/月参考价：${JSON.stringify(unknownDefaultEff)}`
+  );
+  const unknownExplicitEff = resolveEffectivePlanStatus(unknownParsed, { priceMode: 'preset', actualPricePaid: 19.99 });
+  assert(unknownExplicitEff.effectivePrice === 19.99, '未识别套餐手动填写实付金额未生效');
+  assert(
+    appJsSrc.includes("quotaStatus?.state === 'unavailable'") &&
+      appJsSrc.includes('未连接宿主'),
+    'app.js 未显式提示 unavailable 离线配额状态'
+  );
 
   const samplePools = groupModelQuotas([
     { label: 'Gemini 4 Carbon (High)', modelId: 'M1', quotaInfo: { remainingFraction: 0.934, resetTime: '2026-11-12T07:05:09Z' } },
@@ -4603,6 +4622,307 @@ async function main() {
         try { chmodSync(cliBrainRoot, 0o755); } catch {}
       }
       rmSync(cliEnvRoot, { recursive: true, force: true });
+    }
+
+    // CLI statusline (render + disk cache hydration + settings.json lifecycle) & watch --once
+    const slTestRoot = mkdtempSync(join(tmpdir(), 'agy-ctx-sl-'));
+    try {
+      const slCliDir = join(slTestRoot, 'antigravity-cli');
+      const slAgDir = join(slTestRoot, 'antigravity');
+      const slStateDir = join(slTestRoot, 'state');
+      const slConvId = '00000000-0000-4000-8000-000000000009';
+      const slConvLogDir = join(slCliDir, 'brain', slConvId, '.system_generated', 'logs');
+      mkdirSync(slConvLogDir, { recursive: true });
+      mkdirSync(slStateDir, { recursive: true });
+      mkdirSync(join(slAgDir, 'brain'), { recursive: true });
+
+      const slSettingsPath = join(slCliDir, 'settings.json');
+      writeFileSync(slSettingsPath, JSON.stringify({ theme: 'dark', customFlag: 42 }, null, 2), 'utf-8');
+      writeFileSync(
+        join(slConvLogDir, 'transcript.jsonl'),
+        [
+          JSON.stringify({ step_index: 0, type: 'USER_INPUT', created_at: '2026-11-18T06:00:00Z', content: 'Test statusline' }),
+          JSON.stringify({
+            step_index: 1,
+            type: 'PLANNER_RESPONSE',
+            created_at: '2026-11-18T06:00:02Z',
+            model: 'gemini-4-carbon-high',
+            input_tokens: 13880,
+            cache_read_tokens: 0,
+            output_tokens: 82
+          })
+        ].join('\n') + '\n',
+        'utf-8'
+      );
+
+      // Seed isolated disk caches (no ANTIGRAVITY_LS_ADDRESS provided)
+      writeFileSync(
+        join(slStateDir, 'host_status_cache_v1.json'),
+        JSON.stringify({
+          version: 1,
+          entries: {
+            ls_0000000000000001: {
+              at: Date.now(),
+              sig: 'host:test',
+              fetchedAt: new Date().toISOString(),
+              plan: { tierName: 'Pro' },
+              modelConfigs: [
+                {
+                  label: 'Gemini 4 Carbon (High)',
+                  modelOrAlias: { model: 'gemini-4-carbon-high' },
+                  quotaInfo: { remainingFraction: 0.91 }
+                }
+              ],
+              quotas: [
+                {
+                  id: 'gemini',
+                  displayTitle: 'Gemini 模型',
+                  fiveHour: { remainingPercent: 91 },
+                  weekly: { remainingPercent: 88 },
+                  remainingPercent: 88
+                }
+              ],
+              quotaStatus: { state: 'live', stale: false, source: 'live' }
+            }
+          }
+        }),
+        'utf-8'
+      );
+      writeFileSync(
+        join(slStateDir, 'active_conv_gen_cache_v1.json'),
+        JSON.stringify({
+          version: 2,
+          convs: {
+            [slConvId]: {
+              fetchedAt: Date.now(),
+              size: 1,
+              mtimeMs: 1,
+              settled: true,
+              generatorList: [
+                {
+                  stepIndex: 1,
+                  model: 'gemini-4-carbon-high',
+                  chatModel: {
+                    model: 'gemini-4-carbon-high',
+                    usage: { inputTokens: 13880, outputTokens: 82, cacheReadTokens: 0 },
+                    timeToFirstToken: 1.0,
+                    streamingDuration: 2.0,
+                    chatStartMetadata: {
+                      contextWindowMetadata: { maxContextTokens: 512000 }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }),
+        'utf-8'
+      );
+
+      const slEnv = {
+        ...isolatedEnv,
+        AG_DIR: slAgDir,
+        AG_CLI_DIR: slCliDir,
+        ANTIGRAVITY_EXECUTABLE_DATA_DIR: slStateDir,
+        ANTIGRAVITY_CONVERSATION_ID: '',
+        ANTIGRAVITY_LS_ADDRESS: '',
+        ANTIGRAVITY_CSRF_TOKEN: ''
+      };
+
+      const slInstall = JSON.parse(execFileSync(process.execPath, [cliEntryPath, 'statusline', 'install', '--json'], {
+        encoding: 'utf-8',
+        env: slEnv,
+        timeout: 10000
+      }));
+      assert(
+        slInstall.ok === true &&
+          slInstall.enabled === true &&
+          slInstall.stackWithDefault === true &&
+          slInstall.command.includes('statusline'),
+        `statusline install 失败：${JSON.stringify(slInstall)}`
+      );
+      const savedAfterInstall = JSON.parse(readFileSync(slSettingsPath, 'utf-8'));
+      assert(
+        savedAfterInstall.theme === 'dark' &&
+          savedAfterInstall.customFlag === 42 &&
+          savedAfterInstall.statusLine?.enabled === true &&
+          savedAfterInstall.statusLine?.stack_with_default === true,
+        'statusline install 不得覆盖 settings.json 原有字段'
+      );
+
+      const slOff = JSON.parse(execFileSync(process.execPath, [cliEntryPath, 'statusline', 'off', '--json'], {
+        encoding: 'utf-8',
+        env: slEnv,
+        timeout: 10000
+      }));
+      assert(slOff.ok === true && slOff.enabled === false && slOff.configured === true, 'statusline off 状态异常');
+
+      const slReplace = JSON.parse(execFileSync(process.execPath, [cliEntryPath, 'statusline', 'on', '--replace', '--json'], {
+        encoding: 'utf-8',
+        env: slEnv,
+        timeout: 10000
+      }));
+      assert(slReplace.ok === true && slReplace.enabled === true && slReplace.stackWithDefault === false, 'statusline --replace 状态异常');
+
+      const slEmptyOut = execFileSync(process.execPath, [cliEntryPath, 'statusline', '--format', 'plain'], {
+        input: JSON.stringify({
+          session_id: '',
+          conversation_id: '',
+          model: { display_name: 'Gemini 4 Carbon (High)' },
+          terminal_width: 80
+        }),
+        encoding: 'utf-8',
+        env: slEnv,
+        timeout: 10000
+      });
+      assert(
+        slEmptyOut.includes('◈ Carbon') && slEmptyOut.includes('就绪') && !slEmptyOut.includes('14.0K'),
+        `空 session_id 的 statusline 不应串联其他会话：${slEmptyOut}`
+      );
+
+      const slActivePayload = JSON.stringify({
+        session_id: slConvId,
+        conversation_id: slConvId,
+        model: { display_name: 'Gemini 4 Carbon (High)' },
+        context_window: {
+          total_input_tokens: 13880,
+          total_output_tokens: 82,
+          context_window_size: 0,
+          used_percentage: 0,
+          current_usage: { input_tokens: 13880, output_tokens: 82, cache_read_tokens: 0 }
+        },
+        terminal_width: 96
+      });
+      const slPlainOut = execFileSync(process.execPath, [cliEntryPath, 'statusline', '--format', 'plain'], {
+        input: slActivePayload,
+        encoding: 'utf-8',
+        env: slEnv,
+        timeout: 10000
+      });
+      assert(
+        slPlainOut.includes('Carbon') &&
+          slPlainOut.includes('512.0K') &&
+          slPlainOut.includes('2.7%') &&
+          slPlainOut.includes('C 0%') &&
+          slPlainOut.includes('5h 91%'),
+        `statusline plain 输出缺少磁盘缓存补齐的水位、缓存或配额：${slPlainOut}`
+      );
+
+      const slTmuxOut = execFileSync(process.execPath, [cliEntryPath, 'statusline', '--format', 'tmux'], {
+        input: slActivePayload,
+        encoding: 'utf-8',
+        env: slEnv,
+        timeout: 10000
+      });
+      assert(slTmuxOut.includes('#[fg=') && slTmuxOut.includes('#[default]'), `statusline tmux 格式异常：${slTmuxOut}`);
+
+      const slNarrowOut = execFileSync(process.execPath, [cliEntryPath, 'statusline', '--format', 'plain'], {
+        input: JSON.stringify({ ...JSON.parse(slActivePayload), terminal_width: 42 }),
+        encoding: 'utf-8',
+        env: slEnv,
+        timeout: 10000
+      });
+      assert(slNarrowOut.trim().length <= 42, `窄终端 width=42 下 statusline 超宽：(${slNarrowOut.trim().length}) ${slNarrowOut}`);
+
+      const slCacheConvId = '00000000-0000-4000-8000-000000000010';
+      const slCacheLogDir = join(slCliDir, 'brain', slCacheConvId, '.system_generated', 'logs');
+      mkdirSync(slCacheLogDir, { recursive: true });
+      writeFileSync(
+        join(slCacheLogDir, 'transcript.jsonl'),
+        [
+          JSON.stringify({ step_index: 0, type: 'USER_INPUT', created_at: '2026-11-18T06:01:00Z', content: 'Test cache statusline' }),
+          JSON.stringify({
+            step_index: 1,
+            type: 'PLANNER_RESPONSE',
+            created_at: '2026-11-18T06:01:03Z',
+            model: 'gemini-4-carbon-high',
+            input_tokens: 1850,
+            cache_read_tokens: 183650,
+            output_tokens: 1200
+          })
+        ].join('\n') + '\n',
+        'utf-8'
+      );
+      const existingGenCache = JSON.parse(readFileSync(join(slStateDir, 'active_conv_gen_cache_v1.json'), 'utf-8'));
+      existingGenCache.convs[slCacheConvId] = {
+        fetchedAt: Date.now(),
+        size: 1,
+        mtimeMs: 1,
+        settled: true,
+        generatorList: [
+          {
+            stepIndex: 1,
+            model: 'gemini-4-carbon-high',
+            chatModel: {
+              model: 'gemini-4-carbon-high',
+              usage: { inputTokens: 1850, cacheReadTokens: 183650, outputTokens: 1200 },
+              timeToFirstToken: 0.6,
+              streamingDuration: 2.0,
+              chatStartMetadata: { contextWindowMetadata: { maxContextTokens: 512000 } }
+            }
+          }
+        ]
+      };
+      writeFileSync(join(slStateDir, 'active_conv_gen_cache_v1.json'), JSON.stringify(existingGenCache), 'utf-8');
+
+      const slDefaultWidthOut = execFileSync(process.execPath, [cliEntryPath, 'statusline', '--format', 'plain'], {
+        input: JSON.stringify({ session_id: slCacheConvId, conversation_id: slCacheConvId }),
+        encoding: 'utf-8',
+        env: slEnv,
+        timeout: 10000
+      });
+      assert(
+        slDefaultWidthOut.includes('C 99%') &&
+          slDefaultWidthOut.includes('5h 91%') &&
+          slDefaultWidthOut.includes('$'),
+        `管道默认宽度下 statusline 应完整保留缓存命中率与全部状态段：${slDefaultWidthOut}`
+      );
+      const slWidth80Out = execFileSync(process.execPath, [cliEntryPath, 'statusline', '--format', 'plain'], {
+        input: JSON.stringify({ session_id: slCacheConvId, conversation_id: slCacheConvId, terminal_width: 80 }),
+        encoding: 'utf-8',
+        env: slEnv,
+        timeout: 10000
+      });
+      assert(
+        slWidth80Out.includes('C 99%') && slWidth80Out.includes('5h 91%'),
+        `80 列终端下 statusline 应优先保留缓存命中率：${slWidth80Out}`
+      );
+
+      const slUninstall = JSON.parse(execFileSync(process.execPath, [cliEntryPath, 'statusline', 'uninstall', '--json'], {
+        encoding: 'utf-8',
+        env: slEnv,
+        timeout: 10000
+      }));
+      const savedAfterUninstall = JSON.parse(readFileSync(slSettingsPath, 'utf-8'));
+      assert(
+        slUninstall.ok === true && !('statusLine' in savedAfterUninstall) && savedAfterUninstall.theme === 'dark',
+        'statusline uninstall 未干净移除配置或破坏原有设置'
+      );
+
+      const watchOut = execFileSync(process.execPath, [cliEntryPath, 'watch', slConvId, '--once'], {
+        encoding: 'utf-8',
+        env: slEnv,
+        timeout: 10000
+      });
+      assert(
+        watchOut.includes('上下文实时监控') && watchOut.includes('[CLI]') && watchOut.includes('512.0K'),
+        `watch --once 输出异常：\n${watchOut}`
+      );
+
+      const cliJsonOut = JSON.parse(execFileSync(process.execPath, [cliEntryPath, 'json', slConvId], {
+        encoding: 'utf-8',
+        env: slEnv,
+        timeout: 10000
+      }));
+      assert(
+        cliJsonOut.quotaStatus?.state === 'stale' &&
+          cliJsonOut.quotaStatus?.source === 'disk_cache' &&
+          cliJsonOut.quotas?.length === 1 &&
+          cliJsonOut.globalHistory?.plan?.includes('Pro'),
+        `无语言服务时 cli.mjs json 未复用磁盘缓存套餐与配额：${JSON.stringify(cliJsonOut.quotaStatus)} / ${cliJsonOut.globalHistory?.plan}`
+      );
+    } finally {
+      rmSync(slTestRoot, { recursive: true, force: true });
     }
 
     // Aux Pane freshness resolution vs stale activeConvId + opening/deferred ack state machine

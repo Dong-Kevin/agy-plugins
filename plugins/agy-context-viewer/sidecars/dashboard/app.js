@@ -1816,7 +1816,9 @@
       'plan-subline',
       plan.isCustomized
         ? `${plan.subscriptionRegionName || '默认美区'} · ${plan.acquisitionLabel || '常规订阅'}`
-        : '默认公开参考价 · 家庭组共享 / 拼车点右上角设置'
+        : (plan.status === 'identified'
+            ? '默认公开参考价 · 家庭组共享 / 拼车点右上角设置'
+            : '未连接语言服务识别档位 · 可点右上角手动设置')
     );
 
     if (plan.monthlyNormalized === 0) {
@@ -1861,7 +1863,9 @@
     } else if (quotaStatus?.summaryStale) {
       planRows.push(['配额同步状态', '多窗口配额摘要暂不可用，仅展示基础池']);
     } else if (quotaStatus?.state === 'error') {
-      planRows.push(['配额同步状态', '语言服务请求失败，暂未获取到配额池']);
+      planRows.push(['配额同步状态', quotaStatus.reason || '语言服务请求失败，暂未获取到配额池']);
+    } else if (quotaStatus?.state === 'unavailable') {
+      planRows.push(['配额同步状态', quotaStatus.reason || '未连接宿主语言服务（当前为离线模式）']);
     }
 
     const planKv = $('plan-kv');
@@ -1886,6 +1890,9 @@
       } else if (quotaStatus?.state === 'error') {
         qSyncPill.className = 'status-pill danger';
         setText(qSyncPill, '连接失败');
+      } else if (quotaStatus?.state === 'unavailable') {
+        qSyncPill.className = 'status-pill neutral';
+        setText(qSyncPill, '未连接宿主');
       } else {
         qSyncPill.className = 'status-pill warn hidden';
         setText(qSyncPill, '');
@@ -1982,7 +1989,10 @@
         }).join('');
       } else if (quotaStatus?.state === 'error') {
         qWrap.classList.remove('hidden');
-        qList.innerHTML = `<div class="kv-row"><span class="muted">${escZh('宿主语言服务暂不可达，尚未获取到模型配额池数据')}</span></div>`;
+        qList.innerHTML = `<div class="kv-row"><span class="muted">${escZh(quotaStatus.reason || '宿主语言服务暂不可达，尚未获取到模型配额池数据')}</span></div>`;
+      } else if (quotaStatus?.state === 'unavailable') {
+        qWrap.classList.remove('hidden');
+        qList.innerHTML = `<div class="kv-row"><span class="muted">${escZh('未连接宿主语言服务，暂无法获取实时模型额度；若从桌面端右侧栏打开看板并点击 📌，可同步实时配额与套餐')}</span></div>`;
       } else {
         qWrap.classList.add('hidden');
       }

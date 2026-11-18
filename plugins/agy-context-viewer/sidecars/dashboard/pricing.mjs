@@ -1094,6 +1094,7 @@ export const SUBSCRIPTION_REGIONS_PRESET = [
 
 export function getRegionTierMonthlyPrice(regionPreset, tierKey = 'pro') {
   if (!regionPreset) return null;
+  if (tierKey === 'unknown' || tierKey === 'custom') return null;
   if (tierKey === 'free') return 0;
   if (tierKey === 'ultra') {
     if (typeof regionPreset.ultraMonthlyPrice === 'number') return regionPreset.ultraMonthlyPrice;
@@ -1292,6 +1293,11 @@ export function resolveEffectivePlanStatus(livePlan, customPlan = null) {
     effectivePrice = Number.isFinite(n) && n >= 0 ? n : null;
   } else if (base.tierKey === 'free') {
     effectivePrice = 0;
+  } else if (base.tierKey === 'unknown') {
+    const n = (custom.actualPricePaid !== null && custom.actualPricePaid !== undefined && custom.actualPricePaid !== '')
+      ? Number(custom.actualPricePaid)
+      : NaN;
+    effectivePrice = Number.isFinite(n) && n >= 0 ? n : null;
   } else if (regionPreset && currency === regionPreset.currency) {
     effectivePrice = getRegionTierMonthlyPrice(regionPreset, base.tierKey);
   } else if (base.officialPriceMonthly !== null) {

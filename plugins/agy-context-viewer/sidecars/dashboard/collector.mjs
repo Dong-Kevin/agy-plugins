@@ -850,11 +850,77 @@ function buildDynamicModelMap(modelConfigs = []) {
   return map;
 }
 
+function hydrateHostDiskEntry(diskEntry) {
+  if (!diskEntry || typeof diskEntry !== 'object') return null;
+  const diskModelConfigs = Array.isArray(diskEntry.modelConfigs) ? diskEntry.modelConfigs : [];
+  const diskSummaryGroups = Array.isArray(diskEntry.quotaSummaryGroups) ? diskEntry.quotaSummaryGroups : [];
+  const hasHydratableConfigs = diskModelConfigs.length > 0;
+  const dynamicModelMap = hasHydratableConfigs
+    ? { ...(diskEntry.dynamicModelMap || {}), ...buildDynamicModelMap(diskModelConfigs) }
+    : (diskEntry.dynamicModelMap || {});
+  const quotas = hasHydratableConfigs
+    ? groupModelQuotas(diskModelConfigs, diskSummaryGroups)
+    : (Array.isArray(diskEntry.quotas) ? diskEntry.quotas : []);
+  return {
+    plan: diskEntry.plan || parseUserPlanStatus(null),
+    modelConfigs: diskModelConfigs,
+    quotaSummaryGroups: diskSummaryGroups,
+    dynamicModelMap,
+    quotas,
+    sig: diskEntry.sig || 'host:disk'
+  };
+}
+
+function readLatestDiskHostFallback(nowMs) {
+  const diskCache = loadHostStatusDiskCache();
+  const entries = Object.values(diskCache?.entries || {})
+    .filter((e) => e && typeof e === 'object' && e.at)
+    .sort((a, b) => Number(b.at || 0) - Number(a.at || 0));
+  const diskEntry = entries[0] || null;
+  const hydrated = hydrateHostDiskEntry(diskEntry);
+  if (!hydrated) return null;
+  const ageMs = Math.max(0, nowMs - Number(diskEntry.at || 0));
+  const crossed = hasCrossedQuotaResetBoundary(hydrated.quotas, diskEntry.at, nowMs);
+  const quotaFresh = ageMs <= 30 * 60_000 && !crossed;
+  return { diskEntry, hydrated, quotaFresh };
+}
+
 async function getHostUserStatus(force = false, options = {}) {
   const lsAddr = process.env.ANTIGRAVITY_LS_ADDRESS;
   const csrf = process.env.ANTIGRAVITY_CSRF_TOKEN;
   const nowMs = Number(options.nowMs) || Date.now();
   if (!lsAddr || !csrf) {
+    if (options.allowDiskCacheWithoutLs) {
+      const fb = readLatestDiskHostFallback(nowMs);
+      if (fb) {
+        const { diskEntry, hydrated, quotaFresh } = fb;
+        const quotaStatus = quotaFresh
+          ? makeQuotaStatus('stale', {
+              stale: true,
+              summaryStale: Boolean(diskEntry.quotaStatus?.summaryStale),
+              source: 'disk_cache',
+              lastSuccessAt: diskEntry.fetchedAt || null,
+              summaryLastSuccessAt: diskEntry.summaryFetchedAt || null,
+              reason: '离线缓存配额快照'
+            })
+          : makeQuotaStatus('unavailable', {
+              source: 'none',
+              reason: '未连接宿主语言服务'
+            });
+        return {
+          at: Number(diskEntry.at || nowMs),
+          lsKey: '',
+          sig: `${hydrated.sig}:${quotaFresh ? 'disk' : 'expired'}`,
+          raw: null,
+          plan: hydrated.plan,
+          quotas: quotaFresh ? hydrated.quotas : [],
+          modelConfigs: hydrated.modelConfigs,
+          quotaSummaryGroups: hydrated.quotaSummaryGroups,
+          dynamicModelMap: hydrated.dynamicModelMap,
+          quotaStatus
+        };
+      }
+    }
     return {
       at: nowMs,
       lsKey: '',
@@ -888,17 +954,13 @@ async function getHostUserStatus(force = false, options = {}) {
 
   const diskCache = loadHostStatusDiskCache();
   const diskEntry = diskCache?.entries?.[lsKeyHash] || null;
-  const diskModelConfigs = Array.isArray(diskEntry?.modelConfigs) ? diskEntry.modelConfigs : [];
-  const diskSummaryGroups = Array.isArray(diskEntry?.quotaSummaryGroups) ? diskEntry.quotaSummaryGroups : [];
-  const hasHydratableConfigs = diskModelConfigs.length > 0;
-  const hydratedDynamicModelMap = hasHydratableConfigs
-    ? { ...(diskEntry?.dynamicModelMap || {}), ...buildDynamicModelMap(diskModelConfigs) }
-    : (diskEntry?.dynamicModelMap || {});
-  const hydratedQuotas = hasHydratableConfigs
-    ? groupModelQuotas(diskModelConfigs, diskSummaryGroups)
-    : (Array.isArray(diskEntry?.quotas) ? diskEntry.quotas : []);
-  let hydratedSig = diskEntry?.sig || 'host:disk';
-  if (hasHydratableConfigs && diskEntry?.plan) {
+  const hydratedDisk = hydrateHostDiskEntry(diskEntry);
+  const diskModelConfigs = hydratedDisk?.modelConfigs || [];
+  const diskSummaryGroups = hydratedDisk?.quotaSummaryGroups || [];
+  const hydratedDynamicModelMap = hydratedDisk?.dynamicModelMap || {};
+  const hydratedQuotas = hydratedDisk?.quotas || [];
+  let hydratedSig = hydratedDisk?.sig || 'host:disk';
+  if (diskModelConfigs.length > 0 && diskEntry?.plan) {
     const { updatedAt: _planUpdatedAt, ...stablePlan } = diskEntry.plan;
     hydratedSig = computeContentEtag('host', {
       plan: stablePlan,
@@ -1001,6 +1063,56 @@ async function getHostUserStatus(force = false, options = {}) {
           quotaStatus
         };
         return cachedHostStatus;
+      }
+      if (options.allowDiskCacheWithoutLs) {
+        const fb = readLatestDiskHostFallback(fetchedAtMs);
+        if (fb) {
+          const { diskEntry, hydrated, quotaFresh } = fb;
+          const quotaStatus = quotaFresh
+            ? makeQuotaStatus('stale', {
+                stale: true,
+                summaryStale: Boolean(diskEntry.quotaStatus?.summaryStale),
+                source: 'disk_cache',
+                lastSuccessAt: diskEntry.fetchedAt || null,
+                summaryLastSuccessAt: diskEntry.summaryFetchedAt || null,
+                reason: isSandboxBlocked
+                  ? '受当前运行环境沙箱限制无法连接本地语言服务，当前展示离线缓存数据'
+                  : '语言服务连接失败，当前展示离线缓存数据',
+                errorCode: errCode
+              })
+            : makeQuotaStatus('error', {
+                stale: false,
+                summaryStale: false,
+                source: 'none',
+                lastSuccessAt: diskEntry.fetchedAt || null,
+                summaryLastSuccessAt: diskEntry.summaryFetchedAt || null,
+                reason: isSandboxBlocked
+                  ? '沙箱限制无法连接本地语言服务（EPERM），请在外部终端运行 agy-context 查看实时配额与窗口上限'
+                  : '语言服务请求失败，暂未获取到配额数据',
+                errorCode: errCode
+              });
+          const { updatedAt: _planUpdatedAt, ...stablePlan } = hydrated.plan || {};
+          const quotas = quotaFresh ? hydrated.quotas : [];
+          const sig = computeContentEtag('host', {
+            plan: stablePlan,
+            quotas,
+            dynamicModelMap: hydrated.dynamicModelMap,
+            quotaState: toStableQuotaState(quotaStatus)
+          });
+          cachedHostStatus = {
+            at: fetchedAtMs,
+            lsKey,
+            sig,
+            raw: null,
+            plan: hydrated.plan,
+            quotas,
+            modelConfigs: hydrated.modelConfigs,
+            quotaSummaryGroups: hydrated.quotaSummaryGroups,
+            dynamicModelMap: hydrated.dynamicModelMap,
+            quotaStatus
+          };
+          return cachedHostStatus;
+        }
       }
       const plan = parseUserPlanStatus(null);
       const quotaStatus = makeQuotaStatus('error', {
@@ -2356,6 +2468,146 @@ export function syncSidebarManifestFromSettings() {
   return getSidebarEntryStatus();
 }
 
+export function getCliSettingsPath() {
+  return join(findCliDataDir(), 'settings.json');
+}
+
+export function buildCliStatusLineCommand(cliEntryPath) {
+  const target = String(cliEntryPath || '').trim();
+  return target ? `node "${target}" statusline` : 'agy-context statusline';
+}
+
+export function getCliStatusLineConfig() {
+  const settingsPath = getCliSettingsPath();
+  let settings = null;
+  let parseError = '';
+  if (existsSync(settingsPath)) {
+    try {
+      const raw = readFileSync(settingsPath, 'utf-8');
+      if (raw.trim()) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          settings = parsed;
+        } else {
+          parseError = 'settings.json 根节点必须为 JSON 对象';
+        }
+      } else {
+        settings = {};
+      }
+    } catch (err) {
+      parseError = err?.message || 'settings.json 解析失败';
+    }
+  }
+  const sl = settings?.statusLine && typeof settings.statusLine === 'object' && !Array.isArray(settings.statusLine)
+    ? settings.statusLine
+    : null;
+  const cmd = typeof sl?.command === 'string' ? sl.command : '';
+  const enabled = Boolean(sl && sl.enabled !== false && cmd.trim());
+  const isContextViewer = Boolean(cmd && /statusline\b/.test(cmd) && /(?:agy-context|context-viewer|cli\.mjs|status\.mjs)/.test(cmd));
+  return {
+    ok: !parseError,
+    settingsPath,
+    exists: existsSync(settingsPath),
+    configured: Boolean(sl && cmd.trim()),
+    enabled,
+    isContextViewer,
+    stackWithDefault: sl ? sl.stack_with_default !== false : true,
+    command: cmd,
+    ...(parseError ? { error: parseError } : {})
+  };
+}
+
+export function setCliStatusLineConfig(actionOrOpts = {}) {
+  const opts = typeof actionOrOpts === 'string' ? { action: actionOrOpts } : (actionOrOpts || {});
+  const action = String(opts.action || 'install').toLowerCase();
+  const stackWithDefault = opts.stackWithDefault !== false;
+  const settingsPath = getCliSettingsPath();
+  let settings = {};
+  if (existsSync(settingsPath)) {
+    try {
+      const raw = readFileSync(settingsPath, 'utf-8');
+      if (raw.trim()) {
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          return { ok: false, settingsPath, error: 'CLI settings.json 根节点不是有效的 JSON 对象，已中止写入以保护原有配置' };
+        }
+        settings = { ...parsed };
+      }
+    } catch (err) {
+      return { ok: false, settingsPath, error: `读取 CLI settings.json 失败：${err.message}` };
+    }
+  }
+
+  const command = buildCliStatusLineCommand(opts.cliEntryPath);
+  if (action === 'uninstall' || action === 'remove' || action === 'delete') {
+    if ('statusLine' in settings) {
+      delete settings.statusLine;
+      writeJsonAtomic(settingsPath, settings);
+    }
+    return {
+      ok: true,
+      action: 'uninstall',
+      ...getCliStatusLineConfig(),
+      message: `已从 ${settingsPath} 移除 statusLine 配置`
+    };
+  }
+
+  if (action === 'off' || action === 'disable') {
+    const prev = settings.statusLine && typeof settings.statusLine === 'object' ? settings.statusLine : {};
+    settings.statusLine = {
+      type: prev.type || 'command',
+      command: prev.command || command,
+      enabled: false,
+      stack_with_default: prev.stack_with_default !== undefined ? prev.stack_with_default : stackWithDefault
+    };
+    writeJsonAtomic(settingsPath, settings);
+    return {
+      ok: true,
+      action: 'off',
+      ...getCliStatusLineConfig(),
+      message: '已暂停 agy CLI 底部状态栏（保留配置，可用 agy-context statusline on 恢复）'
+    };
+  }
+
+  settings.statusLine = {
+    type: 'command',
+    command,
+    enabled: true,
+    stack_with_default: stackWithDefault
+  };
+  writeJsonAtomic(settingsPath, settings);
+  return {
+    ok: true,
+    action: 'install',
+    ...getCliStatusLineConfig(),
+    message: `已启用 agy CLI 底部实时状态栏（${stackWithDefault ? '与默认状态栏叠加显示' : '替换默认状态栏'} · 写入 ${settingsPath}）`
+  };
+}
+
+function findCachedModelBudget(modelKey, modelDisplay, dynamicModelMap = {}) {
+  const normTarget = modelKey || normalizeModelId(modelDisplay, dynamicModelMap) || '';
+  const normDisp = String(modelDisplay || '').trim().toLowerCase();
+  if (!normTarget && (!normDisp || normDisp === '未记录模型')) return null;
+  const diskCache = loadActiveConvGenDiskCache();
+  const entries = Object.values(diskCache?.convs || {})
+    .filter((e) => e && Array.isArray(e.generatorList) && e.generatorList.length > 0)
+    .sort((a, b) => Number(b.fetchedAt || 0) - Number(a.fetchedAt || 0));
+  for (const entry of entries) {
+    for (let i = entry.generatorList.length - 1; i >= 0; i--) {
+      const gm = entry.generatorList[i];
+      const cm = gm?.chatModel || gm?.chatMetadata || {};
+      const ctxMeta = cm?.chatStartMetadata?.contextWindowMetadata;
+      const budget = Number(ctxMeta?.maxContextTokens || 0);
+      if (!(budget > 0)) continue;
+      const rawModel = String(cm?.model || cm?.modelDisplayName || gm?.model || gm?.modelDisplayName || '').trim();
+      const mk = normalizeModelId(rawModel, dynamicModelMap);
+      if (normTarget && mk && mk === normTarget) return budget;
+      if (normDisp && rawModel && formatModelDisplayName(rawModel, mk).toLowerCase() === normDisp) return budget;
+    }
+  }
+  return null;
+}
+
 export async function saveSettings(payload = {}) {
   const host = await getHostUserStatus(false, { background: true });
   const settings = loadRawSettings();
@@ -3487,6 +3739,8 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   const nowMs = Number(options.nowMs) || Date.now();
   const background = Boolean(options.background);
   const menubarMode = String(options.menubarMode || 'context');
+  const allowDiskCacheWithoutLs = Boolean(options.allowDiskCacheWithoutLs);
+  const skipWorkspaceLookup = Boolean(options.skipWorkspaceLookup);
   const stateDir = getPluginStateDir();
   const agDir = findAppDataDir();
   const lsAddr = process.env.ANTIGRAVITY_LS_ADDRESS || '';
@@ -3500,14 +3754,18 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     scanSnapCache.clear();
   }
 
-  const recentConversations = listRecentConversations(24, nowMs);
+  const hasValidRequestedConv = Boolean(requestedConvId && CONV_ID_RE.test(requestedConvId));
+  const noFallbackToRecent = Boolean(options.noFallbackToRecent);
+  const recentConversations = ((options.skipRecentList && hasValidRequestedConv) || (noFallbackToRecent && !hasValidRequestedConv))
+    ? []
+    : listRecentConversations(24, nowMs);
   const cliMode = isCliRuntimeEnv();
   const cliDataDir = findCliDataDir();
-  let convId = (requestedConvId && CONV_ID_RE.test(requestedConvId))
+  let convId = hasValidRequestedConv
     ? requestedConvId
-    : resolveActiveConversationId(recentConversations);
+    : (noFallbackToRecent ? '' : resolveActiveConversationId(recentConversations));
 
-  if (!convId) {
+  if (!convId && !noFallbackToRecent) {
     const envConvId = String(process.env.ANTIGRAVITY_CONVERSATION_ID || '').trim();
     if (CONV_ID_RE.test(envConvId)) {
       const hasEnvLog =
@@ -3521,11 +3779,15 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   }
 
   if (!convId) {
+    const emptyHost = allowDiskCacheWithoutLs
+      ? await getHostUserStatus(false, { background: true, nowMs, allowDiskCacheWithoutLs: true })
+      : null;
     return {
       ok: true,
       conversationId: null,
       conversationSource: cliMode ? 'cli' : 'desktop',
       recentConversations: [],
+      ...(emptyHost ? { quotas: emptyHost.quotas || [], quotaStatus: emptyHost.quotaStatus } : {}),
       empty: true,
       etag: 'empty'
     };
@@ -3562,7 +3824,8 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     background,
     menubarMode,
     nowMs,
-    latestTranscriptMtimeMs: logStatMtime
+    latestTranscriptMtimeMs: logStatMtime,
+    allowDiskCacheWithoutLs
   });
 
   const baseSnapKey = `${convId}|${logStatMtime}|${logStatSize}|${host.sig}|${lsMemHash}|${agDir}|${stateDir}`;
@@ -3791,6 +4054,24 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       logSize: logStatSize,
       logMtimeMs: logStatMtime
     });
+  } else if (!genFromCache && !hasLsConfig && allowDiskCacheWithoutLs && rawSteps.length > 0) {
+    const diskCache = loadActiveConvGenDiskCache();
+    const diskEntry = diskCache?.convs?.[convId];
+    if (diskEntry && Array.isArray(diskEntry.generatorList) && diskEntry.generatorList.length > 0) {
+      const diskList = diskEntry.generatorList;
+      genMetaBundle = {
+        at: Number(diskEntry.fetchedAt || nowMs),
+        lsKey: '',
+        logSize: diskEntry.size,
+        logMtimeMs: diskEntry.mtimeMs,
+        generatorList: diskList,
+        callsByStep: buildCallsByStepFromList(diskList),
+        emptyFromHost: Boolean(diskEntry.empty),
+        rpcFailed: false,
+        fromDiskCache: true
+      };
+      genFromCache = true;
+    }
   }
 
   const rawBundleList = Array.isArray(genMetaBundle?.generatorList) ? genMetaBundle.generatorList : [];
@@ -4277,8 +4558,12 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     ? [...turns, latestInFlight]
     : (hasTrailingZeroTokError && latestCandidate ? [...turns, latestCandidate] : turns);
   const matchedBudgetTurn = [...budgetLookupTurns].reverse().find(isTurnMatchingCurrentModel);
-  const budgetTokens = matchedBudgetTurn?.budget || null;
-  const budgetSource = budgetTokens ? 'server' : 'unknown';
+  const directBudgetTokens = matchedBudgetTurn?.budget || null;
+  const cachedBudgetTokens = (!directBudgetTokens && allowDiskCacheWithoutLs)
+    ? findCachedModelBudget(currentModelKey, currentModelDisplay, host.dynamicModelMap)
+    : null;
+  const budgetTokens = directBudgetTokens || cachedBudgetTokens || null;
+  const budgetSource = directBudgetTokens ? 'server' : (cachedBudgetTokens ? 'disk_cache' : 'unknown');
   const remainingTokens = usedTokens !== null && budgetTokens !== null && budgetTokens > 0
     ? Math.max(0, budgetTokens - usedTokens)
     : null;
@@ -4295,7 +4580,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
 
   // Resolve workspace URI via official agentapi if available (cached per conversation)
   let workspacePath = convWorkspaceCache.get(convId) ?? null;
-  if (workspacePath === null && !convWorkspaceCache.has(convId)) {
+  if (!skipWorkspaceLookup && workspacePath === null && !convWorkspaceCache.has(convId)) {
     try {
       const exe = process.env.ANTIGRAVITY_AGENTAPI_EXE;
       if (exe) {
@@ -4783,7 +5068,13 @@ export async function collectTokenHistory(options = {}) {
     genStepModelsCache = { path: '', mtimeMs: -1, size: -1, data: null };
     lsGenMissCache.clear();
   }
-  const host = await getHostUserStatus(force, { background, menubarMode, nowMs });
+  const allowDiskCacheWithoutLs = Boolean(options.allowDiskCacheWithoutLs);
+  const host = await getHostUserStatus(force, {
+    background,
+    menubarMode,
+    nowMs,
+    allowDiskCacheWithoutLs
+  });
   const observedAct = getObservedActivityMs();
   const histTtlMs = (observedAct > 0 && (nowMs - observedAct) >= 120_000) ? 60_000 : 12_000;
   if (
