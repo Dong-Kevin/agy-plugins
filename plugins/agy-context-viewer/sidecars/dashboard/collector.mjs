@@ -2617,8 +2617,12 @@ function findCachedModelBudget(modelKey, modelDisplay, dynamicModelMap = {}) {
       const ctxMeta = cm?.chatStartMetadata?.contextWindowMetadata;
       const budget = Number(ctxMeta?.maxContextTokens || 0);
       if (!(budget > 0)) continue;
-      const rawModel = String(cm?.model || cm?.modelDisplayName || gm?.model || gm?.modelDisplayName || '').trim();
-      const mk = normalizeModelId(rawModel, dynamicModelMap);
+      const rawModel = String(
+        cm?.modelDisplayName || cm?.responseModel || cm?.model ||
+        gm?.modelDisplayName || gm?.responseModel || gm?.model || ''
+      ).trim();
+      const mk = normalizeModelId(rawModel, dynamicModelMap)
+        || normalizeModelId(cm?.model || gm?.model || '', dynamicModelMap);
       if (normTarget && mk && mk === normTarget) return budget;
       if (normDisp && rawModel && formatModelDisplayName(rawModel, mk).toLowerCase() === normDisp) return budget;
     }

@@ -458,6 +458,7 @@ async function main() {
   // Pricing, S4 generational precision, R4 & F1 quota grouping / single-model parity checks
   const {
     classifyRequestError,
+    formatModelDisplayName,
     getRegionTierMonthlyPrice,
     groupModelQuotas,
     maskEmail,
@@ -500,6 +501,21 @@ async function main() {
   assert(normalizeModelId('Gemini 4 Argon') === 'gemini-4-argon', 'S4 Gemini 4 Argon 匹配异常');
   assert(normalizeModelId('Orchestrator (Argon)') === 'gemini-4-argon', 'S4 Orchestrator (Argon) 匹配异常');
   assert(normalizeModelId('MODEL_PLACEHOLDER_M681') === 'gemini-4-argon', 'S4 M681 placeholder 应映射 gemini-4-argon');
+  assert(normalizeModelId('Gemini 4 Neon (High)') === 'gemini-4-neon', 'S4 Gemini 4 Neon (High) 匹配异常');
+  assert(normalizeModelId('Gemini 4 Neon (XHigh)') === 'gemini-4-neon', 'S4 Gemini 4 Neon (XHigh) 匹配异常');
+  assert(normalizeModelId('Gemini 4 Neon (Medium)') === 'gemini-4-neon', 'S4 Gemini 4 Neon (Medium) 匹配异常');
+  assert(normalizeModelId('Gemini 4 Neon (Low)') === 'gemini-4-neon', 'S4 Gemini 4 Neon (Low) 匹配异常');
+  assert(normalizeModelId('Gemini 4 Neon (Orchestrator)') === 'gemini-4-neon', 'S4 Gemini 4 Neon (Orchestrator) 匹配异常');
+  assert(normalizeModelId('Orchestrator (Neon)') === 'gemini-4-neon', 'S4 Orchestrator (Neon) 匹配异常');
+  assert(normalizeModelId('gemini-pro-orchestrator-neon') === 'gemini-4-neon', 'S4 gemini-pro-orchestrator-neon 匹配异常');
+  assert(normalizeModelId('MODEL_PLACEHOLDER_M532') === 'gemini-4-neon', 'S4 M532 placeholder 应映射 gemini-4-neon');
+  assert(normalizeModelId('MODEL_PLACEHOLDER_M533') === 'gemini-4-neon', 'S4 M533 placeholder 应映射 gemini-4-neon');
+  assert(normalizeModelId('MODEL_PLACEHOLDER_M534') === 'gemini-4-neon', 'S4 M534 placeholder 应映射 gemini-4-neon');
+  assert(normalizeModelId('MODEL_PLACEHOLDER_M535') === 'gemini-4-neon', 'S4 M535 placeholder 应映射 gemini-4-neon');
+  assert(normalizeModelId('MODEL_PLACEHOLDER_M537') === 'gemini-4-neon', 'S4 M537 placeholder 应映射 gemini-4-neon');
+  assert(formatModelDisplayName('gemini-pro-orchestrator-neon') === 'Gemini 4 Neon', 'S4 gemini-pro-orchestrator-neon 显示名异常');
+  assert(formatModelDisplayName('MODEL_PLACEHOLDER_M537') === 'Gemini 4 Neon', 'S4 MODEL_PLACEHOLDER_M537 显示名异常');
+  assert(formatModelDisplayName('Orchestrator (Neon)') === 'Orchestrator (Neon)', 'S4 Orchestrator (Neon) 显示名异常');
   assert(normalizeModelId('Gemini 4 Hydrogen (XHigh)') === 'gemini-4-hydrogen', 'S4 Gemini 4 Hydrogen (XHigh) 匹配异常');
   assert(normalizeModelId('Gemini 4 Hydrogen (Orchestrator)') === 'gemini-4-hydrogen', 'S4 Gemini 4 Hydrogen (Orchestrator) 匹配异常');
   assert(normalizeModelId('MODEL_PLACEHOLDER_M525') === 'gemini-4-hydrogen', 'S4 M525 placeholder 应映射 gemini-4-hydrogen');
@@ -526,6 +542,9 @@ async function main() {
     'GPT-OSS 20B',
     'gemini-pro-orchestrator',
     'gemini-flash-worker-agy',
+    'Gemini Neon',
+    'Gemini 5 Neon (XHigh)',
+    'Gemini 5 Neon (Orchestrator)',
     'Gemini 5 Hydrogen',
     'MODEL_PLACEHOLDER_M669'
   ]) {
@@ -560,6 +579,21 @@ async function main() {
       Math.abs(h4Row.costUSD - 9.075) < 1e-6 &&
       c4Row && !c4Row.unpriced && c4Row.requests === 1 && Math.abs(c4Row.costUSD - 1.0) < 1e-6,
     `Gemini 4 Hydrogen / Orchestrator 合并计价异常：${JSON.stringify(hydrogenMerged.byModel)}`
+  );
+  const neonMerged = summarizeApiCost([
+    { model: 'Gemini 4 Neon (High)', inputTokens: 1_000_000, cacheTokens: 0, outputTokens: 0 },
+    { model: 'Orchestrator (Neon)', inputTokens: 0, cacheTokens: 1_000_000, outputTokens: 0 },
+    { model: 'gemini-pro-orchestrator-neon', inputTokens: 0, cacheTokens: 0, outputTokens: 1_000_000 },
+    { model: 'MODEL_PLACEHOLDER_M537', inputTokens: 1_000_000, cacheTokens: 0, outputTokens: 0 }
+  ]);
+  const n4Row = neonMerged.byModel.find((m) => m.displayName === 'Gemini 4 Neon');
+  assert(
+    neonMerged.pricedRequestsCount === 4 &&
+      neonMerged.unpricedRequestsCount === 0 &&
+      neonMerged.byModel.length === 1 &&
+      n4Row && !n4Row.unpriced && n4Row.requests === 4 && n4Row.tokens === 4_000_000 &&
+      Math.abs(n4Row.costUSD - 21.15) < 1e-6,
+    `Gemini 4 Neon / Orchestrator 合并计价异常：${JSON.stringify(neonMerged.byModel)}`
   );
   const futureSuffixMerged = summarizeApiCost([
     { model: 'Gemini 5 Neon (XHigh)', inputTokens: 2000, outputTokens: 200 },
@@ -680,6 +714,20 @@ async function main() {
       resolveModelQuota('Gemini 5 Unknown', f1Configs, f1Groups) === null,
     'F1 多池下 Gemini Flash 应唯一定位 Flash 子池，无子族标签应返回 null'
   );
+  const f1NeonConfigs = [
+    { label: 'Gemini 4 Neon (High)', modelId: 'gemini-4-neon-high', modelOrAlias: { model: 'MODEL_PLACEHOLDER_M532' }, quotaInfo: { poolId: 'g-neon', remainingFraction: 0.9 } },
+    { label: 'Gemini 3.8 Flash', modelId: 'gemini-3.8-flash-high', modelOrAlias: { model: 'MODEL_PLACEHOLDER_M318' }, quotaInfo: { poolId: 'g-flash', remainingFraction: 0.9 } }
+  ];
+  const f1NeonGroups = [
+    { groupId: 'g-neon', displayName: 'Gemini Group Neon', modelIds: ['MODEL_PLACEHOLDER_M532'], buckets: [{ window: '5h', remainingFraction: 0.75 }] },
+    { groupId: 'g-flash', displayName: 'Gemini Group Flash', modelIds: ['MODEL_PLACEHOLDER_M318'], buckets: [{ window: '5h', remainingFraction: 0.25 }] }
+  ];
+  assert(
+    resolveModelQuota('Orchestrator (Neon)', f1NeonConfigs, f1NeonGroups)?.remainingPercent === 75 &&
+      resolveModelQuota('Gemini 4 Neon (Orchestrator)', f1NeonConfigs, f1NeonGroups)?.remainingPercent === 75 &&
+      resolveModelQuota('gemini-pro-orchestrator-neon', f1NeonConfigs, f1NeonGroups)?.remainingPercent === 75,
+    'F1 多子池下 Orchestrator (Neon) 应唯一定位 Neon 子池'
+  );
 
   // F1b: Explicit poolId-only (no modelIds) & explicit modelIds-only (identical displayName, no groupId)
   const f1PoolIdOnlyGroups = [
@@ -780,6 +828,54 @@ async function main() {
       resolveModelQuota('未记录模型', q1Configs, q1Groups) === null &&
       resolveModelQuota('Unknown Custom Model', q1Configs, q1Groups) === null,
     `Q1 Orchestrator / Gemini 内部执行模型配额解析异常：Carbon=${JSON.stringify(q1OrchCarbon)}, HydroOrch=${JSON.stringify(q1HydroOrch)}, Flash=${JSON.stringify(q1GemFlash)}`
+  );
+
+  // Q1b: Gemini 4 Neon + Orchestrator (Neon) + future Orchestrator variant must merge cleanly into Gemini pool
+  const q1bNeonConfigs = [
+    { label: 'Gemini 4 Neon (High)', modelId: 'gemini-4-neon-high', modelOrAlias: { model: 'MODEL_PLACEHOLDER_M532' }, quotaInfo: { remainingFraction: 0.94, resetTime: '2026-11-19T12:00:00Z' } },
+    { label: 'Gemini 4 Neon (XHigh)', modelId: 'gemini-4-neon-xhigh', modelOrAlias: { model: 'MODEL_PLACEHOLDER_M535' }, quotaInfo: { remainingFraction: 0.94, resetTime: '2026-11-19T12:00:00Z' } },
+    { label: 'Gemini 4 Neon (Medium)', modelId: 'gemini-4-neon-medium', modelOrAlias: { model: 'MODEL_PLACEHOLDER_M533' }, quotaInfo: { remainingFraction: 0.94, resetTime: '2026-11-19T12:00:00Z' } },
+    { label: 'Gemini 4 Neon (Low)', modelId: 'gemini-4-neon-low', modelOrAlias: { model: 'MODEL_PLACEHOLDER_M534' }, quotaInfo: { remainingFraction: 0.94, resetTime: '2026-11-19T12:00:00Z' } },
+    { label: 'Orchestrator (Neon)', modelId: 'gemini-pro-orchestrator-neon', modelOrAlias: { model: 'MODEL_PLACEHOLDER_M537' }, quotaInfo: { remainingFraction: 0.94, resetTime: '2026-11-19T12:00:00Z' } },
+    { label: 'Orchestrator (Future)', modelId: 'gemini-pro-orchestrator-future', modelOrAlias: { model: 'MODEL_PLACEHOLDER_M999' }, quotaInfo: { remainingFraction: 0.94, resetTime: '2026-11-19T12:00:00Z' } },
+    { label: 'Claude Opus 5.5 (High)', modelId: 'claude-opus-5-5-high', modelOrAlias: { model: 'MODEL_PLACEHOLDER_M402' }, quotaInfo: { remainingFraction: 0.80, resetTime: '2026-11-19T12:30:00Z' } }
+  ];
+  const q1bPools = groupModelQuotas(q1bNeonConfigs, q1Groups);
+  const q1bGemPool = q1bPools.find((p) => p.displayTitle === 'Gemini 模型');
+  assert(
+    q1bPools.length === 2 &&
+      Boolean(q1bGemPool) &&
+      q1bGemPool.modelsCount === 6 &&
+      q1bGemPool.families.filter((f) => f === 'Gemini 4 Neon').length === 1 &&
+      q1bGemPool.fiveHour?.remainingPercent === 96.5 &&
+      q1bGemPool.weekly?.remainingPercent === 92.4,
+    `Q1b Neon / Orchestrator 配额池归并异常（不应拆出孤儿池）：${JSON.stringify(q1bPools)}`
+  );
+  for (const [mName, expLabel] of [
+    ['Gemini 4 Neon (High)', 'Gemini 4 Neon (High)'],
+    ['Orchestrator (Neon)', 'Orchestrator (Neon)'],
+    ['Gemini 4 Neon (Orchestrator)', 'Gemini 4 Neon (Orchestrator)'],
+    ['gemini-pro-orchestrator-neon', 'Orchestrator (Neon)'],
+    ['MODEL_PLACEHOLDER_M537', 'Orchestrator (Neon)']
+  ]) {
+    const q = resolveModelQuota(mName, q1bNeonConfigs, q1Groups);
+    assert(
+      q &&
+        q.label === expLabel &&
+        q.modelKey === 'gemini-4-neon' &&
+        q.fiveHour?.remainingPercent === 96.5 &&
+        q.weekly?.remainingPercent === 92.4,
+      `Q1b 单模型配额解析异常 (${mName})：${JSON.stringify(q)}`
+    );
+  }
+  const q1bStaleCacheOrch = resolveModelQuota('Orchestrator (Neon)', q1Configs, q1Groups);
+  assert(
+    q1bStaleCacheOrch &&
+      q1bStaleCacheOrch.label === 'Orchestrator (Neon)' &&
+      q1bStaleCacheOrch.modelKey === 'gemini-4-neon' &&
+      q1bStaleCacheOrch.fiveHour?.remainingPercent === 96.5 &&
+      q1bStaleCacheOrch.weekly?.remainingPercent === 92.4,
+    `Q1b 旧宿主缓存回退单 Gemini 池异常：${JSON.stringify(q1bStaleCacheOrch)}`
   );
 
   // Build reusable VM harness executing actual app.js renderers (Tab 1 Context/Quota + Tab 3 Quota Pools)
@@ -883,6 +979,14 @@ async function main() {
       q1Harness.getEl('ctx-quota-val').textContent.includes('5h 96.5%') &&
       q1Harness.getEl('ctx-quota-val').textContent.includes('周 92.4%'),
     `Q1 Tab1 内部执行模型应正常展示 5h 与周额度：${q1Harness.getEl('ctx-quota-val').textContent}`
+  );
+  q1Harness.vmCtx.renderSpeedCard(null, { quota: q1bStaleCacheOrch }, [], null);
+  assert(
+    !q1Harness.getEl('ctx-quota-box').classList.contains('hidden') &&
+      q1Harness.getEl('ctx-quota-title').textContent.includes('Orchestrator (Neon)') &&
+      q1Harness.getEl('ctx-quota-val').textContent.includes('5h 96.5%') &&
+      q1Harness.getEl('ctx-quota-val').textContent.includes('周 92.4%'),
+    `Q1b Tab1 Neon 回退单 Gemini 池应正常展示 5h 与周额度：${q1Harness.getEl('ctx-quota-title').textContent} / ${q1Harness.getEl('ctx-quota-val').textContent}`
   );
 
   // T1: Exhaustive quota semantics matrix (5h+weekly, 5h-only, weekly-only, resetTime-only, all-missing, genuine 0%)
@@ -4922,6 +5026,73 @@ async function main() {
       assert(
         slWidth80Out.includes('C 99%') && slWidth80Out.includes('5h 91%'),
         `80 列终端下 statusline 应优先保留缓存命中率：${slWidth80Out}`
+      );
+
+      // Neon CLI statusline, pricing & cached MODEL_PLACEHOLDER_M537 budget matching
+      const slNeonConvId = '00000000-0000-4000-8000-000000000011';
+      const slNeonBudgetConvId = '00000000-0000-4000-8000-000000000012';
+      const slNeonLogDir = join(slCliDir, 'brain', slNeonConvId, '.system_generated', 'logs');
+      mkdirSync(slNeonLogDir, { recursive: true });
+      writeFileSync(
+        join(slNeonLogDir, 'transcript.jsonl'),
+        [
+          JSON.stringify({ step_index: 0, type: 'USER_INPUT', created_at: '2026-11-19T02:00:00Z', content: 'Test Neon statusline' }),
+          JSON.stringify({
+            step_index: 1,
+            type: 'PLANNER_RESPONSE',
+            created_at: '2026-11-19T02:00:03Z',
+            model: 'gemini-pro-orchestrator-neon',
+            input_tokens: 5000,
+            cache_read_tokens: 185000,
+            output_tokens: 1000
+          })
+        ].join('\n') + '\n',
+        'utf-8'
+      );
+      const neonGenCache = JSON.parse(readFileSync(join(slStateDir, 'active_conv_gen_cache_v1.json'), 'utf-8'));
+      neonGenCache.convs[slNeonBudgetConvId] = {
+        fetchedAt: Date.now() + 1000,
+        size: 1,
+        mtimeMs: 1,
+        settled: true,
+        generatorList: [
+          {
+            stepIndex: 1,
+            chatModel: {
+              model: 'MODEL_PLACEHOLDER_M537',
+              modelDisplayName: 'Orchestrator (Neon)',
+              responseModel: 'gemini-pro-orchestrator-neon',
+              chatStartMetadata: { contextWindowMetadata: { maxContextTokens: 1000000 } }
+            }
+          }
+        ]
+      };
+      writeFileSync(join(slStateDir, 'active_conv_gen_cache_v1.json'), JSON.stringify(neonGenCache), 'utf-8');
+
+      const slNeonOut = execFileSync(process.execPath, [cliEntryPath, 'statusline', '--format', 'plain'], {
+        input: JSON.stringify({ session_id: slNeonConvId, conversation_id: slNeonConvId }),
+        encoding: 'utf-8',
+        env: slEnv,
+        timeout: 10000
+      });
+      assert(
+        slNeonOut.includes('◈ Neon') &&
+          !slNeonOut.includes('gemini-pro-orchestrator-neon') &&
+          slNeonOut.includes('1.00M') &&
+          slNeonOut.includes('C 97%') &&
+          slNeonOut.includes('$') &&
+          slNeonOut.includes('5h 91%'),
+        `Neon CLI statusline 展示、计价或占位缓存窗口匹配异常：${slNeonOut}`
+      );
+      const slNeonStdinFallbackOut = execFileSync(process.execPath, [cliEntryPath, 'statusline', '--format', 'plain'], {
+        input: JSON.stringify({ session_id: '', conversation_id: '', model: { id: 'gemini-pro-orchestrator-neon' } }),
+        encoding: 'utf-8',
+        env: slEnv,
+        timeout: 10000
+      });
+      assert(
+        slNeonStdinFallbackOut.includes('◈ Neon') && !slNeonStdinFallbackOut.includes('gemini-pro-orchestrator-neon'),
+        `空会话下 stdin model.id 回退未规范化为 Neon：${slNeonStdinFallbackOut}`
       );
 
       const slUninstall = JSON.parse(execFileSync(process.execPath, [cliEntryPath, 'statusline', 'uninstall', '--json'], {

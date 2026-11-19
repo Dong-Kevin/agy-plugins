@@ -1934,7 +1934,7 @@
             .filter(Boolean);
           const families = Array.isArray(pool.families) && pool.families.length
             ? pool.families
-            : [...new Set(modelLabels.map((n) => n.replace(/\s*\((?:XHigh|Low|Medium|High|Minimal|Thinking|Fast)\)\s*$/i, '').trim()))];
+            : [...new Set(modelLabels.map((n) => n.replace(/\s*\((?:XHigh|Low|Medium|High|Minimal|Thinking|Fast|Orchestrator)\)\s*$/i, '').trim()))];
           const familySummary = families.length <= 3
             ? families.join(' / ')
             : `${families.slice(0, 3).join(' / ')} 等 ${families.length} 组`;

@@ -1,14 +1,20 @@
 # agy-plugins ROADMAP
 
-更新时间：2026-11-18 17:52（Asia/Shanghai）。
+更新时间：2026-11-19 10:36（Asia/Shanghai）。
 
 ## 本次交付目标
 
-1. 修复 `context-viewer` 与 `agy-finder` 在 `agy` CLI 环境（含沙箱受限终端工具与外部终端）下的适配问题：正确识别 CLI 会话来源、诚实提示沙箱网络与目录遍历限制并补录当前活跃 CLI 会话、更新 CLI 侧 Skill/Rules 引导，完成全仓校验与打包。
-2. 修复 `context-viewer` 独立窗口 / CLI 离线缓存复用、未识别套餐误套 `$19.99/月`、`unavailable` 与断连跨重置边界过期配额处理，以及 `agy-context statusline` 缓存命中率显示与宽度裁剪优先级。
-3. 保留既有双插件基线与发布交接记录（`agy-finder v0.2.8` / `context-viewer v1.7.10` 于 `v2026.11.15.1` 已完成；`context-viewer v1.7.11` 历史无步骤 `0 tok` 过滤已同步 `main`）。
+1. 适配 Google Antigravity 上线的 **Gemini 4 Neon** 与 **Orchestrator (Neon)** 模型：在 `context-viewer` 中补齐精确代际规范化、官方标准费率、配额池归并、单模型配额解析、离线窗口上限匹配及 CLI 状态栏友好名称显示，完成全仓校验、打包与本机热同步。
+2. 修复 `context-viewer` 与 `agy-finder` 在 `agy` CLI 环境（含沙箱受限终端工具与外部终端）下的适配问题：正确识别 CLI 会话来源、诚实提示沙箱网络与目录遍历限制并补录当前活跃 CLI 会话、更新 CLI 侧 Skill/Rules 引导，完成全仓校验与打包。
+3. 修复 `context-viewer` 独立窗口 / CLI 离线缓存复用、未识别套餐误套 `$19.99/月`、`unavailable` 与断连跨重置边界过期配额处理，以及 `agy-context statusline` 缓存命中率显示与宽度裁剪优先级。
+4. 保留既有双插件基线与发布交接记录（`agy-finder v0.2.8` / `context-viewer v1.7.10` 于 `v2026.11.15.1` 已完成；`context-viewer v1.7.11` 历史无步骤 `0 tok` 过滤已同步 `main`）。
 
 ## 当前阶段与状态
+
+- **已完成 `context-viewer` `Gemini 4 Neon` 与 `Orchestrator (Neon)` 适配、回归校验、打包与本机 `./install.sh context-viewer` 热同步（待确认后续提交／发版）**：
+  - **模型规范化、官方费率与配额池归并**（[pricing.mjs](./plugins/agy-context-viewer/sidecars/dashboard/pricing.mjs)、[app.js](./plugins/agy-context-viewer/sidecars/dashboard/app.js)）：更新 `PRICING_VERIFIED_DATE` 至 `2026-11-19`，录入 `gemini-4-neon` 标准付费档费率（输入 `$3.00` / 缓存读取 `$0.15` / 输出含思考 `$15.00` per 1M）及实盘占位 ID 映射（`M532–M535`、`M537`）；扩展 `normalizeModelId()` 与 `extractSubfamilyTags()` 严格匹配 `Gemini 4 Neon`、`Orchestrator (Neon)` 与 `gemini-pro-orchestrator-neon`（保持 `Gemini 5 Neon`、`Gemini Neon` 与泛称 `gemini-pro-orchestrator` 返回 `null`）；扩展 `resolveConfigSummaryGroup()`、`buildQuotaPools()` 与 `resolveModelQuota()` 同时覆盖 `modelOrAlias.model` 与 `cfg.modelId` 及 `neon` 子族回退，避免 `Orchestrator (Neon)` 或未来新编排变体拆出孤儿配额池；同步在 `app.js` 兜底正则中剥离 `(Orchestrator)` 后缀。
+  - **缓存窗口上限对齐与 CLI 状态栏展示优化**（[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs)、[cli.mjs](./plugins/agy-context-viewer/sidecars/dashboard/cli.mjs)）：修正 `findCachedModelBudget()` 模型字段优先级并支持基于 `cm?.model` / `gm?.model` 二次归一化以命中 `MODEL_PLACEHOLDER_M537` 等占位符缓存预算；`cli.mjs` 对 `stdinPayload.model` 回退经 `formatModelDisplayName()` 归一化，使空会话与在途会话均显示简洁 `Neon` 而非原始 slug。
+  - **新增 Neon 回归用例**（[context-viewer/scripts/verify.mjs](./plugins/agy-context-viewer/scripts/verify.mjs)）：覆盖 `S4` 精确代际与合并计价、`F1` 多子池定位、`Q1b` 配额归并及旧缓存单 Gemini 池回退展示、`statusline` `◈ Neon` 与 `MODEL_PLACEHOLDER_M537` 窗口匹配。
 
 - **已完成 `context-viewer` 断连跨重置边界过期配额清理、离线缓存兜底、`statusline` 缓存命中率展示修复、全仓校验、打包与本机 `./install.sh context-viewer` 热同步（已同步提交推送 `main`）**：
   - **断连跨重置边界清理与宿主退出引导**（[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs)、[app.js](./plugins/agy-context-viewer/sidecars/dashboard/app.js)、[context-viewer/scripts/verify.mjs](./plugins/agy-context-viewer/scripts/verify.mjs)）：统一 `buildOutageFallbackHostStatus()` 处理内存 `cachedGood` 与磁盘缓存回退，校验 `hasCrossedQuotaResetBoundary()` 与 30 分钟有效期，防止原宿主已退出或断连跨过 `resetTime` 后仍反复展示重置前的过期余量，并对 `ECONNREFUSED` / `ECONNRESET` 给出重启独立窗口重连提示。
@@ -89,6 +95,8 @@
 - 已迁移插件：[plugins/agy-finder](./plugins/agy-finder) 、[plugins/agy-context-viewer](./plugins/agy-context-viewer)
 
 ## 最近验证
+
+- `context-viewer` `Gemini 4 Neon` / `Orchestrator (Neon)` 适配验收：`node scripts/verify.mjs --strict-git-identity` 全部通过（覆盖 `context-viewer` 6/6、`agy-finder` 全部断言、仓库级隐私/PNG/Git 身份门禁与跨插件锁压测；沙箱内 `verify.mjs` 因拦截回环端口而放行沙箱后跑通全部）；`node scripts/package-all.mjs` 通过，产出 `dist/context-viewer-v1.7.11.zip`（`191.7 KB` / 20 个文件 / SHA-256 `8d3fc07e0b92d2b7eb3b703596db14cdc4b3fc7119d2608cd94d4f1dfb7c520f`）；`bash ./install.sh context-viewer` 完成本机热同步且 `diff -q` 核对 `pricing.mjs`、`collector.mjs`、`app.js`、`cli.mjs` 与源码一致；实盘查验当前 Neon 会话（放行连接本地 LS 后），确认 `Orchestrator (Neon)` 轮次显示 `modelKey: "gemini-4-neon"`、`budget: 512000`、`isPriced: true`，`byModel` 汇总 `Gemini 4 Neon`（45 次请求 / `$20.09`），`modelQuotas` 正确归并 `Gemini 模型配额池`（20 档含 `Gemini 4 Neon`、`5h 95.5%` / `周 76.6%`）与 `非 Gemini 模型（Claude / GPT）配额池`，无孤儿池（Windows PowerShell、Linux 桌面端与 Node.js 18 未在本机实测）。时间：`2026-11-19 10:35`（Asia/Shanghai）。
 
 - `agy` CLI 适配修复全仓门禁与打包验收：`node scripts/verify.mjs --strict-git-identity` 全部通过（覆盖双插件自检、新增 CLI 运行时来源识别与受限 `scandir` 回归断言、跨插件 8 进程锁压测、隐私与 Git 身份门禁；其中 `verify.mjs` 因沙箱拦截回环测试 `127.0.0.1`，在放行沙箱后跑通全部断言）；`node scripts/package-all.mjs` 在沙箱内通过，产出 `dist/agy-finder-v0.2.8.zip`（`95.4 KB` / 20 个文件）与 `dist/context-viewer-v1.7.11.zip`（`183.5 KB` / 20 个文件 / SHA-256 `2bdaa6ca543e3371b0b01870bf67b54a8791f08ad3707a9a6e1a4accb957401a`）；已执行 `bash ./install.sh` 完成本机热同步（`diff -q` 核对 `collector.mjs`、`cli.mjs`、`drawer.mjs`、`rules/AGENTS.md` 与仓库源码一致），实测 `agy-context` 正确输出 `[CLI]`、`1` 个活跃 CLI 会话统计及沙箱限制提示（Windows PowerShell、Linux 桌面端与 Node.js 18 最低版本未在本机实测）。时间：`2026-11-18 12:29`（Asia/Shanghai）。
 

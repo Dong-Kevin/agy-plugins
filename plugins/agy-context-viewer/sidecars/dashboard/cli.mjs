@@ -34,6 +34,7 @@ import {
   syncSidebarManifestFromSettings
 } from './collector.mjs';
 import { controlFloatWindow, getFloatWindowStatus } from './float_window.mjs';
+import { formatModelDisplayName } from './pricing.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = resolve(__dirname, '..', '..');
@@ -695,9 +696,10 @@ function buildStatuslineText(ctx, stdinPayload = {}, { format = 'ansi', terminal
   const sp = ctx?.speed || {};
   const stdinCw = stdinPayload?.context_window || {};
   const stdinCur = stdinCw?.current_usage || {};
+  const rawStdinModel = stdinPayload?.model?.display_name || stdinPayload?.model?.id || '';
   const modelDisplay = (cx.model && cx.model !== '未记录模型')
     ? cx.model
-    : (stdinPayload?.model?.display_name || stdinPayload?.model?.id || '');
+    : (rawStdinModel ? formatModelDisplayName(rawStdinModel) : '');
   const shortModel = formatShortModel(modelDisplay);
 
   const curInput = Number(stdinCur.input_tokens || 0);
