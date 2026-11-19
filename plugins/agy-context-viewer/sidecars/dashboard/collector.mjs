@@ -55,6 +55,14 @@ import {
   SUBSCRIPTION_REGIONS_PRESET,
   summarizeApiCost
 } from './pricing.mjs';
+import {
+  classifyDiagnosticEventText,
+  extractProjectNameFromUris,
+  isSqliteAvailable,
+  readConversationSqliteSignals,
+  readConversationSummariesIndex,
+  sanitizeSqliteText
+} from './sqlite_reader.mjs';
 
 const CONV_ID_RE = /^[0-9a-f-]{8,64}$/i;
 const MAX_ATTACHMENT_BYTES = 24 * 1024 * 1024;
@@ -72,6 +80,7 @@ const transcriptHistCache = new Map();  // filePath -> { size, mtimeMs, firstDat
 const convGenMetaCache = new Map();     // convId -> { at, generatorList, callsByStep }
 const lsGenMissCache = new Map();       // convId -> { lsAddr, size, mtimeMs, at, settled }
 const recentConvMetaCache = new Map();  // logPath -> { key, title, lastContextTokens, turnsCount }
+const subagentSummaryCache = new Map(); // logPath -> { key, summary }
 let genStepModelsCache = { path: '', mtimeMs: -1, size: -1, data: null };
 let hostDiskCacheMeta = { path: '', mtimeMs: -1, size: -1, data: null };
 let activeConvGenDiskCache = { path: '', mtimeMs: -1, size: -1, data: null };
@@ -308,6 +317,17 @@ export function findCliDataDir() {
     return appDataDir;
   }
   return join(homedir(), '.gemini', 'antigravity-cli');
+}
+
+export function findIdeDataDir() {
+  if (process.env.AG_IDE_DIR) return process.env.AG_IDE_DIR;
+  if (process.env.AG_DIR) {
+    const defaultAgDir = join(homedir(), '.gemini', 'antigravity');
+    if (resolve(process.env.AG_DIR) !== resolve(defaultAgDir)) {
+      return join(dirname(process.env.AG_DIR), 'antigravity-ide');
+    }
+  }
+  return join(homedir(), '.gemini', 'antigravity-ide');
 }
 
 export function isCliRuntimeEnv() {
@@ -570,7 +590,7 @@ function hashLsAddr(rawAddr) {
 }
 
 function getActivityRootKey() {
-  return `${findAppDataDir()}|${findCliDataDir()}`;
+  return `${findAppDataDir()}|${findIdeDataDir()}|${findCliDataDir()}`;
 }
 
 function noteObservedTranscriptActivity(mtimeMs, nowMs = Date.now()) {
@@ -2859,6 +2879,118 @@ function extractCleanUserTitle(rawContent) {
   return text.length > 44 ? `${text.slice(0, 44)}…` : text;
 }
 
+function truncateCleanText(text, maxLen = 96) {
+  const s = String(text || '')
+    .replace(/(?:\/Users\/|\/home\/|[A-Za-z]:\\Users\\)[^/\\\s"'`]+/g, '~')
+    .replace(/\b(?:Bearer\s+[A-Za-z0-9._~+/=-]{8,}|(?:sk|ghp|gho|glpat|xoxb|AIza)[-_A-Za-z0-9]{12,})\b/gi, '<REDACTED>')
+    .replace(/\b([A-Za-z0-9._%+-]{1,2})[A-Za-z0-9._%+-]*@([A-Za-z0-9-]{1,2})[A-Za-z0-9.-]*(\.[A-Za-z]{2,})\b/g, '$1***@$2***$3')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!s) return '';
+  return s.length > maxLen ? `${s.slice(0, Math.max(1, maxLen - 1))}…` : s;
+}
+
+function extractPromptPreview(contentStr) {
+  if (!contentStr || typeof contentStr !== 'string') {
+    return { promptPreview: '', promptFull: '' };
+  }
+  const withoutMeta = contentStr
+    .replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/gi, '')
+    .replace(/<USER_SETTINGS_CHANGE>[\s\S]*?<\/USER_SETTINGS_CHANGE>/gi, '')
+    .replace(/<SYSTEM_MESSAGE>[\s\S]*?<\/SYSTEM_MESSAGE>/gi, '')
+    .replace(/<EPHEMERAL_MESSAGE>[\s\S]*?<\/EPHEMERAL_MESSAGE>/gi, '');
+  const reqMatches = [...withoutMeta.matchAll(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/gi)]
+    .map((m) => m[1].trim())
+    .filter(Boolean);
+  const rawText = reqMatches.length > 0
+    ? reqMatches.join(' ')
+    : withoutMeta.replace(/<\/?USER_REQUEST>/gi, '');
+  const compact = rawText.replace(/\s+/g, ' ').trim();
+  if (!compact) {
+    return { promptPreview: '', promptFull: '' };
+  }
+  return {
+    promptPreview: truncateCleanText(compact, 96),
+    promptFull: truncateCleanText(compact, 400)
+  };
+}
+
+function formatToolCallLabel(tc) {
+  const rawName = String(tc?.name || tc?.tool_name || tc?.function?.name || 'tool')
+    .trim()
+    .replace(/^default_api:/, '');
+  const args = tc?.args || tc?.arguments || tc?.function?.arguments || null;
+  let parsedArgs = args;
+  if (typeof args === 'string') {
+    try { parsedArgs = JSON.parse(args); } catch { parsedArgs = null; }
+  }
+  if (parsedArgs && typeof parsedArgs === 'object') {
+    const fileTarget = parsedArgs.Path || parsedArgs.path || parsedArgs.file_path || parsedArgs.ScriptPath;
+    if (typeof fileTarget === 'string' && fileTarget.trim()) {
+      const base = fileTarget.trim().split(/[\\/]/).pop();
+      if (base) return `${rawName} (${base})`;
+    }
+    const summaryTarget = parsedArgs.toolSummary || parsedArgs.action || parsedArgs.Action || parsedArgs.query;
+    if (typeof summaryTarget === 'string' && summaryTarget.trim()) {
+      const short = summaryTarget.trim().slice(0, 24);
+      return `${rawName} (${short})`;
+    }
+  }
+  return rawName || '工具输出';
+}
+
+function resolveToolStepLabel(step, queuedLabel = '') {
+  const rawTool = String(step?.tool_name || step?.toolName || step?.name || '')
+    .trim()
+    .replace(/^default_api:/, '');
+  if (rawTool) return rawTool;
+  if (queuedLabel) return queuedLabel;
+  const type = String(step?.type || '').trim();
+  if (type === 'ERROR_MESSAGE') return '错误消息';
+  if (type === 'GENERIC') return '工具返回';
+  if (type) return type.toLowerCase();
+  return '工具输出';
+}
+
+function stripToolResultHeader(rawText) {
+  return String(rawText || '')
+    .replace(/^(?:(?:Created At|Completed At|Showing lines|Partial read)[^\r\n]*\r?\n)+/i, '')
+    .replace(/^(?:Created At:\s*\S+\s+Completed At:\s*\S+\s*)+/i, '')
+    .trim();
+}
+
+function readGitBranchFromDir(dirPath) {
+  if (!dirPath || typeof dirPath !== 'string') return null;
+  try {
+    const dotGitPath = join(dirPath, '.git');
+    if (!existsSync(dotGitPath)) return null;
+    const st = statSync(dotGitPath);
+    let headPath = '';
+    if (st.isDirectory()) {
+      headPath = join(dotGitPath, 'HEAD');
+    } else if (st.isFile()) {
+      const ptr = readFileSync(dotGitPath, 'utf-8');
+      const m = ptr.match(/^gitdir:\s*(.+)$/im);
+      if (!m) return null;
+      headPath = join(resolve(dirPath, m[1].trim()), 'HEAD');
+    } else {
+      return null;
+    }
+    if (!headPath || !existsSync(headPath)) return null;
+    const headRaw = readFileSync(headPath, 'utf-8').trim();
+    if (!headRaw) return null;
+    const refHead = headRaw.match(/^ref:\s*refs\/heads\/(.+)$/i);
+    if (refHead) return refHead[1].trim() || null;
+    const refOther = headRaw.match(/^ref:\s*refs\/(?:remotes|tags)\/(.+)$/i);
+    if (refOther) return refOther[1].trim() || null;
+    const shaMatch = headRaw.match(/^([0-9a-f]{7,40})$/i);
+    if (shaMatch) return shaMatch[1].slice(0, 7);
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export function parseModelSettingFromText(text) {
   if (!text || typeof text !== 'string' || !/Model Selection/i.test(text)) return null;
   const re = /Model Selection[`"']?\s+from\s+[^\r\n]+?\s+to\s+([^\r\n<]+?)(?:\.(?=\s|$|<)|[;，。]|\r?\n|<|$)/gi;
@@ -2955,11 +3087,18 @@ function readConversationAnnotationsMap() {
 
 export function listRecentConversations(limit = 24, nowMs = Date.now()) {
   const annMap = readConversationAnnotationsMap();
+  const agDir = findAppDataDir();
+  const ideDir = findIdeDataDir();
+  const cliDir = findCliDataDir();
   const roots = [
-    { dir: join(findAppDataDir(), 'brain'), source: 'desktop' },
-    { dir: join(findCliDataDir(), 'brain'), source: 'cli' }
+    { dir: join(agDir, 'brain'), source: 'desktop' }
   ];
+  if (ideDir && ideDir !== agDir && ideDir !== cliDir) {
+    roots.push({ dir: join(ideDir, 'brain'), source: 'desktop' });
+  }
+  roots.push({ dir: join(cliDir, 'brain'), source: 'cli' });
   const entries = [];
+  const seenConvKeys = new Set();
   let maxMtimeMs = 0;
   for (const root of roots) {
     if (!existsSync(root.dir)) continue;
@@ -2970,6 +3109,9 @@ export function listRecentConversations(limit = 24, nowMs = Date.now()) {
         const directLog = join(root.dir, dirent.name, 'transcript.jsonl');
         const logPath = existsSync(stdLog) ? stdLog : (existsSync(directLog) ? directLog : '');
         if (!logPath) continue;
+        const dedupKey = `${root.source}:${dirent.name}`;
+        if (seenConvKeys.has(dedupKey)) continue;
+        seenConvKeys.add(dedupKey);
         try {
           const st = statSync(logPath);
           if (st.size <= 0) continue;
@@ -3756,6 +3898,554 @@ function extractContextBreakdown(contextWindowMetadata) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Optional SQLite, Swarm/Subagent Tree, Compaction & Project Attribution Helpers
+// ---------------------------------------------------------------------------
+
+function resolveConvDbPath(convId, source, agDir, cliDir, ideDir) {
+  if (!convId || !CONV_ID_RE.test(convId)) return '';
+  const dirs = source === 'cli'
+    ? [cliDir, agDir, ideDir]
+    : [agDir, ideDir, cliDir];
+  const seen = new Set();
+  for (const d of dirs) {
+    if (!d || seen.has(d)) continue;
+    seen.add(d);
+    const p = join(d, 'conversations', `${convId}.db`);
+    try {
+      if (existsSync(p)) return p;
+    } catch {}
+  }
+  return '';
+}
+
+function findConvTranscriptPath(convId, rootDirs = []) {
+  if (!convId || !CONV_ID_RE.test(convId)) return '';
+  const seen = new Set();
+  for (const d of rootDirs) {
+    if (!d || seen.has(d)) continue;
+    seen.add(d);
+    const std = join(d, 'brain', convId, '.system_generated', 'logs', 'transcript.jsonl');
+    const direct = join(d, 'brain', convId, 'transcript.jsonl');
+    try {
+      if (existsSync(std)) return std;
+      if (existsSync(direct)) return direct;
+    } catch {}
+  }
+  return '';
+}
+
+async function readMergedSummariesIndex(agDir, cliDir, ideDir) {
+  const dirs = [];
+  for (const d of [agDir, ideDir, cliDir]) {
+    if (d && !dirs.includes(d)) dirs.push(d);
+  }
+  const byId = new Map();
+  const childSets = new Map();
+  let anyLoaded = false;
+
+  for (const d of dirs) {
+    const idx = await readConversationSummariesIndex(d);
+    if (!idx) continue;
+    anyLoaded = true;
+    for (const [cid, entry] of idx.byId.entries()) {
+      const prev = byId.get(cid);
+      if (!prev) {
+        byId.set(cid, { ...entry });
+      } else {
+        byId.set(cid, {
+          title: prev.title || entry.title,
+          workspaceUri: prev.workspaceUri || entry.workspaceUri,
+          projectName: prev.projectName || entry.projectName,
+          agentName: prev.agentName || entry.agentName,
+          parentConvId: prev.parentConvId || entry.parentConvId,
+          nestingDepth: Math.max(prev.nestingDepth || 0, entry.nestingDepth || 0),
+          source: prev.source || entry.source,
+          status: prev.status || entry.status
+        });
+      }
+    }
+    for (const [pid, children] of idx.childrenByParent.entries()) {
+      let set = childSets.get(pid);
+      if (!set) {
+        set = new Set();
+        childSets.set(pid, set);
+      }
+      for (const ch of children) {
+        if (ch && ch !== pid) set.add(ch);
+      }
+    }
+  }
+
+  if (!anyLoaded) return null;
+  const childrenByParent = new Map();
+  for (const [pid, set] of childSets.entries()) {
+    childrenByParent.set(pid, [...set]);
+  }
+  return { byId, childrenByParent };
+}
+
+function summarizeChildTranscript(logPath, dynamicModelMap = {}) {
+  if (!logPath) {
+    return {
+      turnsCount: 0,
+      inputTokens: 0,
+      cacheTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      costUSD: 0,
+      cacheSavingsUSD: 0,
+      latestModel: ''
+    };
+  }
+  let st = null;
+  try {
+    if (!existsSync(logPath)) return null;
+    st = statSync(logPath);
+  } catch {
+    return null;
+  }
+  const cacheKey = `${st.size}:${st.mtimeMs}`;
+  const cached = subagentSummaryCache.get(logPath);
+  if (cached && cached.key === cacheKey) {
+    return cached.summary;
+  }
+
+  let turnsCount = 0;
+  let inputTokens = 0;
+  let cacheTokens = 0;
+  let outputTokens = 0;
+  let totalTokens = 0;
+  let costUSD = 0;
+  let cacheSavingsUSD = 0;
+  let runningModel = '';
+  let latestModel = '';
+
+  try {
+    const lines = readFileSync(logPath, 'utf-8').split(/\r?\n/);
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let ev;
+      try { ev = JSON.parse(line); } catch { continue; }
+      if (ev.type === 'USER_INPUT' && ev.content) {
+        const sw = parseModelSettingFromText(ev.content);
+        if (sw) runningModel = sw;
+      }
+      if (!isModelTurnStep(ev)) continue;
+      const u = extractStepUsage(ev);
+      const tot = u.input + u.cache + u.output;
+      if (tot <= 0) continue;
+      turnsCount++;
+      inputTokens += u.input;
+      cacheTokens += u.cache;
+      outputTokens += u.output;
+      totalTokens += tot;
+      const rawModel = extractStepModel(ev, null, runningModel);
+      if (rawModel) latestModel = rawModel;
+      const modelKey = normalizeModelId(rawModel, dynamicModelMap);
+      const priced = calculateRequestApiCost(
+        {
+          model: rawModel,
+          modelKey,
+          inputTokens: u.input,
+          cacheTokens: u.cache,
+          outputTokens: u.output,
+          thinkingTokens: u.thinking,
+          date: ev.created_at
+        },
+        dynamicModelMap
+      );
+      if (priced.isPriced) {
+        costUSD += priced.costUSD || 0;
+        cacheSavingsUSD += priced.cacheSavingsUSD || 0;
+      } else {
+        const ref = calculateReferenceCost(
+          { inputTokens: u.input, cacheTokens: u.cache, outputTokens: u.output },
+          'gemini-3.8-flash',
+          ev.created_at
+        );
+        costUSD += ref.totalCostUSD || 0;
+        cacheSavingsUSD += ref.cacheSavingsUSD || 0;
+      }
+    }
+  } catch {}
+
+  const summary = {
+    turnsCount,
+    inputTokens,
+    cacheTokens,
+    outputTokens,
+    totalTokens,
+    costUSD: Number(costUSD.toFixed(4)),
+    cacheSavingsUSD: Number(cacheSavingsUSD.toFixed(4)),
+    latestModel
+  };
+  if (subagentSummaryCache.size > 512) {
+    const firstK = subagentSummaryCache.keys().next().value;
+    if (firstK) subagentSummaryCache.delete(firstK);
+  }
+  subagentSummaryCache.set(logPath, { key: cacheKey, summary });
+  return summary;
+}
+
+function getFileMtimeSigSafe(filePath) {
+  try {
+    if (!filePath || !existsSync(filePath)) return '0';
+    const st = statSync(filePath);
+    return `${st.size}:${st.mtimeMs}`;
+  } catch {
+    return '0';
+  }
+}
+
+function collectAgentTree(convId, convBrainDir, {
+  agDir,
+  cliDir,
+  ideDir,
+  summariesIndex,
+  dynamicModelMap = {},
+  parentTurnsCount = 0,
+  parentSessionTotals = { inputTokens: 0, cacheTokens: 0, outputTokens: 0, totalTokens: 0 },
+  parentCostUSD = 0,
+  parentCacheSavingsUSD = 0
+} = {}) {
+  const childMap = new Map(); // childConvId -> descriptor
+  let swarmData = null;
+
+  const upsertChild = (childId, patch) => {
+    const cid = String(childId || '').trim();
+    if (!cid || cid === convId || !CONV_ID_RE.test(cid)) return;
+    const prev = childMap.get(cid);
+    if (!prev) {
+      childMap.set(cid, {
+        id: cid,
+        name: patch.name || cid.slice(0, 8),
+        role: patch.role || 'subagent',
+        model: patch.model || '',
+        state: patch.state || 'done'
+      });
+    } else {
+      childMap.set(cid, {
+        id: cid,
+        name: prev.name && prev.name !== cid.slice(0, 8) ? prev.name : (patch.name || prev.name),
+        role: prev.role && prev.role !== 'subagent' ? prev.role : (patch.role || prev.role),
+        model: prev.model || patch.model || '',
+        state: prev.state || patch.state || 'done'
+      });
+    }
+  };
+
+  // 1. Swarm members.json
+  if (convBrainDir) {
+    const swarmMembersPath = join(convBrainDir, '.system_generated', 'swarm', 'members.json');
+    const rawSwarm = readJsonSafe(swarmMembersPath, null);
+    if (rawSwarm && typeof rawSwarm === 'object') {
+      swarmData = {
+        title: rawSwarm.title || rawSwarm.swarm_title || rawSwarm.name || null
+      };
+      const members = rawSwarm.members;
+      if (members && typeof members === 'object' && !Array.isArray(members)) {
+        for (const [mName, mObj] of Object.entries(members)) {
+          if (!mObj || typeof mObj !== 'object') continue;
+          const cid = mObj.conversation_id || mObj.conversationId || mObj.id || '';
+          if (!cid || cid === convId) continue;
+          const state = mObj.killed
+            ? 'killed'
+            : String(mObj.phase || mObj.state || mObj.status || 'waiting').trim().toLowerCase();
+          upsertChild(cid, {
+            name: mObj.name || mName,
+            role: mObj.role || 'worker',
+            model: mObj.applied_model || mObj.model || mObj.desired_model || '',
+            state
+          });
+        }
+      } else if (Array.isArray(members)) {
+        for (const mObj of members) {
+          if (!mObj || typeof mObj !== 'object') continue;
+          const cid = mObj.conversation_id || mObj.conversationId || mObj.id || '';
+          if (!cid || cid === convId) continue;
+          const state = mObj.killed
+            ? 'killed'
+            : String(mObj.phase || mObj.state || mObj.status || 'waiting').trim().toLowerCase();
+          upsertChild(cid, {
+            name: mObj.name || cid.slice(0, 8),
+            role: mObj.role || 'worker',
+            model: mObj.applied_model || mObj.model || mObj.desired_model || '',
+            state
+          });
+        }
+      }
+    }
+
+    // 2. Subagents directory (*.json)
+    const subagentsDir = join(convBrainDir, '.system_generated', 'subagents');
+    try {
+      if (existsSync(subagentsDir)) {
+        const files = readdirSync(subagentsDir).filter((f) => f.endsWith('.json')).slice(0, 64);
+        for (const f of files) {
+          const obj = readJsonSafe(join(subagentsDir, f), null);
+          if (!obj || typeof obj !== 'object') continue;
+          const cid = obj.conversationId || obj.conversation_id || obj.id || '';
+          if (!cid || cid === convId) continue;
+          const desc = obj.subagentDescriptor && typeof obj.subagentDescriptor === 'object'
+            ? obj.subagentDescriptor
+            : {};
+          const role = desc.role || desc.typeName || obj.role || 'subagent';
+          const name = obj.name || desc.name || desc.typeName || f.replace(/\.json$/i, '');
+          const state = String(obj.state || obj.status || 'done').trim().toLowerCase();
+          const model = obj.model || obj.applied_model || desc.model || '';
+          upsertChild(cid, { name, role, model, state });
+        }
+      }
+    } catch {}
+  }
+
+  // 3. SQLite conversation_summaries / conversation_parents children
+  const sqlChildren = summariesIndex?.childrenByParent?.get(convId) || [];
+  for (const cid of sqlChildren) {
+    if (!cid || cid === convId) continue;
+    const sumEntry = summariesIndex?.byId?.get(cid) || null;
+    upsertChild(cid, {
+      name: sumEntry?.agentName || sumEntry?.title || cid.slice(0, 8),
+      role: sumEntry?.agentName ? 'subagent' : (sumEntry?.source || 'subagent'),
+      model: '',
+      state: sumEntry?.status ? String(sumEntry.status).toLowerCase() : 'done'
+    });
+  }
+
+  if (childMap.size === 0) return null;
+
+  const searchRoots = [agDir, cliDir, ideDir].filter(Boolean);
+  const children = [];
+  let sumChildrenTurns = 0;
+  let sumChildrenTotal = 0;
+  let sumChildrenInput = 0;
+  let sumChildrenCache = 0;
+  let sumChildrenOutput = 0;
+  let sumChildrenCost = 0;
+  let sumChildrenSavings = 0;
+
+  for (const desc of childMap.values()) {
+    const logPath = findConvTranscriptPath(desc.id, searchRoots);
+    const stats = summarizeChildTranscript(logPath, dynamicModelMap) || {
+      turnsCount: 0,
+      inputTokens: 0,
+      cacheTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      costUSD: 0,
+      cacheSavingsUSD: 0,
+      latestModel: ''
+    };
+    const rawModel = desc.model || stats.latestModel || '';
+    const modelKey = normalizeModelId(rawModel, dynamicModelMap);
+    const displayModel = rawModel ? formatModelDisplayName(rawModel, modelKey) : '未记录模型';
+
+    sumChildrenTurns += stats.turnsCount;
+    sumChildrenTotal += stats.totalTokens;
+    sumChildrenInput += stats.inputTokens;
+    sumChildrenCache += stats.cacheTokens;
+    sumChildrenOutput += stats.outputTokens;
+    sumChildrenCost += stats.costUSD;
+    sumChildrenSavings += stats.cacheSavingsUSD;
+
+    children.push({
+      id: desc.id,
+      name: truncateCleanText(desc.name || desc.id.slice(0, 8), 48) || desc.id.slice(0, 8),
+      role: truncateCleanText(desc.role || 'subagent', 32) || 'subagent',
+      model: truncateCleanText(displayModel, 48) || '未记录模型',
+      state: String(desc.state || 'done').toLowerCase(),
+      turnsCount: stats.turnsCount,
+      totalTokens: stats.totalTokens,
+      costUSD: Number(stats.costUSD.toFixed(4)),
+      cacheSavingsUSD: Number(stats.cacheSavingsUSD.toFixed(4))
+    });
+  }
+
+  children.sort((a, b) => (b.totalTokens - a.totalTokens) || (b.costUSD - a.costUSD) || (b.turnsCount - a.turnsCount));
+
+  return {
+    isSwarm: Boolean(swarmData),
+    swarmTitle: swarmData?.title ? truncateCleanText(swarmData.title, 80) : null,
+    childrenCount: children.length,
+    activeChildrenCount: children.filter((c) => c.state === 'working' || c.state === 'running').length,
+    children: children.slice(0, 20),
+    treeTotals: {
+      turnsCount: parentTurnsCount + sumChildrenTurns,
+      totalTokens: (parentSessionTotals.totalTokens || 0) + sumChildrenTotal,
+      inputTokens: (parentSessionTotals.inputTokens || 0) + sumChildrenInput,
+      cacheTokens: (parentSessionTotals.cacheTokens || 0) + sumChildrenCache,
+      outputTokens: (parentSessionTotals.outputTokens || 0) + sumChildrenOutput,
+      costUSD: Number((parentCostUSD + sumChildrenCost).toFixed(4)),
+      cacheSavingsUSD: Number((parentCacheSavingsUSD + sumChildrenSavings).toFixed(4))
+    }
+  };
+}
+
+function sanitizeCompactionFull(raw, maxLen = 2400) {
+  if (!raw || typeof raw !== 'string') return '';
+  const lines = raw.split(/\r?\n/).map((line) =>
+    sanitizeDiagnosticText(
+      line
+        .replace(/file:\/\/\/[^\s"'<>]+/gi, '<FILE>')
+        .replace(/(?:\/Users\/|\/home\/|[A-Za-z]:\\Users\\)[^\s"'<>]+/g, '~')
+        .replace(/\b(?:Bearer\s+[A-Za-z0-9._~+/=-]{8,}|(?:sk|ghp|gho|glpat|xoxb|AIza|ya29)[-_A-Za-z0-9.]{12,})\b/gi, '<REDACTED>'),
+      0
+    )
+  );
+  let joined = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  if (maxLen > 0 && joined.length > maxLen) {
+    joined = `${joined.slice(0, Math.max(1, maxLen - 3))}...`;
+  }
+  return joined;
+}
+
+function buildCompactionsList(rawSteps = [], turns = [], sqliteCompactionSteps = []) {
+  const events = [];
+  const coveredStepNums = new Set();
+
+  // 1. Transcript CHECKPOINT steps
+  for (let i = 0; i < rawSteps.length; i++) {
+    const step = rawSteps[i];
+    if (!step) continue;
+    const type = String(step.type || '');
+    if (type !== 'CHECKPOINT' && !step.checkpoint) continue;
+    const sIdx = Number(step.step_index ?? i);
+    const cpText = (typeof step.content === 'string' ? step.content : '')
+      || step.checkpoint?.sessionSummary
+      || step.checkpoint?.summary
+      || '';
+    coveredStepNums.add(sIdx);
+    events.push({
+      stepIndex: sIdx,
+      arrayIdx: i,
+      createdAt: step.created_at || '',
+      rawSummary: cpText,
+      source: 'checkpoint'
+    });
+  }
+
+  // 2. SQLite step_type = 23 compaction steps
+  if (Array.isArray(sqliteCompactionSteps)) {
+    for (const rawSIdx of sqliteCompactionSteps) {
+      const sIdx = Number(rawSIdx);
+      if (!Number.isFinite(sIdx) || coveredStepNums.has(sIdx)) continue;
+      // Avoid duplicating if a checkpoint step exists within +-1 step index
+      if ([...coveredStepNums].some((k) => Math.abs(k - sIdx) <= 1)) continue;
+      coveredStepNums.add(sIdx);
+      const matchedRawIdx = rawSteps.findIndex((s, idx) => Number(s?.step_index ?? idx) === sIdx);
+      const matchedStep = matchedRawIdx >= 0 ? rawSteps[matchedRawIdx] : null;
+      const cpText = (typeof matchedStep?.content === 'string' ? matchedStep.content : '')
+        || matchedStep?.checkpoint?.sessionSummary
+        || matchedStep?.checkpoint?.summary
+        || '';
+      events.push({
+        stepIndex: sIdx,
+        arrayIdx: matchedRawIdx,
+        createdAt: matchedStep?.created_at || '',
+        rawSummary: cpText,
+        source: 'sqlite'
+      });
+    }
+  }
+
+  // Compute before/after tokens for each explicit compaction event using turns
+  const findBeforeAfterTurns = (ev) => {
+    let prevTurn = null;
+    let nextTurn = null;
+    for (const t of turns) {
+      const tStep = t.stepIndex != null && Number.isFinite(Number(t.stepIndex)) ? Number(t.stepIndex) : null;
+      const tArr = typeof t._arrayIdx === 'number' ? t._arrayIdx : -1;
+      const isBefore = (ev.arrayIdx >= 0 && tArr >= 0)
+        ? tArr < ev.arrayIdx
+        : (tStep !== null ? tStep < ev.stepIndex : false);
+      const isAfter = (ev.arrayIdx >= 0 && tArr >= 0)
+        ? tArr > ev.arrayIdx
+        : (tStep !== null ? tStep > ev.stepIndex : false);
+      if (isBefore) prevTurn = t;
+      else if (isAfter && !nextTurn) nextTurn = t;
+    }
+    return { prevTurn, nextTurn };
+  };
+
+  // Track which turn indices are already explained by an explicit compaction
+  const explainedDropTurnIdx = new Set();
+  const resolved = [];
+  for (const ev of events) {
+    const { prevTurn, nextTurn } = findBeforeAfterTurns(ev);
+    if (nextTurn) explainedDropTurnIdx.add(nextTurn.turnIndex);
+    const beforeTokens = prevTurn?.totalTokens || 0;
+    const afterTokens = nextTurn?.totalTokens || 0;
+    const savedTokens = beforeTokens > afterTokens ? (beforeTokens - afterTokens) : 0;
+    const savedPercent = beforeTokens > 0 && savedTokens > 0
+      ? Number(((savedTokens / beforeTokens) * 100).toFixed(1))
+      : 0;
+    const fallbackText = ev.source === 'sqlite'
+      ? '检测到上下文自动压缩（SQLite 压缩节点）'
+      : '检测到上下文压缩检查点';
+    const rawText = (ev.rawSummary || '').trim() || fallbackText;
+    resolved.push({
+      stepIndex: ev.stepIndex,
+      createdAt: ev.createdAt || nextTurn?.createdAt || prevTurn?.createdAt || '',
+      beforeTokens,
+      afterTokens,
+      savedTokens,
+      savedPercent,
+      summaryPreview: sanitizeSqliteText(rawText, 120),
+      summaryFull: sanitizeCompactionFull(rawText, 2400)
+    });
+  }
+
+  // 3. Large context drop turns (deltaTokens <= -10000) not already matched by a checkpoint
+  for (let i = 1; i < turns.length; i++) {
+    const cur = turns[i];
+    const prev = turns[i - 1];
+    if (!cur || !prev) continue;
+    if (explainedDropTurnIdx.has(cur.turnIndex)) continue;
+    if ((cur.deltaTokens || 0) > -10000) continue;
+    const beforeTokens = prev.totalTokens || 0;
+    const afterTokens = cur.totalTokens || 0;
+    if (beforeTokens <= afterTokens) continue;
+    const savedTokens = beforeTokens - afterTokens;
+    const savedPercent = beforeTokens > 0 ? Number(((savedTokens / beforeTokens) * 100).toFixed(1)) : 0;
+    const stepIndex = cur.stepIndex != null && Number.isFinite(Number(cur.stepIndex))
+      ? Number(cur.stepIndex)
+      : cur.turnIndex;
+    const fallbackText = `上下文窗口从 ${beforeTokens.toLocaleString()} 回落至 ${afterTokens.toLocaleString()} tokens（释放 ${savedTokens.toLocaleString()} tokens）`;
+    resolved.push({
+      stepIndex,
+      createdAt: cur.createdAt || '',
+      beforeTokens,
+      afterTokens,
+      savedTokens,
+      savedPercent,
+      summaryPreview: sanitizeSqliteText(fallbackText, 120),
+      summaryFull: sanitizeCompactionFull(fallbackText, 2400)
+    });
+  }
+
+  resolved.sort((a, b) => (a.stepIndex - b.stepIndex) || String(a.createdAt).localeCompare(String(b.createdAt)));
+  const numbered = resolved.map((item, idx) => ({
+    index: idx + 1,
+    ...item
+  }));
+  return numbered.slice(-20).reverse();
+}
+
+function resolveProjectNameForConv(convId, summariesById = null) {
+  const fromSql = summariesById?.get(convId)?.projectName;
+  if (fromSql) return fromSql;
+  const cachedWs = convWorkspaceCache.get(convId);
+  if (cachedWs) {
+    const raw = cachedWs.metaRepoName || (cachedWs.workspacePath ? basename(cachedWs.workspacePath) : '');
+    if (raw) {
+      const safe = extractProjectNameFromUris(null, raw);
+      if (safe) return safe;
+    }
+  }
+  return '未归类工作区';
+}
+
 export async function scanConversation(requestedConvId = '', options = {}) {
   const force = Boolean(options.force);
   const nowMs = Number(options.nowMs) || Date.now();
@@ -3765,6 +4455,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   const skipWorkspaceLookup = Boolean(options.skipWorkspaceLookup);
   const stateDir = getPluginStateDir();
   const agDir = findAppDataDir();
+  const ideDataDir = findIdeDataDir();
   const lsAddr = process.env.ANTIGRAVITY_LS_ADDRESS || '';
   const lsCsrf = process.env.ANTIGRAVITY_CSRF_TOKEN || '';
   const hasLsConfig = Boolean(lsAddr && lsCsrf);
@@ -3774,6 +4465,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   if (force) {
     fileAuditCache.clear();
     scanSnapCache.clear();
+    subagentSummaryCache.clear();
   }
 
   const hasValidRequestedConv = Boolean(requestedConvId && CONV_ID_RE.test(requestedConvId));
@@ -3793,6 +4485,8 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       const hasEnvLog =
         existsSync(join(agDir, 'brain', envConvId, '.system_generated', 'logs', 'transcript.jsonl')) ||
         existsSync(join(agDir, 'brain', envConvId, '.system_generated', 'logs', 'transcript_full.jsonl')) ||
+        existsSync(join(ideDataDir, 'brain', envConvId, '.system_generated', 'logs', 'transcript.jsonl')) ||
+        existsSync(join(ideDataDir, 'brain', envConvId, '.system_generated', 'logs', 'transcript_full.jsonl')) ||
         existsSync(join(cliDataDir, 'brain', envConvId, '.system_generated', 'logs', 'transcript.jsonl')) ||
         existsSync(join(cliDataDir, 'brain', envConvId, '.system_generated', 'logs', 'transcript_full.jsonl')) ||
         existsSync(join(cliDataDir, 'brain', envConvId, 'transcript.jsonl'));
@@ -3816,13 +4510,21 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   }
 
   const desktopLogsDir = join(agDir, 'brain', convId, '.system_generated', 'logs');
+  const ideLogsDir = join(ideDataDir, 'brain', convId, '.system_generated', 'logs');
   const cliLogsDir = join(cliDataDir, 'brain', convId, '.system_generated', 'logs');
   const cliDirectLog = join(cliDataDir, 'brain', convId, 'transcript.jsonl');
   const hasDesktopLogs = existsSync(desktopLogsDir);
+  const hasIdeLogs = !hasDesktopLogs && ideDataDir !== agDir && existsSync(ideLogsDir);
+  const hasAnyDesktopLogs = hasDesktopLogs || hasIdeLogs;
   const hasCliLogs = existsSync(cliLogsDir) || existsSync(cliDirectLog);
-  const useCliLogs = (cliMode && hasCliLogs) || (!hasDesktopLogs && hasCliLogs);
-  const conversationSource = useCliLogs ? 'cli' : (cliMode && !hasDesktopLogs ? 'cli' : 'desktop');
-  const brainBase = useCliLogs ? cliLogsDir : (hasDesktopLogs ? desktopLogsDir : cliLogsDir);
+  const useCliLogs = (cliMode && hasCliLogs) || (!hasAnyDesktopLogs && hasCliLogs);
+  const conversationSource = useCliLogs ? 'cli' : (cliMode && !hasAnyDesktopLogs ? 'cli' : 'desktop');
+  const brainBase = useCliLogs
+    ? cliLogsDir
+    : (hasDesktopLogs ? desktopLogsDir : (hasIdeLogs ? ideLogsDir : cliLogsDir));
+  const convBrainDir = useCliLogs
+    ? join(cliDataDir, 'brain', convId)
+    : (hasDesktopLogs ? join(agDir, 'brain', convId) : (hasIdeLogs ? join(ideDataDir, 'brain', convId) : join(cliDataDir, 'brain', convId)));
   const fullPath = join(brainBase, 'transcript_full.jsonl');
   const compactPath = join(brainBase, 'transcript.jsonl');
   const targetLogPath = (existsSync(fullPath) && statSync(fullPath).size <= 32 * 1024 * 1024)
@@ -3850,7 +4552,11 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     allowDiskCacheWithoutLs
   });
 
-  const baseSnapKey = `${convId}|${logStatMtime}|${logStatSize}|${host.sig}|${lsMemHash}|${agDir}|${stateDir}`;
+  const convDbPath = resolveConvDbPath(convId, conversationSource, agDir, cliDataDir, ideDataDir);
+  const convDbSig = getFileMtimeSigSafe(convDbPath);
+  const swarmSig = getFileMtimeSigSafe(join(convBrainDir, '.system_generated', 'swarm', 'members.json'));
+  const subagentsSig = getFileMtimeSigSafe(join(convBrainDir, '.system_generated', 'subagents'));
+  const baseSnapKey = `${convId}|${logStatMtime}|${logStatSize}|${convDbSig}|${swarmSig}|${subagentsSig}|${host.sig}|${lsMemHash}|${agDir}|${stateDir}`;
   const prevHit = scanSnapCache.get(convId);
   const sameBaseKey = Boolean(prevHit && prevHit.baseKey === baseSnapKey);
   if (!force && sameBaseKey) {
@@ -3900,8 +4606,29 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   const stepMetaMap = new Map();
   const stepArrayIdxByStepNum = new Map();
   const requiredModelSteps = [];
+  const userInputs = [];
+  const heavyCandidates = [];
+  let pendingToolLabels = [];
   let latestErrorStepIdx = -1;
   let lastTranscriptPlannerArrayIdx = -1;
+  let transcriptIsBtw = false;
+  let transcriptParentConvId = null;
+  let transcriptForkStepIndex = 0;
+  const transcriptDiagEvents = [];
+
+  const pushHeavyCandidate = (stepIndex, kind, label, rawText, m) => {
+    const estTokens = Math.round(((m?.low || 0) + (m?.high || 0)) / 2);
+    if (estTokens <= 0) return;
+    const cleanedRaw = kind === 'tool' ? stripToolResultHeader(rawText) : rawText;
+    heavyCandidates.push({
+      stepIndex,
+      kind,
+      label,
+      preview: sanitizeDiagnosticText(cleanedRaw, 72),
+      estTokens,
+      chars: m?.chars || 0
+    });
+  };
 
   const summarizeToolNames = (toolCalls) => {
     if (!Array.isArray(toolCalls) || !toolCalls.length) return [];
@@ -3920,10 +4647,25 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     if (Number.isFinite(sIdx) && !stepArrayIdxByStepNum.has(sIdx)) {
       stepArrayIdxByStepNum.set(sIdx, i);
     }
+    if (
+      step.trajectory_type === 22 ||
+      step.is_btw === true ||
+      step.branch_kind === 'btw'
+    ) {
+      transcriptIsBtw = true;
+    }
+    if (!transcriptParentConvId && (step.parent_conversation_id || step.parentConversationId)) {
+      transcriptParentConvId = String(step.parent_conversation_id || step.parentConversationId).trim() || null;
+    }
+    const rawForkStep = Number(step.fork_step_index ?? step.forkStepIndex ?? 0);
+    if (Number.isInteger(rawForkStep) && rawForkStep > transcriptForkStepIndex) {
+      transcriptForkStepIndex = rawForkStep;
+    }
     const type = step.type || '';
     const contentStr = typeof step.content === 'string' ? step.content : '';
 
     if (type === 'USER_INPUT') {
+      pendingToolLabels = [];
       userMessages++;
       if (!conversationTitle && contentStr) {
         conversationTitle = extractCleanUserTitle(contentStr);
@@ -3933,16 +4675,39 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         activeSettingModel = switchedModel;
         lastSettingStepIdx = sIdx;
       }
-      addMeasure(groups.user, measureText(contentStr));
+      const { promptPreview, promptFull } = extractPromptPreview(contentStr);
+      userInputs.push({
+        arrayIdx: i,
+        stepIndex: sIdx,
+        createdAt: step.created_at || '',
+        promptPreview,
+        promptFull
+      });
+      const mUser = measureText(contentStr);
+      addMeasure(groups.user, mUser);
+      pushHeavyCandidate(sIdx, 'user', '用户消息', promptFull || contentStr, mUser);
     } else if (isModelTurnStep(step)) {
       assistantMessages++;
       requiredModelSteps.push(sIdx);
-      addMeasure(groups.assistant, measureText(contentStr));
-      if (step.thinking) addMeasure(groups.thinking, measureText(step.thinking));
+      const mAsst = measureText(contentStr);
+      addMeasure(groups.assistant, mAsst);
+      pushHeavyCandidate(sIdx, 'assistant', '模型回复', contentStr, mAsst);
+      if (step.thinking) {
+        const mThink = measureText(step.thinking);
+        addMeasure(groups.thinking, mThink);
+        pushHeavyCandidate(sIdx, 'thinking', '模型思考', step.thinking, mThink);
+      }
       const toolBadges = summarizeToolNames(step.tool_calls);
+      pendingToolLabels = Array.isArray(step.tool_calls)
+        ? step.tool_calls.map(formatToolCallLabel)
+        : [];
       if (Array.isArray(step.tool_calls) && step.tool_calls.length) {
         toolCallsCount += step.tool_calls.length;
-        addMeasure(groups.tools, measureText(JSON.stringify(step.tool_calls)));
+        const tcRaw = JSON.stringify(step.tool_calls);
+        const mTc = measureText(tcRaw);
+        addMeasure(groups.tools, mTc);
+        const tcLabel = toolBadges.length ? `调用 ${toolBadges.slice(0, 2).join(', ')}` : '工具调用';
+        pushHeavyCandidate(sIdx, 'tool', tcLabel, tcRaw, mTc);
       }
       const stepUsage = extractStepUsage(step);
       stepMetaMap.set(sIdx, {
@@ -3961,16 +4726,45 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         latestErrorStepIdx = Math.max(latestErrorStepIdx, sIdx);
         if (contentStr) {
           latestStepError = { stepIndex: sIdx, text: contentStr };
+          const dKind = classifyDiagnosticEventText(contentStr);
+          if (dKind) {
+            transcriptDiagEvents.push({
+              kind: dKind,
+              stepIndex: sIdx,
+              createdAt: step.created_at || '',
+              detail: sanitizeSqliteText(contentStr, 120)
+            });
+          }
         }
       }
     } else if (type === 'CHECKPOINT' || step.checkpoint) {
-      addMeasure(groups.summaries, measureText(contentStr || step.checkpoint?.sessionSummary || ''));
+      const cpText = contentStr || step.checkpoint?.sessionSummary || '';
+      const mCp = measureText(cpText);
+      addMeasure(groups.summaries, mCp);
+      pushHeavyCandidate(sIdx, 'checkpoint', '压缩摘要', cpText, mCp);
     } else if (type === 'ERROR_MESSAGE' || step.status === 'ERROR') {
       latestErrorStepIdx = Math.max(latestErrorStepIdx, sIdx);
-      if (contentStr) latestStepError = { stepIndex: sIdx, text: contentStr };
-      addMeasure(groups.tools, measureText(contentStr));
+      if (contentStr) {
+        latestStepError = { stepIndex: sIdx, text: contentStr };
+        const dKind = classifyDiagnosticEventText(contentStr);
+        if (dKind) {
+          transcriptDiagEvents.push({
+            kind: dKind,
+            stepIndex: sIdx,
+            createdAt: step.created_at || '',
+            detail: sanitizeSqliteText(contentStr, 120)
+          });
+        }
+      }
+      const mErr = measureText(contentStr);
+      addMeasure(groups.tools, mErr);
+      const queuedLbl = type === 'GENERIC' && pendingToolLabels.length ? pendingToolLabels.shift() : '';
+      pushHeavyCandidate(sIdx, 'tool', resolveToolStepLabel(step, queuedLbl), contentStr, mErr);
     } else {
-      addMeasure(groups.tools, measureText(contentStr));
+      const mTool = measureText(contentStr);
+      addMeasure(groups.tools, mTool);
+      const queuedLbl = type === 'GENERIC' && pendingToolLabels.length ? pendingToolLabels.shift() : '';
+      pushHeavyCandidate(sIdx, 'tool', resolveToolStepLabel(step, queuedLbl), contentStr, mTool);
     }
 
     if (Array.isArray(step.media)) {
@@ -4134,9 +4928,16 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     nextMetaCheckAt = nowMs + delayMs;
   }
 
-  // Build turn-by-turn metrics combining GeneratorMetadata + Transcript steps
+  // Optional read-only SQLite offline enrichment (zero-crash fallback when unavailable)
+  const [sqliteSignals, summariesIndex] = await Promise.all([
+    convDbPath ? readConversationSqliteSignals(convDbPath, { includeLatestGenDetail: true }) : Promise.resolve(null),
+    readMergedSummariesIndex(agDir, cliDataDir, ideDataDir)
+  ]);
+
+  // Build turn-by-turn metrics combining GeneratorMetadata + SQLite + Transcript steps
   const turnCandidates = [];
   let sessionCostUSD = 0;
+  let sessionCacheSavingsUSD = 0;
   let turnCandidateSeq = 0;
 
   const appendFallbackTurnFromTranscriptStep = (s, arrayIdx, fallbackModel) => {
@@ -4144,9 +4945,27 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     const total = input + cache + output;
     if (total <= 0) return;
 
-    const duration = estimateStepDuration(rawSteps, arrayIdx, logMtimeMs);
-    const tps = output > 0 && duration && duration > 0.1 ? Number((output / duration).toFixed(1)) : null;
-    const rawModel = extractStepModel(s, null, fallbackModel);
+    const sIdx = Number(s.step_index ?? arrayIdx);
+    const sqlGen = sqliteSignals?.genByStep?.get(sIdx) || null;
+    const sqlModel = sqlGen
+      ? String(sqlGen.modelDisplayName || sqlGen.responseModel || sqlGen.model || sqlGen.requestedModel || '').trim()
+      : '';
+    const sqlTtft = typeof sqlGen?.ttft === 'number' && Number.isFinite(sqlGen.ttft) ? sqlGen.ttft : null;
+    const sqlStreamingSec = typeof sqlGen?.streamingSec === 'number' && Number.isFinite(sqlGen.streamingSec)
+      ? sqlGen.streamingSec
+      : null;
+    const hasSqlTiming = sqlTtft !== null || sqlStreamingSec !== null;
+    const duration = hasSqlTiming
+      ? (sqlTtft !== null && sqlStreamingSec !== null ? sqlTtft + sqlStreamingSec : (sqlTtft ?? sqlStreamingSec ?? null))
+      : estimateStepDuration(rawSteps, arrayIdx, logMtimeMs);
+    const tps = hasSqlTiming
+      ? (output > 0 && duration && duration > 0 ? Number((output / duration).toFixed(1)) : null)
+      : (output > 0 && duration && duration > 0.1 ? Number((output / duration).toFixed(1)) : null);
+    const streamTokBase = thinking > 0 && responseTokens > 0 ? responseTokens : output;
+    const streamingTps = streamTokBase > 0 && sqlStreamingSec && sqlStreamingSec >= 0.4
+      ? Number((streamTokBase / sqlStreamingSec).toFixed(1))
+      : null;
+    const rawModel = extractStepModel(s, null, sqlModel || fallbackModel);
     const modelKey = normalizeModelId(rawModel, host.dynamicModelMap);
     const displayModel = rawModel ? formatModelDisplayName(rawModel, modelKey) : '';
     const costInfo = calculateRequestApiCost(
@@ -4164,10 +4983,13 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     if (costInfo.isPriced && costInfo.costUSD) {
       sessionCostUSD += costInfo.costUSD;
     }
-    const sIdx = Number(s.step_index ?? arrayIdx);
+    if (costInfo.isPriced && costInfo.cacheSavingsUSD) {
+      sessionCacheSavingsUSD += costInfo.cacheSavingsUSD;
+    }
     const sMeta = stepMetaMap.get(sIdx);
     const promptSum = input + cache;
     const turnCachePct = promptSum > 0 ? Number(((cache / promptSum) * 100).toFixed(1)) : 0;
+    const sqlBudget = Number(sqlGen?.maxContextTokens || 0) || null;
 
     turnCandidates.push({
       turnIndex: 0,
@@ -4178,6 +5000,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       _orderSeq: turnCandidateSeq++,
       _rawCtxMeta: null,
       _sourceGm: null,
+      _budgetFromSqlite: Boolean(sqlBudget),
       createdAt: s.created_at || '',
       tools: sMeta?.tools || [],
       model: displayModel || '未记录模型',
@@ -4191,13 +5014,13 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       totalTokens: total,
       deltaTokens: 0,
       cacheHitPercent: turnCachePct,
-      budget: null,
+      budget: sqlBudget,
       estimate: null,
-      ttft: null,
-      streamingSec: null,
-      duration,
+      ttft: sqlTtft !== null ? Number(sqlTtft.toFixed(2)) : null,
+      streamingSec: sqlStreamingSec !== null ? Number(sqlStreamingSec.toFixed(2)) : null,
+      duration: duration !== null ? Number(duration.toFixed(2)) : null,
       tps,
-      streamingTps: null,
+      streamingTps,
       costUSD: costInfo.costUSD ?? 0,
       isPriced: costInfo.isPriced,
       error: s.status === 'ERROR' ? String(s.content || '请求报错') : '',
@@ -4280,6 +5103,9 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       );
       if (costInfo.isPriced && costInfo.costUSD) {
         sessionCostUSD += costInfo.costUSD;
+      }
+      if (costInfo.isPriced && costInfo.cacheSavingsUSD) {
+        sessionCacheSavingsUSD += costInfo.cacheSavingsUSD;
       }
 
       const promptSum = input + cache;
@@ -4395,6 +5221,129 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       if (t.totalTokens > 0) prevTotalTokens = t.totalTokens;
       t.contextBreakdown = idx === turns.length - 1 ? candidateContextBreakdown : null;
     }
+  }
+
+  // Group completed chronological model turns by preceding USER_INPUT for prompt cold/warm/hot startup diagnostics
+  const promptGroupsMap = new Map();
+  for (const t of turns) {
+    const turnArrIdx = (typeof t._minArrayIdx === 'number' && t._minArrayIdx >= 0)
+      ? t._minArrayIdx
+      : (typeof t._arrayIdx === 'number' && t._arrayIdx >= 0 ? t._arrayIdx : -1);
+    let matchedUser = null;
+    if (turnArrIdx >= 0) {
+      for (let uIdx = userInputs.length - 1; uIdx >= 0; uIdx--) {
+        if (userInputs[uIdx].arrayIdx <= turnArrIdx) {
+          matchedUser = userInputs[uIdx];
+          break;
+        }
+      }
+    } else if (t.stepIndex != null && Number.isFinite(Number(t.stepIndex))) {
+      const tStepNum = Number(t.stepIndex);
+      for (let uIdx = userInputs.length - 1; uIdx >= 0; uIdx--) {
+        if (Number.isFinite(userInputs[uIdx].stepIndex) && userInputs[uIdx].stepIndex <= tStepNum) {
+          matchedUser = userInputs[uIdx];
+          break;
+        }
+      }
+    }
+    const groupKey = matchedUser ? `u:${matchedUser.arrayIdx}` : 'implicit';
+    let grp = promptGroupsMap.get(groupKey);
+    if (!grp) {
+      grp = matchedUser
+        ? {
+            createdAt: matchedUser.createdAt || t.createdAt || '',
+            promptPreview: matchedUser.promptPreview || '(用户消息)',
+            promptFull: matchedUser.promptFull || matchedUser.promptPreview || '(用户消息)',
+            turns: []
+          }
+        : {
+            createdAt: t.createdAt || '',
+            promptPreview: '(会话初始轮次)',
+            promptFull: '(会话初始轮次)',
+            turns: []
+          };
+      promptGroupsMap.set(groupKey, grp);
+    }
+    grp.turns.push(t);
+  }
+
+  const allPromptTurns = [];
+  let prevGroupEndTokens = 0;
+  let promptGroupSeq = 0;
+  for (const grp of promptGroupsMap.values()) {
+    if (!grp.turns.length) continue;
+    promptGroupSeq++;
+    const firstTurn = grp.turns[0];
+    const lastTurn = grp.turns[grp.turns.length - 1];
+    const startTokens = (firstTurn.inputTokens || 0) + (firstTurn.cacheTokens || 0);
+    const startupCacheHitPercent = startTokens > 0
+      ? Number((((firstTurn.cacheTokens || 0) / startTokens) * 100).toFixed(1))
+      : null;
+    let startupState = null;
+    if (startTokens > 0) {
+      if ((firstTurn.cacheTokens || 0) === 0 || startupCacheHitPercent < 25) {
+        startupState = 'cold';
+      } else if (startupCacheHitPercent < 70) {
+        startupState = 'warm';
+      } else {
+        startupState = 'hot';
+      }
+    }
+    const endTokens = lastTurn.totalTokens || 0;
+    const deltaTokens = endTokens - prevGroupEndTokens;
+    prevGroupEndTokens = endTokens;
+
+    let outputTokensSum = 0;
+    let costSum = 0;
+    const groupTpsVals = [];
+    const groupToolSet = new Set();
+    for (const gt of grp.turns) {
+      outputTokensSum += gt.outputTokens || 0;
+      costSum += gt.costUSD || 0;
+      if (typeof gt.tps === 'number' && gt.tps > 0) groupTpsVals.push(gt.tps);
+      if (Array.isArray(gt.tools)) {
+        for (const badge of gt.tools) {
+          const cleanName = String(badge || '').replace(/\s*×\d+$/, '').trim();
+          if (cleanName) groupToolSet.add(cleanName);
+          if (groupToolSet.size >= 6) break;
+        }
+      }
+    }
+    const groupAvgTps = groupTpsVals.length > 0
+      ? Number((groupTpsVals.reduce((a, b) => a + b, 0) / groupTpsVals.length).toFixed(1))
+      : null;
+
+    allPromptTurns.push({
+      promptIndex: promptGroupSeq,
+      createdAt: grp.createdAt || firstTurn.createdAt || '',
+      promptPreview: grp.promptPreview,
+      promptFull: grp.promptFull,
+      startupState,
+      startupCacheHitPercent,
+      callsCount: grp.turns.length,
+      startTokens,
+      endTokens,
+      deltaTokens,
+      outputTokens: outputTokensSum,
+      costUSD: Number(costSum.toFixed(5)),
+      model: lastTurn.model || '未记录模型',
+      ttft: firstTurn.ttft ?? null,
+      avgTps: groupAvgTps,
+      tools: [...groupToolSet].slice(0, 6)
+    });
+  }
+  const promptTurnsPayload = allPromptTurns.slice(-20).reverse();
+  const latestPromptGroup = allPromptTurns.length ? allPromptTurns[allPromptTurns.length - 1] : null;
+  const latestPromptStartup = latestPromptGroup
+    ? {
+        state: latestPromptGroup.startupState,
+        cacheHitPercent: latestPromptGroup.startupCacheHitPercent,
+        promptIndex: latestPromptGroup.promptIndex,
+        callsCount: latestPromptGroup.callsCount
+      }
+    : null;
+
+  if (turnCandidates.length > 0) {
     for (const t of turnCandidates) {
       delete t._minArrayIdx;
       delete t._minStepIdx;
@@ -4497,6 +5446,24 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   for (const g of Object.values(groups)) addMeasure(localTotal, g);
   addMeasure(localTotal, attachmentTotal);
 
+  const localTotalMid = Math.round((localTotal.low + localTotal.high) / 2);
+  const heavyItems = heavyCandidates
+    .filter((item) => item.estTokens > 0)
+    .sort((a, b) => (b.estTokens - a.estTokens) || (a.stepIndex - b.stepIndex))
+    .slice(0, 10)
+    .map((item, idx) => ({
+      rank: idx + 1,
+      stepIndex: item.stepIndex,
+      kind: item.kind,
+      label: item.label,
+      preview: item.preview,
+      estTokens: item.estTokens,
+      sharePercent: localTotalMid > 0
+        ? Number(((item.estTokens / localTotalMid) * 100).toFixed(1))
+        : 0,
+      chars: item.chars
+    }));
+
   const lastRawStep = rawSteps.length ? rawSteps[rawSteps.length - 1] : null;
   const hasTrailingZeroTokError = Boolean(
     latestCandidate?.error &&
@@ -4579,13 +5546,19 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   const budgetLookupTurns = latestInFlight
     ? [...turns, latestInFlight]
     : (hasTrailingZeroTokError && latestCandidate ? [...turns, latestCandidate] : turns);
-  const matchedBudgetTurn = [...budgetLookupTurns].reverse().find(isTurnMatchingCurrentModel);
-  const directBudgetTokens = matchedBudgetTurn?.budget || null;
-  const cachedBudgetTokens = (!directBudgetTokens && allowDiskCacheWithoutLs)
+  const matchedServerBudgetTurn = [...budgetLookupTurns].reverse().find((t) => !t._budgetFromSqlite && isTurnMatchingCurrentModel(t));
+  const matchedSqliteBudgetTurn = [...budgetLookupTurns].reverse().find((t) => t._budgetFromSqlite && isTurnMatchingCurrentModel(t));
+  const directBudgetTokens = matchedServerBudgetTurn?.budget || null;
+  const sqliteBudgetTokens = !directBudgetTokens
+    ? (matchedSqliteBudgetTurn?.budget || Number(sqliteSignals?.latestMaxContextTokens || 0) || null)
+    : null;
+  const cachedBudgetTokens = (!directBudgetTokens && !sqliteBudgetTokens && allowDiskCacheWithoutLs)
     ? findCachedModelBudget(currentModelKey, currentModelDisplay, host.dynamicModelMap)
     : null;
-  const budgetTokens = directBudgetTokens || cachedBudgetTokens || null;
-  const budgetSource = directBudgetTokens ? 'server' : (cachedBudgetTokens ? 'disk_cache' : 'unknown');
+  const budgetTokens = directBudgetTokens || sqliteBudgetTokens || cachedBudgetTokens || null;
+  const budgetSource = directBudgetTokens
+    ? 'server'
+    : (sqliteBudgetTokens ? 'sqlite' : (cachedBudgetTokens ? 'disk_cache' : 'unknown'));
   const remainingTokens = usedTokens !== null && budgetTokens !== null && budgetTokens > 0
     ? Math.max(0, budgetTokens - usedTokens)
     : null;
@@ -4600,9 +5573,12 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   const modelQuota = resolveModelQuota(currentModelDisplay, host.modelConfigs, host.quotaSummaryGroups);
   const unknownAttachmentsCount = attachments.filter((a) => a.status !== 'parsed').length;
 
-  // Resolve workspace URI via official agentapi if available (cached per conversation)
-  let workspacePath = convWorkspaceCache.get(convId) ?? null;
-  if (!skipWorkspaceLookup && workspacePath === null && !convWorkspaceCache.has(convId)) {
+  // Resolve workspace URI & repository metadata via official agentapi if available (in-memory cache only)
+  let wsMeta = convWorkspaceCache.get(convId) ?? null;
+  if (!skipWorkspaceLookup && wsMeta === null && !convWorkspaceCache.has(convId)) {
+    let resolvedWorkspacePath = null;
+    let metaRepoName = null;
+    let metaBranchName = null;
     try {
       const exe = process.env.ANTIGRAVITY_AGENTAPI_EXE;
       if (exe) {
@@ -4611,14 +5587,149 @@ export async function scanConversation(requestedConvId = '', options = {}) {
           timeout: 2000
         });
         const parsedMeta = JSON.parse(out);
-        const uri = parsedMeta?.response?.conversationMetadata?.metadata?.workspaceUris?.[0] || '';
-        if (uri.startsWith('file://')) workspacePath = fileURLToPath(uri);
+        const convMetaObj = parsedMeta?.response?.conversationMetadata || {};
+        const metaInner = convMetaObj?.metadata || {};
+        const uri = metaInner?.workspaceUris?.[0] || '';
+        if (uri.startsWith('file://')) resolvedWorkspacePath = fileURLToPath(uri);
+        metaRepoName = String(
+          metaInner?.repositories?.[0]?.computedName ||
+          metaInner?.workspaces?.[0]?.repository?.computedName ||
+          convMetaObj?.repositories?.[0]?.computedName ||
+          convMetaObj?.workspaces?.[0]?.repository?.computedName ||
+          ''
+        ).trim() || null;
+        metaBranchName = String(
+          metaInner?.repositories?.[0]?.branchName ||
+          metaInner?.workspaces?.[0]?.repository?.branchName ||
+          metaInner?.branchName ||
+          convMetaObj?.repositories?.[0]?.branchName ||
+          convMetaObj?.workspaces?.[0]?.repository?.branchName ||
+          ''
+        ).trim() || null;
       }
     } catch {}
-    convWorkspaceCache.set(convId, workspacePath);
+    wsMeta = { workspacePath: resolvedWorkspacePath, metaRepoName, metaBranchName };
+    convWorkspaceCache.set(convId, wsMeta);
   }
+  const workspacePath = wsMeta?.workspacePath ?? null;
+  const sqlSummaryEntry = summariesIndex?.byId?.get(convId) || null;
+  let repoName = wsMeta?.metaRepoName
+    || (workspacePath ? basename(workspacePath) : null)
+    || sqlSummaryEntry?.projectName
+    || null;
+  let repoBranch = wsMeta?.metaBranchName || (workspacePath ? readGitBranchFromDir(workspacePath) : null);
+  if (!workspacePath && isCliRuntimeEnv() && convId && convId === String(process.env.ANTIGRAVITY_CONVERSATION_ID || '').trim()) {
+    try {
+      const cwd = process.cwd();
+      if (cwd && existsSync(join(cwd, '.git'))) {
+        const cwdBranch = readGitBranchFromDir(cwd);
+        if (!repoName) repoName = basename(cwd) || null;
+        if (!repoBranch && cwdBranch) repoBranch = cwdBranch;
+      }
+    } catch {}
+  }
+  const repoInfo = {
+    name: repoName || null,
+    branch: repoBranch || null,
+    label: (repoName && repoBranch) ? `${repoName}@${repoBranch}` : (repoName || null)
+  };
 
-  const resolvedTitle = conversationTitle || `会话 ${convId.slice(0, 8)}`;
+  // Swarm / Subagent full-tree aggregation (works even without SQLite)
+  const agentTree = collectAgentTree(convId, convBrainDir, {
+    agDir,
+    cliDir: cliDataDir,
+    ideDir: ideDataDir,
+    summariesIndex,
+    dynamicModelMap: host.dynamicModelMap,
+    parentTurnsCount: turns.length,
+    parentSessionTotals: sessionTotals,
+    parentCostUSD: sessionCostUSD,
+    parentCacheSavingsUSD: sessionCacheSavingsUSD
+  });
+
+  // /btw branch info & fork step deduplication metadata
+  const effectiveForkStep = Math.max(
+    Number(sqliteSignals?.forkStepIndex || 0),
+    Number(transcriptForkStepIndex || 0)
+  );
+  const isBtwBranch = Boolean(
+    sqliteSignals?.trajectoryType === 22 ||
+    effectiveForkStep > 0 ||
+    transcriptIsBtw
+  );
+  const branchParentConvId = sqliteSignals?.parentConvId || transcriptParentConvId || sqlSummaryEntry?.parentConvId || null;
+  let deduplicatedStepsCount = 0;
+  if (isBtwBranch && effectiveForkStep > 0) {
+    for (let i = 0; i < rawSteps.length; i++) {
+      const stp = rawSteps[i];
+      const sNum = Number(stp?.step_index ?? i);
+      if (Number.isFinite(sNum) && sNum <= effectiveForkStep && isModelTurnStep(stp)) {
+        deduplicatedStepsCount++;
+      }
+    }
+  }
+  const branchInfo = isBtwBranch
+    ? {
+        isBranch: true,
+        kind: 'btw',
+        parentConvId: branchParentConvId,
+        forkStepIndex: effectiveForkStep,
+        deduplicatedStepsCount
+      }
+    : null;
+
+  // Compaction history & summary drawer
+  const compactions = buildCompactionsList(rawSteps, turns, sqliteSignals?.compactionSteps || []);
+
+  // Per-session diagnostics (transcript errors + SQLite events & routing)
+  const sessionEventMap = new Map();
+  const pushSessionEvent = (ev) => {
+    if (!ev || !ev.kind) return;
+    const key = `${ev.kind}:${ev.stepIndex ?? 0}`;
+    if (sessionEventMap.has(key)) return;
+    sessionEventMap.set(key, {
+      kind: ev.kind,
+      stepIndex: Number(ev.stepIndex ?? 0),
+      ...(ev.createdAt ? { createdAt: ev.createdAt } : {}),
+      detail: sanitizeSqliteText(ev.detail || '', 120)
+    });
+  };
+  for (const ev of (sqliteSignals?.events || [])) pushSessionEvent(ev);
+  for (const ev of transcriptDiagEvents) pushSessionEvent(ev);
+  for (const t of turns) {
+    if (!t.error) continue;
+    const dKind = classifyDiagnosticEventText(t.error);
+    if (dKind) {
+      pushSessionEvent({
+        kind: dKind,
+        stepIndex: t.stepIndex ?? t.turnIndex,
+        createdAt: t.createdAt || '',
+        detail: t.error
+      });
+    }
+  }
+  const allSessionDiagEvents = [...sessionEventMap.values()]
+    .sort((a, b) => (a.stepIndex - b.stepIndex));
+  const allSessionRouting = Array.isArray(sqliteSignals?.routingEvents)
+    ? sqliteSignals.routingEvents.map((r) => ({
+        stepIndex: Number(r.stepIndex ?? 0),
+        requestedModel: sanitizeSqliteText(r.requestedModel || '', 80),
+        respondedModel: sanitizeSqliteText(r.respondedModel || '', 80),
+        reason: String(r.reason || 'model_reroute')
+      }))
+    : [];
+  const sessionDiagnostics = {
+    sqliteUsed: Boolean(sqliteSignals),
+    eventsCount: allSessionDiagEvents.length,
+    routingCount: allSessionRouting.length,
+    events: allSessionDiagEvents.slice(-15).reverse(),
+    routing: allSessionRouting.slice(-15).reverse()
+  };
+
+  const resolvedTitle = conversationTitle || sqlSummaryEntry?.title || `会话 ${convId.slice(0, 8)}`;
+  const promptUsed = latestValidTurn
+    ? ((latestValidTurn.inputTokens || 0) + (latestValidTurn.cacheTokens || 0))
+    : null;
   const contextPayload = {
     model: currentModelDisplay,
     modelKey: currentModelKey,
@@ -4632,6 +5743,9 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     budgetSource,
     remaining: remainingTokens,
     percent: usedPercent,
+    promptUsed,
+    projectedNextMin: usedTokens,
+    projectedNextPercent: usedPercent,
     inputTokens: latestValidTurn?.inputTokens ?? null,
     cacheTokens: latestValidTurn?.cacheTokens ?? null,
     outputTokens: latestValidTurn?.outputTokens ?? null,
@@ -4640,7 +5754,9 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     cacheHitPercent,
     roundCostUSD: Number((latestValidTurn?.costUSD || 0).toFixed(5)),
     sessionCostUSD: Number(sessionCostUSD.toFixed(4)),
+    sessionCacheSavingsUSD: Number(sessionCacheSavingsUSD.toFixed(4)),
     isPriced: Boolean(latestValidTurn?.isPriced),
+    latestPromptStartup,
     error: errorInfo,
     quota: modelQuota,
     breakdown: contextBreakdown,
@@ -4659,7 +5775,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     responseTokens: latestValidTurn.responseTokens,
     isServerExact: Boolean(latestValidTurn?._isServerExact)
   } : null;
-  const sparklinePayload = turns.slice(-24).map((t) => ({
+  const sparklinePayload = turns.slice(-40).map((t) => ({
     turn: t.turnIndex,
     total: t.totalTokens,
     delta: t.deltaTokens,
@@ -4673,6 +5789,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     hasRecordedModel: _hrm,
     _arrayIdx: _ai,
     _isServerExact: _ise,
+    _budgetFromSqlite: _bfs,
     ...rest
   }) => ({
     ...rest,
@@ -4695,12 +5812,19 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     conversationId: convId,
     conversationTitle: resolvedTitle,
     workspacePath,
+    repoInfo,
+    branchInfo,
+    agentTree,
+    compactions,
+    sessionDiagnostics,
     quotas: host.quotas || [],
     quotaState: toStableQuotaState(host.quotaStatus),
     context: contextPayload,
     speed: speedPayload,
     sparkline: sparklinePayload,
     turns: turnsPayload,
+    promptTurns: promptTurnsPayload,
+    heavyItems,
     audit: auditPayload
   });
 
@@ -4712,6 +5836,11 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     conversationSource,
     conversationTitle: resolvedTitle,
     workspacePath,
+    repoInfo,
+    branchInfo,
+    agentTree,
+    compactions,
+    sessionDiagnostics,
     recentConversations,
     quotas: host.quotas || [],
     quotaStatus: host.quotaStatus,
@@ -4719,6 +5848,8 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     speed: speedPayload,
     sparkline: sparklinePayload,
     turns: turnsPayload,
+    promptTurns: promptTurnsPayload,
+    heavyItems,
     audit: auditPayload
   };
   if (scanSnapCache.size > 32) {
@@ -5116,14 +6247,25 @@ export async function collectTokenHistory(options = {}) {
   const effectivePlan = resolveEffectivePlanStatus(host.plan, customPlan);
 
   const agDir = findAppDataDir();
+  const ideDir = findIdeDataDir();
   const cliDir = findCliDataDir();
   const scanMeta = { restrictedRoots: [] };
   const desktopJobs = walkTranscriptFiles(join(agDir, 'brain'), 'desktop', scanMeta);
+  if (ideDir && ideDir !== agDir && ideDir !== cliDir) {
+    const ideJobs = walkTranscriptFiles(join(ideDir, 'brain'), 'desktop', scanMeta);
+    const seenDesktopConvs = new Set(desktopJobs.map((j) => j.convId));
+    for (const j of ideJobs) {
+      if (!seenDesktopConvs.has(j.convId)) {
+        seenDesktopConvs.add(j.convId);
+        desktopJobs.push(j);
+      }
+    }
+  }
   const cliJobs = walkTranscriptFiles(join(cliDir, 'brain'), 'cli', scanMeta);
   const activeHintConvId = String(options.convId || process.env.ANTIGRAVITY_CONVERSATION_ID || '').trim();
   if (CONV_ID_RE.test(activeHintConvId)) {
     const appendDirectConvJob = (baseDir, targetJobs, sourceName) => {
-      if (targetJobs.some((j) => j.convId === activeHintConvId)) return;
+      if (!baseDir || targetJobs.some((j) => j.convId === activeHintConvId)) return;
       const std = join(baseDir, 'brain', activeHintConvId, '.system_generated', 'logs', 'transcript.jsonl');
       const direct = join(baseDir, 'brain', activeHintConvId, 'transcript.jsonl');
       const p = existsSync(std) ? std : (existsSync(direct) ? direct : '');
@@ -5136,8 +6278,10 @@ export async function collectTokenHistory(options = {}) {
     if (isCliRuntimeEnv()) {
       appendDirectConvJob(cliDir, cliJobs, 'cli');
       appendDirectConvJob(agDir, desktopJobs, 'desktop');
+      if (ideDir !== agDir && ideDir !== cliDir) appendDirectConvJob(ideDir, desktopJobs, 'desktop');
     } else {
       appendDirectConvJob(agDir, desktopJobs, 'desktop');
+      if (ideDir !== agDir && ideDir !== cliDir) appendDirectConvJob(ideDir, desktopJobs, 'desktop');
       appendDirectConvJob(cliDir, cliJobs, 'cli');
     }
   }
@@ -5151,8 +6295,43 @@ export async function collectTokenHistory(options = {}) {
       }
     : { state: 'ok', restrictedSources: [], reason: '' };
 
-  const desktopSessionFiles = countSessionFiles(join(agDir, 'conversations'));
+  const desktopSessionFiles = countSessionFiles(join(agDir, 'conversations'))
+    + (ideDir && ideDir !== agDir && ideDir !== cliDir ? countSessionFiles(join(ideDir, 'conversations')) : 0);
   const cliSessionFiles = countSessionFiles(join(cliDir, 'conversations'));
+
+  const now = hasExplicitNow ? new Date(nowMs) : new Date();
+  const todayKey = formatLocalDateKey(now);
+  const yesterdayDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  const yesterdayKey = formatLocalDateKey(yesterdayDate);
+  const monthPrefix = todayKey.slice(0, 7);
+  const yearPrefix = todayKey.slice(0, 4);
+
+  const createEmpty24h = () => Array.from({ length: 24 }, (_, hour) => ({
+    hour,
+    total: 0,
+    input: 0,
+    cache: 0,
+    output: 0,
+    steps: 0,
+    costUSD: 0
+  }));
+  const hourlyBySource = {
+    all: { today: createEmpty24h(), yesterday: createEmpty24h() },
+    desktop: { today: createEmpty24h(), yesterday: createEmpty24h() },
+    cli: { today: createEmpty24h(), yesterday: createEmpty24h() }
+  };
+
+  const addHourly = (srcKey, dayBucket, hour, inp, cap, outp, cost) => {
+    const arr = hourlyBySource[srcKey]?.[dayBucket];
+    if (!arr || hour < 0 || hour > 23) return;
+    const h = arr[hour];
+    h.total += inp + cap + outp;
+    h.input += inp;
+    h.cache += cap;
+    h.output += outp;
+    h.steps += 1;
+    h.costUSD = Number((h.costUSD + cost).toFixed(6));
+  };
 
   const dailyBySource = { all: {}, desktop: {}, cli: {} };
   const requestsBySource = { all: [], desktop: [], cli: [] };
@@ -5165,18 +6344,37 @@ export async function collectTokenHistory(options = {}) {
     }
   };
 
-  const addDaily = (bucketMap, dateKey, inp, cap, outp, pricedCost, refCost) => {
+  const addDaily = (bucketMap, dateKey, inp, cap, outp, pricedCost, refCost, modelName = '未记录模型') => {
     if (!bucketMap[dateKey]) {
-      bucketMap[dateKey] = { total: 0, input: 0, cache: 0, output: 0, steps: 0, costUSD: 0, refCostUSD: 0 };
+      bucketMap[dateKey] = {
+        total: 0,
+        input: 0,
+        cache: 0,
+        output: 0,
+        steps: 0,
+        costUSD: 0,
+        refCostUSD: 0,
+        _byModelMap: new Map()
+      };
     }
     const b = bucketMap[dateKey];
-    b.total += inp + cap + outp;
+    const tok = inp + cap + outp;
+    b.total += tok;
     b.input += inp;
     b.cache += cap;
     b.output += outp;
     b.steps += 1;
     b.costUSD = Number((b.costUSD + pricedCost).toFixed(6));
     b.refCostUSD = Number((b.refCostUSD + refCost).toFixed(6));
+    const mName = String(modelName || '未记录模型').trim() || '未记录模型';
+    let mEntry = b._byModelMap.get(mName);
+    if (!mEntry) {
+      mEntry = { name: mName, tokens: 0, steps: 0, costUSD: 0 };
+      b._byModelMap.set(mName, mEntry);
+    }
+    mEntry.tokens += tok;
+    mEntry.steps += 1;
+    mEntry.costUSD = Number((mEntry.costUSD + pricedCost).toFixed(6));
   };
 
   const persistedModels = loadPersistedStepModels();
@@ -5196,11 +6394,16 @@ export async function collectTokenHistory(options = {}) {
       if (st.mtimeMs > maxJobMtimeMs) maxJobMtimeMs = st.mtimeMs;
       let cached = transcriptHistCache.get(job.path);
 
-      if (!cached || cached.size !== st.size || cached.mtimeMs !== st.mtimeMs) {
+      if (!cached || cached.size !== st.size || cached.mtimeMs !== st.mtimeMs || !Array.isArray(cached.errorEvents)) {
         const rawRecords = [];
+        const errorEvents = [];
         const missingStepSet = new Set();
         let firstDate = null;
+        let lastDate = null;
         let activeModel = '';
+        let convTitle = '';
+        let transcriptIsBtw = false;
+        let transcriptForkStepIndex = 0;
         const lines = readFileSync(job.path, 'utf-8').split(/\r?\n/);
 
         for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
@@ -5209,7 +6412,16 @@ export async function collectTokenHistory(options = {}) {
           let ev;
           try { ev = JSON.parse(line); } catch { continue; }
 
+          if (ev.trajectory_type === 22 || ev.is_btw === true || ev.branch_kind === 'btw') {
+            transcriptIsBtw = true;
+          }
+          const rawFork = Number(ev.fork_step_index ?? ev.forkStepIndex ?? 0);
+          if (Number.isInteger(rawFork) && rawFork > transcriptForkStepIndex) {
+            transcriptForkStepIndex = rawFork;
+          }
+
           if (ev.type === 'USER_INPUT' && ev.content) {
+            if (!convTitle) convTitle = truncateCleanText(extractCleanUserTitle(ev.content), 60);
             const switched = parseModelSettingFromText(ev.content);
             if (switched) activeModel = switched;
           }
@@ -5222,13 +6434,30 @@ export async function collectTokenHistory(options = {}) {
           if (dateKey && (!firstDate || dateKey < firstDate)) {
             firstDate = dateKey;
           }
+          if (dateKey && (!lastDate || dateKey > lastDate)) {
+            lastDate = dateKey;
+          }
+
+          const stepNum = Number(ev.step_index ?? lineIdx);
+          if (ev.type === 'ERROR_MESSAGE' || ev.status === 'ERROR') {
+            const errStr = typeof ev.content === 'string' ? ev.content : '';
+            const dKind = classifyDiagnosticEventText(errStr);
+            if (dKind) {
+              errorEvents.push({
+                kind: dKind,
+                stepIndex: stepNum,
+                date: dateKey || lastDate || firstDate || '',
+                createdAt: ev.created_at || dateKey || '',
+                detail: sanitizeSqliteText(errStr, 120)
+              });
+            }
+          }
 
           if (!isModelTurnStep(ev)) continue;
           const { input: inp, cache: cap, output: outp, thinking } = extractStepUsage(ev);
           const tot = inp + cap + outp;
           if (tot <= 0 || !dateKey) continue;
 
-          const stepNum = Number(ev.step_index ?? lineIdx);
           const stepKey = String(stepNum);
           const stepOwnModel = extractStepModel(ev, null, '');
           if (!stepOwnModel) missingStepSet.add(stepKey);
@@ -5247,7 +6476,8 @@ export async function collectTokenHistory(options = {}) {
             cacheTokens: cap,
             outputTokens: outp,
             thinkingTokens: thinking,
-            totalTokens: tot
+            totalTokens: tot,
+            isError: ev.status === 'ERROR'
           });
         }
 
@@ -5255,6 +6485,11 @@ export async function collectTokenHistory(options = {}) {
           size: st.size,
           mtimeMs: st.mtimeMs,
           firstDate,
+          lastDate,
+          convTitle,
+          transcriptIsBtw,
+          transcriptForkStepIndex,
+          errorEvents,
           rawRecords,
           stepsNeedingGen: [...missingStepSet]
         };
@@ -5318,15 +6553,66 @@ export async function collectTokenHistory(options = {}) {
     });
   }
 
+  const [sqliteEnabled, summariesIndex] = await Promise.all([
+    isSqliteAvailable(),
+    readMergedSummariesIndex(agDir, cliDir, ideDir)
+  ]);
+  const summariesById = summariesIndex?.byId || null;
+
   const resultBuiltSeq = genBackfillDataSeq;
   const latestPersistedConvs = loadPersistedStepModels().convs;
 
-  for (const { job, cached } of parsedJobs) {
+  const diagEventsSummary = {
+    total: 0,
+    safetyFilter: 0,
+    safetyWastedUSD: 0,
+    quota429: 0,
+    upstreamRetry: 0,
+    contextOverflow: 0
+  };
+  const allDiagEvents = [];
+  const allDiagRouting = [];
+  const diagEventDedup = new Set();
+  const diagRoutingDedup = new Set();
+  const routingUniqueModels = new Set();
+
+  for (let pIdx = 0; pIdx < parsedJobs.length; pIdx++) {
+    const { job, cached } = parsedJobs[pIdx];
+    if (pIdx > 0 && pIdx % 25 === 0) {
+      await new Promise((r) => setImmediate(r));
+    }
     if (cached.firstDate) trackDate(cached.firstDate);
     const genCached = convGenMetaCache.get(job.convId);
     const persistedSteps = latestPersistedConvs[job.convId]?.steps || null;
+    const convDbPath = sqliteEnabled ? resolveConvDbPath(job.convId, job.source, agDir, cliDir, ideDir) : '';
+    const sqlSignals = convDbPath
+      ? await readConversationSqliteSignals(convDbPath, { includeLatestGenDetail: false })
+      : null;
+
+    const forkStepIndex = Math.max(
+      Number(sqlSignals?.forkStepIndex || 0),
+      Number(cached.transcriptForkStepIndex || 0)
+    );
+    const isBtwBranch = Boolean(
+      sqlSignals?.trajectoryType === 22 ||
+      forkStepIndex > 0 ||
+      cached.transcriptIsBtw
+    );
+    const projectName = resolveProjectNameForConv(job.convId, summariesById);
+    const convTitle = truncateCleanText(
+      summariesById?.get(job.convId)?.title || cached.convTitle || `会话 ${job.convId.slice(0, 8)}`,
+      60
+    );
+
+    const stepCostByNum = new Map();
+    const stepTimeByNum = new Map();
 
     for (const rawRec of cached.rawRecords) {
+      // /btw branch deduplication: skip inherited parent steps (stepNum <= forkStepIndex)
+      if (isBtwBranch && forkStepIndex > 0 && rawRec.stepNum <= forkStepIndex) {
+        continue;
+      }
+
       trackDate(rawRec.date);
       if (seenEvents.has(rawRec.eventId)) continue;
       seenEvents.add(rawRec.eventId);
@@ -5339,13 +6625,18 @@ export async function collectTokenHistory(options = {}) {
         || gmEntry?.chatModel?.responseModel
         || gmEntry?.chatModel?.model
         || '';
+      const sqlStepGen = sqlSignals?.genByStep?.get(rawRec.stepNum) || null;
+      const sqlModel = sqlStepGen
+        ? String(sqlStepGen.modelDisplayName || sqlStepGen.responseModel || sqlStepGen.model || sqlStepGen.requestedModel || '').trim()
+        : '';
       const rec = {
         eventId: rawRec.eventId,
         source: rawRec.source,
         convId: rawRec.convId,
+        projectName,
         date: rawRec.date,
         created_at: rawRec.created_at,
-        model: String(gmModel || rawRec.stepOwnModel || rawRec.fallbackRunningModel || '').trim(),
+        model: String(gmModel || rawRec.stepOwnModel || sqlModel || rawRec.fallbackRunningModel || '').trim(),
         inputTokens: rawRec.inputTokens,
         cacheTokens: rawRec.cacheTokens,
         outputTokens: rawRec.outputTokens,
@@ -5357,12 +6648,100 @@ export async function collectTokenHistory(options = {}) {
       const refCalc = calculateReferenceCost(rec, 'gemini-3.8-flash', rec.date);
       const pCost = priced.isPriced ? (priced.costUSD || 0) : 0;
       const rCost = refCalc.totalCostUSD || 0;
+      const effCost = priced.isPriced ? pCost : rCost;
+      const effSavings = priced.isPriced ? (priced.cacheSavingsUSD || 0) : (refCalc.cacheSavingsUSD || 0);
+      rec._effCostUSD = effCost;
+      rec._effSavingsUSD = effSavings;
 
-      addDaily(dailyBySource.all, rec.date, rec.inputTokens, rec.cacheTokens, rec.outputTokens, pCost, rCost);
-      addDaily(dailyBySource[rec.source] || dailyBySource.desktop, rec.date, rec.inputTokens, rec.cacheTokens, rec.outputTokens, pCost, rCost);
+      stepCostByNum.set(rawRec.stepNum, effCost);
+      stepTimeByNum.set(rawRec.stepNum, { date: rawRec.date, createdAt: rawRec.created_at });
+
+      const modelDisp = priced.modelDisplayName
+        || (rec.model ? formatModelDisplayName(rec.model, priced.modelKey || null) : '未记录模型');
+
+      addDaily(dailyBySource.all, rec.date, rec.inputTokens, rec.cacheTokens, rec.outputTokens, pCost, rCost, modelDisp);
+      addDaily(dailyBySource[rec.source] || dailyBySource.desktop, rec.date, rec.inputTokens, rec.cacheTokens, rec.outputTokens, pCost, rCost, modelDisp);
+
+      if (rec.date === todayKey || rec.date === yesterdayKey) {
+        const dt = new Date(rec.created_at);
+        if (!Number.isNaN(dt.getTime())) {
+          const dayBucket = rec.date === todayKey ? 'today' : 'yesterday';
+          const hr = dt.getHours();
+          addHourly('all', dayBucket, hr, rec.inputTokens, rec.cacheTokens, rec.outputTokens, effCost);
+          addHourly(rec.source === 'cli' ? 'cli' : 'desktop', dayBucket, hr, rec.inputTokens, rec.cacheTokens, rec.outputTokens, effCost);
+        }
+      }
 
       requestsBySource.all.push(rec);
       (requestsBySource[rec.source] || requestsBySource.desktop).push(rec);
+    }
+
+    // Aggregate cross-session diagnostic events (SQLite + Transcript)
+    const convFallbackDate = cached.lastDate || cached.firstDate || todayKey;
+    const convFallbackCreatedAt = new Date(cached.mtimeMs || nowMs).toISOString();
+    const recordDiagEvent = (ev) => {
+      if (!ev || !ev.kind) return;
+      const stepIdx = Number(ev.stepIndex ?? 0);
+      if (isBtwBranch && forkStepIndex > 0 && stepIdx > 0 && stepIdx <= forkStepIndex) return;
+      const dKey = `${job.convId}:${ev.kind}:${stepIdx}`;
+      if (diagEventDedup.has(dKey)) return;
+      diagEventDedup.add(dKey);
+
+      const stepTime = stepTimeByNum.get(stepIdx) || stepTimeByNum.get(stepIdx - 1) || null;
+      const evDate = ev.date || stepTime?.date || convFallbackDate;
+      const evCreatedAt = ev.createdAt || stepTime?.createdAt || convFallbackCreatedAt;
+      let wastedUSD = 0;
+      if (ev.kind === 'safety_filter') {
+        wastedUSD = Number((stepCostByNum.get(stepIdx) || stepCostByNum.get(stepIdx - 1) || 0).toFixed(4));
+        diagEventsSummary.safetyFilter += 1;
+        diagEventsSummary.safetyWastedUSD = Number((diagEventsSummary.safetyWastedUSD + wastedUSD).toFixed(4));
+      } else if (ev.kind === 'quota_429') {
+        diagEventsSummary.quota429 += 1;
+      } else if (ev.kind === 'upstream_retry') {
+        diagEventsSummary.upstreamRetry += 1;
+      } else if (ev.kind === 'context_overflow') {
+        diagEventsSummary.contextOverflow += 1;
+      } else {
+        return;
+      }
+      diagEventsSummary.total += 1;
+      allDiagEvents.push({
+        kind: ev.kind,
+        convId: job.convId,
+        convTitle,
+        date: evDate,
+        createdAt: evCreatedAt,
+        stepIndex: stepIdx,
+        wastedUSD,
+        detail: sanitizeSqliteText(ev.detail || '', 120)
+      });
+    };
+
+    for (const ev of (sqlSignals?.events || [])) recordDiagEvent(ev);
+    for (const ev of (cached.errorEvents || [])) recordDiagEvent(ev);
+
+    // Aggregate cross-session canary/routing events from SQLite
+    for (const r of (sqlSignals?.routingEvents || [])) {
+      const stepIdx = Number(r.stepIndex ?? 0);
+      if (isBtwBranch && forkStepIndex > 0 && stepIdx > 0 && stepIdx <= forkStepIndex) continue;
+      const reqModel = sanitizeSqliteText(r.requestedModel || '', 80);
+      const respModel = sanitizeSqliteText(r.respondedModel || '', 80);
+      const reason = String(r.reason || 'model_reroute');
+      const rKey = `${job.convId}:${stepIdx}:${reqModel}:${respModel}:${reason}`;
+      if (diagRoutingDedup.has(rKey)) continue;
+      diagRoutingDedup.add(rKey);
+      if (respModel) routingUniqueModels.add(respModel);
+      const stepTime = stepTimeByNum.get(stepIdx) || null;
+      allDiagRouting.push({
+        convId: job.convId,
+        convTitle,
+        date: stepTime?.date || convFallbackDate,
+        createdAt: stepTime?.createdAt || convFallbackCreatedAt,
+        stepIndex: stepIdx,
+        requestedModel: reqModel,
+        respondedModel: respModel,
+        reason
+      });
     }
   }
 
@@ -5377,15 +6756,23 @@ export async function collectTokenHistory(options = {}) {
         'gemini-3.8-flash',
         dateKey
       );
-      addDaily(dailyBySource.all, dateKey, lRec.input || 0, lRec.cache || 0, lRec.output || 0, 0, refCalc.totalCostUSD || 0);
-      addDaily(dailyBySource.desktop, dateKey, lRec.input || 0, lRec.cache || 0, lRec.output || 0, 0, refCalc.totalCostUSD || 0);
+      addDaily(dailyBySource.all, dateKey, lRec.input || 0, lRec.cache || 0, lRec.output || 0, 0, refCalc.totalCostUSD || 0, '未记录模型');
+      addDaily(dailyBySource.desktop, dateKey, lRec.input || 0, lRec.cache || 0, lRec.output || 0, 0, refCalc.totalCostUSD || 0, '未记录模型');
     }
   }
 
-  const now = new Date();
-  const todayKey = formatLocalDateKey(now);
-  const monthPrefix = todayKey.slice(0, 7);
-  const yearPrefix = todayKey.slice(0, 4);
+  for (const dMap of Object.values(dailyBySource)) {
+    for (const b of Object.values(dMap)) {
+      const mapObj = b._byModelMap;
+      b.byModel = mapObj
+        ? [...mapObj.values()]
+            .sort((a, c) => (c.tokens - a.tokens) || (c.costUSD - a.costUSD))
+            .slice(0, 6)
+        : [];
+      delete b._byModelMap;
+    }
+  }
+
   if (!firstUseDate) firstUseDate = todayKey;
 
   const buildSourceAnalytics = (srcKey) => {
@@ -5437,11 +6824,55 @@ export async function collectTokenHistory(options = {}) {
         inputCostUSD: Number((ident.pricedInputCostUSD + resCalc.inputCostUSD).toFixed(4)),
         cacheCostUSD: Number((ident.pricedCacheCostUSD + resCalc.cacheCostUSD).toFixed(4)),
         outputCostUSD: Number((ident.pricedOutputCostUSD + resCalc.outputCostUSD).toFixed(4)),
+        cacheSavingsUSD: Number(((ident.pricedCacheSavingsUSD || 0) + (resCalc.cacheSavingsUSD || 0)).toFixed(4)),
         knownCostUSD: ident.pricedCostUSD,
         residualCostUSD: resCalc.totalCostUSD,
         residualTokens: resIn + resCache + resOut
       };
     };
+
+    // By-project aggregation (Top 12 by costUSD / tokens)
+    const projectMap = new Map();
+    for (const r of reqs) {
+      const pName = String(r.projectName || '未归类工作区').trim() || '未归类工作区';
+      let p = projectMap.get(pName);
+      if (!p) {
+        p = {
+          name: pName,
+          _convSet: new Set(),
+          requests: 0,
+          tokens: 0,
+          inputTokens: 0,
+          cacheTokens: 0,
+          outputTokens: 0,
+          costUSD: 0,
+          cacheSavingsUSD: 0
+        };
+        projectMap.set(pName, p);
+      }
+      if (r.convId) p._convSet.add(r.convId);
+      p.requests += 1;
+      p.tokens += r.totalTokens || 0;
+      p.inputTokens += r.inputTokens || 0;
+      p.cacheTokens += r.cacheTokens || 0;
+      p.outputTokens += r.outputTokens || 0;
+      p.costUSD += r._effCostUSD || 0;
+      p.cacheSavingsUSD += r._effSavingsUSD || 0;
+    }
+    const byProject = [...projectMap.values()]
+      .map((p) => ({
+        name: p.name,
+        conversations: p._convSet.size,
+        requests: p.requests,
+        tokens: p.tokens,
+        inputTokens: p.inputTokens,
+        cacheTokens: p.cacheTokens,
+        outputTokens: p.outputTokens,
+        costUSD: Number(p.costUSD.toFixed(4)),
+        cacheSavingsUSD: Number(p.cacheSavingsUSD.toFixed(4))
+      }))
+      .sort((a, b) => (b.costUSD - a.costUSD) || (b.tokens - a.tokens))
+      .slice(0, 12);
 
     return {
       summary: {
@@ -5461,6 +6892,7 @@ export async function collectTokenHistory(options = {}) {
         monthActiveDays,
         yearActiveDays
       },
+      byProject,
       costs: {
         allTime: {
           reference: refAll,
@@ -5480,6 +6912,19 @@ export async function collectTokenHistory(options = {}) {
     all: buildSourceAnalytics('all'),
     desktop: buildSourceAnalytics('desktop'),
     cli: buildSourceAnalytics('cli')
+  };
+
+  allDiagEvents.sort((a, b) => String(b.createdAt || b.date).localeCompare(String(a.createdAt || a.date)) || (b.stepIndex - a.stepIndex));
+  allDiagRouting.sort((a, b) => String(b.createdAt || b.date).localeCompare(String(a.createdAt || a.date)) || (b.stepIndex - a.stepIndex));
+  const diagnostics = {
+    sqliteEnabled: Boolean(sqliteEnabled),
+    eventsSummary: diagEventsSummary,
+    recentEvents: allDiagEvents.slice(0, 30),
+    routingSummary: {
+      total: allDiagRouting.length,
+      uniqueModels: routingUniqueModels.size
+    },
+    recentRouting: allDiagRouting.slice(0, 20).map(({ createdAt: _ca, ...rest }) => rest)
   };
 
   const desktopConvCount = Math.max(desktopJobs.length, desktopSessionFiles);
@@ -5507,7 +6952,9 @@ export async function collectTokenHistory(options = {}) {
     quotaState: toStableQuotaState(host.quotaStatus),
     uiPreferences: stableUiPrefs,
     dailyMapBySource: dailyBySource,
-    analyticsBySource
+    hourlyBySource,
+    analyticsBySource,
+    diagnostics
   });
 
   const result = {
@@ -5524,7 +6971,9 @@ export async function collectTokenHistory(options = {}) {
     quotaStatus: host.quotaStatus,
     uiPreferences: rawSettings.uiPreferences || {},
     dailyMapBySource: dailyBySource,
+    hourlyBySource,
     analyticsBySource,
+    diagnostics,
     presets: {
       regions: SUBSCRIPTION_REGIONS_PRESET,
       acquisitions: SUBSCRIPTION_ACQUISITION_PRESETS,

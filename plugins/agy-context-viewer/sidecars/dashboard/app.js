@@ -63,6 +63,8 @@
     // History view controls
     sourceFilter: 'all',
     chartMode: 'daily',
+    hourlyDay: 'today', // 'today' | 'yesterday'
+    diagTab: 'events', // 'events' | 'routing'
     heatPageOffset: 0,
     selectedBucketKey: '',
 
@@ -70,6 +72,8 @@
     costScope: 'period',
     costMode: 'hybrid',
     turnsFilter: 'all', // 'all' | 'spike' | 'tools'
+    turnsView: 'steps', // 'steps' | 'prompts'
+    promptTurnsFilter: 'all', // 'all' | 'cold'
 
     // Appearance & gauge preferences
     ui: {
@@ -697,6 +701,41 @@
     }
 
     setText('conv-live-title', snap.conversationTitle || `会话 ${snap.conversationId || ''}`);
+    const repoChip = $('conv-repo-chip');
+    if (repoChip) {
+      const repoLabel = snap.repoInfo?.label ? String(snap.repoInfo.label).trim() : '';
+      if (repoLabel) {
+        repoChip.classList.remove('hidden');
+        setText(repoChip, repoLabel);
+        const repoTip = snap.repoInfo?.branch
+          ? `当前 Git 仓库：${snap.repoInfo.name || repoLabel}（分支 ${snap.repoInfo.branch}）`
+          : `当前工作区仓库：${repoLabel}`;
+        repoChip.setAttribute('title', formatZh(repoTip));
+      } else {
+        repoChip.classList.add('hidden');
+        setText(repoChip, '');
+      }
+    }
+    const branchBadge = $('conv-branch-badge');
+    if (branchBadge) {
+      const br = snap.branchInfo;
+      if (br?.isBranch) {
+        branchBadge.classList.remove('hidden');
+        const kindLabel = br.kind ? `/${br.kind} 分支` : '/btw 分支';
+        setText(branchBadge, kindLabel);
+        const dedup = Number(br.deduplicatedStepsCount || 0);
+        const forkPart = br.forkStepIndex != null ? `Step ${br.forkStepIndex}` : '历史节点';
+        const parentPart = br.parentConvId ? `父会话 ${String(br.parentConvId).slice(0, 8)} 的 ` : '';
+        branchBadge.setAttribute(
+          'title',
+          formatZh(`从${parentPart}${forkPart}分叉，全局统计已自动去重 ${fmtInt(dedup)} 步前置历史`)
+        );
+      } else {
+        branchBadge.classList.add('hidden');
+        setText(branchBadge, '');
+        branchBadge.setAttribute('title', '');
+      }
+    }
     setText(
       'conv-live-steps',
       `${fmtInt(audit.turnsCount || 0)} 轮响应 · ${fmtInt(audit.totalSteps || 0)} 步 · ${fmtInt(audit.toolCallsCount || 0)} 次工具`
@@ -764,14 +803,36 @@
 
     // 4 Metric Cells
     setText('ctx-used', win.used !== null ? fmtTokens(win.used) : '--');
+    const usedSubEl = $('ctx-used-sub');
     if (win.used !== null) {
       const pendNote = ctx.pendingTokens > 0 ? ` · 待发 ~${fmtTokens(ctx.pendingTokens, 1)}` : '';
-      setText(
-        'ctx-used-sub',
-        `入 ${fmtTokens(ctx.inputTokens || 0, 1)} · 缓 ${fmtTokens(ctx.cacheTokens || 0, 1)}${pendNote}`
-      );
+      const hasPromptBase = typeof ctx.promptUsed === 'number' && Number.isFinite(ctx.promptUsed) && ctx.promptUsed > 0;
+      const hasNextMin = typeof ctx.projectedNextMin === 'number' && Number.isFinite(ctx.projectedNextMin) && ctx.projectedNextMin > 0;
+      const hasDeltaTail = (ctx.outputTokens > 0 || ctx.pendingTokens > 0) && hasPromptBase;
+      const nextMinVal = hasNextMin
+        ? ctx.projectedNextMin
+        : (hasPromptBase ? ctx.promptUsed + Number(ctx.outputTokens || 0) + Number(ctx.pendingTokens || 0) : null);
+      const nextBaseNote = hasDeltaTail && nextMinVal && nextMinVal > ctx.promptUsed
+        ? ` · 下轮底数 ${fmtTokens(nextMinVal, 1)}`
+        : '';
+      const subText = `入 ${fmtTokens(ctx.inputTokens || 0, 1)} · 缓 ${fmtTokens(ctx.cacheTokens || 0, 1)}${pendNote}${nextBaseNote}`;
+      setText('ctx-used-sub', subText);
+      if (usedSubEl) {
+        if (hasDeltaTail && nextMinVal) {
+          const pctPart = typeof ctx.projectedNextPercent === 'number' && Number.isFinite(ctx.projectedNextPercent)
+            ? `（约 ${ctx.projectedNextPercent.toFixed(1)}%）`
+            : '';
+          usedSubEl.setAttribute(
+            'title',
+            formatZh(`本轮 Prompt ${fmtTokens(ctx.promptUsed, 1)} · 含输出 / 待发底数 ${fmtTokens(nextMinVal, 1)}${pctPart}`)
+          );
+        } else {
+          usedSubEl.setAttribute('title', formatZh(subText));
+        }
+      }
     } else {
       setText('ctx-used-sub', `本地归档约 ${fmtTokens(audit.localTotal?.low || 0, 1)}~${fmtTokens(audit.localTotal?.high || 0, 1)}`);
+      usedSubEl?.setAttribute('title', '');
     }
 
     setText('ctx-budget', win.budget ? fmtTokens(win.budget) : (win.used === null ? '--' : '未知'));
@@ -797,6 +858,21 @@
     const st = ctx.sessionTotals || {};
     setText('cum-cache-overall', st.cacheHitPercent != null ? `累计缓存率 ${st.cacheHitPercent.toFixed(1)}%` : '累计缓存率 --');
     setText('cum-cache-tok', fmtTokens(st.cacheTokens || 0));
+    const cumCacheSavedEl = $('cum-cache-saved');
+    if (cumCacheSavedEl) {
+      const savedUSD = Number(ctx.sessionCacheSavingsUSD || 0);
+      if (Number.isFinite(savedUSD) && savedUSD > 0) {
+        cumCacheSavedEl.classList.remove('hidden');
+        setText(cumCacheSavedEl, `缓存已省 ${fmtUSD(savedUSD)}`);
+        cumCacheSavedEl.setAttribute(
+          'title',
+          formatZh(`较原价输入预计已节省 ${fmtUSD(savedUSD)}（约 ${fmtCNY(savedUSD)}）`)
+        );
+      } else {
+        cumCacheSavedEl.classList.add('hidden');
+        setText(cumCacheSavedEl, '');
+      }
+    }
     setText('cum-input-tok', fmtTokens(st.inputTokens || 0));
     setText('cum-output-tok', fmtTokens(st.outputTokens || 0));
     setText('cum-think-sub', `含思考 ${fmtTokens(st.thinkingTokens || 0, 1)}`);
@@ -856,11 +932,25 @@
         : `累计 -- · ${cumSummaryCost}`
     );
 
+    // Card 1.5: Swarm / Subagent Tree Aggregation
+    renderAgentTreeCard(snap.agentTree || null);
+
     // Card 2: Speed & Latency
     renderSpeedCard(spd, ctx, snap.sparkline || [], snap.quotaStatus || null);
 
     // Card 2.5: Per-Turn Timeline
-    renderTurnsTimelineCard(snap.turns || [], audit.turnsCount || 0);
+    renderTurnsTimelineCard(
+      snap.turns || [],
+      audit.turnsCount || 0,
+      snap.promptTurns || [],
+      ctx.latestPromptStartup || null
+    );
+
+    // Card 2.8: Top 10 Heavy Context Items
+    renderHeavyItemsCard(snap.heavyItems || []);
+
+    // Card 2.9: Compaction History & Summary Drawer
+    renderCompactionsCard(snap.compactions || []);
 
     // Card 3: Server Context Breakdown Details
     renderServerBreakdownCard(ctx.breakdown);
@@ -1027,13 +1117,13 @@
       }
     }
 
-    // Sparkline SVG
+    // Dual-Line Sparkline SVG (Total Context + Cache Read)
     const sparkWrap = $('spark-wrap');
     const sparkSvg = $('spark-svg');
     if (sparkWrap && sparkSvg) {
       if (sparkline.length >= 2) {
         sparkWrap.classList.remove('hidden');
-        const maxTok = Math.max(...sparkline.map((s) => s.total || 0), 1);
+        const maxTok = Math.max(...sparkline.map((s) => Math.max(Number(s.total || 0), Number(s.cache || 0))), 1);
         setText('spark-meta', `近 ${sparkline.length} 轮 · 峰值 ${fmtTokens(maxTok)}`);
 
         const W = 360;
@@ -1042,21 +1132,40 @@
         const padY = 6;
         const pts = sparkline.map((pt, i) => {
           const x = padX + (i / (sparkline.length - 1)) * (W - padX * 2);
-          const y = H - padY - ((pt.total || 0) / maxTok) * (H - padY * 2);
+          const y = H - padY - (Math.max(0, Number(pt.total || 0)) / maxTok) * (H - padY * 2);
           return { x: Number(x.toFixed(1)), y: Number(y.toFixed(1)), ...pt };
         });
+        const cachePts = sparkline.map((pt, i) => {
+          const x = padX + (i / (sparkline.length - 1)) * (W - padX * 2);
+          const val = Math.max(0, Number(pt.cache || 0));
+          const y = H - padY - (val / maxTok) * (H - padY * 2);
+          return { x: Number(x.toFixed(1)), y: Number(y.toFixed(1)), val };
+        });
+        const hasCacheLine = cachePts.some((p) => p.val > 0);
         const linePath = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ');
         const areaPath = `${linePath} L${pts[pts.length - 1].x},${H} L${pts[0].x},${H} Z`;
+        const cacheLinePath = cachePts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ');
+        const cacheAreaPath = `${cacheLinePath} L${cachePts[cachePts.length - 1].x},${H} L${cachePts[0].x},${H} Z`;
         const last = pts[pts.length - 1];
+        const lastCache = cachePts[cachePts.length - 1];
 
         sparkSvg.innerHTML =
-          `<defs><linearGradient id="spkGrad" x1="0" y1="0" x2="0" y2="1">` +
-          `<stop offset="0%" stop-color="var(--cv-accent)" stop-opacity="0.32"/>` +
+          `<defs>` +
+          `<linearGradient id="spkGrad" x1="0" y1="0" x2="0" y2="1">` +
+          `<stop offset="0%" stop-color="var(--cv-accent)" stop-opacity="0.30"/>` +
           `<stop offset="100%" stop-color="var(--cv-accent)" stop-opacity="0.02"/>` +
-          `</linearGradient></defs>` +
+          `</linearGradient>` +
+          `<linearGradient id="spkCacheGrad" x1="0" y1="0" x2="0" y2="1">` +
+          `<stop offset="0%" stop-color="var(--good)" stop-opacity="0.20"/>` +
+          `<stop offset="100%" stop-color="var(--good)" stop-opacity="0.01"/>` +
+          `</linearGradient>` +
+          `</defs>` +
           `<path d="${areaPath}" fill="url(#spkGrad)"/>` +
+          (hasCacheLine ? `<path d="${cacheAreaPath}" fill="url(#spkCacheGrad)"/>` : '') +
           `<path d="${linePath}" fill="none" stroke="var(--cv-accent)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>` +
-          `<circle cx="${last.x}" cy="${last.y}" r="2.8" fill="var(--cv-accent)"/>`;
+          (hasCacheLine ? `<path d="${cacheLinePath}" fill="none" stroke="var(--good)" stroke-width="1.35" stroke-dasharray="3.2 2.2" stroke-linecap="round" stroke-linejoin="round"/>` : '') +
+          `<circle cx="${last.x}" cy="${last.y}" r="2.8" fill="var(--cv-accent)"/>` +
+          (hasCacheLine ? `<circle cx="${lastCache.x}" cy="${lastCache.y}" r="2.2" fill="var(--good)"/>` : '');
       } else {
         sparkWrap.classList.add('hidden');
       }
@@ -1070,10 +1179,115 @@
     return d.toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
   }
 
-  function renderTurnsTimelineCard(turns = [], totalTurnsCount = 0) {
-    setText('turns-count-chip', `${fmtInt(totalTurnsCount || turns.length)} 轮`);
+  function renderTurnsTimelineCard(turns = [], totalTurnsCount = 0, promptTurns = [], latestPromptStartup = null) {
+    const viewMode = state.turnsView === 'prompts' ? 'prompts' : 'steps';
+    const effectiveTurnsCount = Number(totalTurnsCount || turns.length || 0);
+    const coldBadge = $('turns-cold-badge');
+    if (coldBadge) {
+      const isLatestCold = latestPromptStartup?.state === 'cold' && effectiveTurnsCount > 1;
+      coldBadge.classList.toggle('hidden', !isLatestCold);
+      if (isLatestCold) {
+        const pctStr = latestPromptStartup?.cacheHitPercent != null && Number.isFinite(Number(latestPromptStartup.cacheHitPercent))
+          ? `${Math.round(Number(latestPromptStartup.cacheHitPercent))}%`
+          : '0%';
+        setText(coldBadge, `本 Prompt 首跳冷启动 ${pctStr}`);
+        coldBadge.setAttribute(
+          'title',
+          formatZh(`最新 Prompt #P${latestPromptStartup.promptIndex || '?'} 首步缓存命中率仅 ${pctStr}（触发冷启动）`)
+        );
+      }
+    }
+
+    $('turns-filter-seg')?.classList.toggle('hidden', viewMode === 'prompts');
+    $('prompt-filter-seg')?.classList.toggle('hidden', viewMode !== 'prompts');
+
     const listEl = $('turns-timeline');
     if (!listEl) return;
+
+    if (viewMode === 'prompts') {
+      const safePrompts = Array.isArray(promptTurns) ? promptTurns : [];
+      setText('turns-count-chip', `${fmtInt(safePrompts.length)} 组 Prompt`);
+      setText('turns-toolbar-desc', '按用户输入分组，诊断每轮冷 / 热启动缓存命中、调用次数与上下文增量');
+
+      const filteredPrompts = state.promptTurnsFilter === 'cold'
+        ? safePrompts.filter((p) => p?.startupState === 'cold')
+        : safePrompts;
+
+      if (!filteredPrompts.length) {
+        const emptyMsg = safePrompts.length > 0
+          ? '当前筛选条件下没有匹配的 Prompt 轮次'
+          : '暂无按 Prompt 分组的轮次记录';
+        listEl.innerHTML = `<div class="kv-row"><span class="muted">${escZh(emptyMsg)}</span></div>`;
+        return;
+      }
+
+      listEl.innerHTML = filteredPrompts.map((p) => {
+        const st = p.startupState;
+        const pctNum = p.startupCacheHitPercent != null && Number.isFinite(Number(p.startupCacheHitPercent))
+          ? Math.round(Number(p.startupCacheHitPercent))
+          : null;
+        const pctSuffix = pctNum !== null ? ` ${pctNum}%` : '';
+        let startupPillHtml = `<span class="startup-pill neutral">${escZh('首轮')}</span>`;
+        if (st === 'hot') {
+          startupPillHtml = `<span class="startup-pill hot" title="首步缓存高度命中">${escZh(`热启动${pctSuffix}`)}</span>`;
+        } else if (st === 'warm') {
+          startupPillHtml = `<span class="startup-pill warm" title="首步部分命中缓存">${escZh(`部分缓存${pctSuffix}`)}</span>`;
+        } else if (st === 'cold') {
+          startupPillHtml = `<span class="startup-pill cold" title="首步缓存未命中或偏低（冷启动）">${escZh(`冷启动${pctSuffix}`)}</span>`;
+        }
+
+        const delta = Number(p.deltaTokens || 0);
+        const sign = delta >= 0 ? '+' : '-';
+        const deltaCls = delta < -1000 ? 'compact' : delta >= 8000 ? 'spike' : '';
+        const deltaStr = `${sign}${fmtTokens(Math.abs(delta), 1)}`;
+        const timeStr = fmtLocalTime(p.createdAt);
+        const previewText = p.promptPreview ? String(p.promptPreview) : '（无用户输入摘要）';
+        const fullText = p.promptFull ? String(p.promptFull) : previewText;
+
+        const modelChip = p.model ? `<span class="turn-chip">${esc(p.model)}</span>` : '';
+        const speedParts = [];
+        if (p.ttft != null) speedParts.push(`首字 ${p.ttft}s`);
+        if (p.avgTps != null) speedParts.push(`均速 ${p.avgTps} tok/s`);
+        const speedChip = speedParts.length
+          ? `<span class="turn-chip speed">${escZh(speedParts.join(' · '))}</span>`
+          : '';
+        const costChip = p.costUSD > 0
+          ? `<span class="turn-chip cost" title="本轮 Prompt 累计 API 等值参考">${esc(fmtUSD(p.costUSD))}</span>`
+          : '';
+        const toolsHtml = (p.tools || []).map((toolName) =>
+          `<span class="turn-chip tool">${esc(toolName)}</span>`
+        ).join('');
+
+        return (
+          `<div class="turn-item">` +
+          `<div class="turn-top">` +
+          `<span class="turn-top-left">` +
+          `<span class="turn-idx">${esc(`#P${p.promptIndex ?? '?'}`)}</span>` +
+          startupPillHtml +
+          `<span class="turn-chip">${escZh(`${fmtInt(p.callsCount || 0)} 次调用`)}</span>` +
+          `</span>` +
+          `<span class="turn-ctx-group">` +
+          `<span class="turn-ctx-num">${esc(`${fmtInt(p.endTokens || 0)} tok`)}</span>` +
+          `<span class="delta-tag ${deltaCls}" title="较上一组 Prompt 结束窗口变化">${esc(deltaStr)}</span>` +
+          `</span>` +
+          `</div>` +
+          `<div class="prompt-preview-line" title="${esc(fullText)}">${esc(previewText)}</div>` +
+          `<div class="turn-meta-row">` +
+          (timeStr ? `<span>${esc(timeStr)}</span><span>·</span>` : '') +
+          `<span>${escZh(`输出 ${fmtTokens(p.outputTokens || 0, 1)}`)}</span>` +
+          modelChip +
+          speedChip +
+          costChip +
+          toolsHtml +
+          `</div>` +
+          `</div>`
+        );
+      }).join('');
+      return;
+    }
+
+    setText('turns-count-chip', `${fmtInt(totalTurnsCount || turns.length)} 轮`);
+    setText('turns-toolbar-desc', '倒序展示最近 40 轮上下文涨跌（Δ）、缓存率、单轮耗时与调用工具');
 
     let filtered = turns;
     if (state.turnsFilter === 'spike') {
@@ -1133,6 +1347,63 @@
     }).join('');
   }
 
+  function renderHeavyItemsCard(heavyItems = []) {
+    const card = $('heavy-card');
+    const list = $('heavy-items-list');
+    if (!card || !list) return;
+
+    const items = Array.isArray(heavyItems) ? heavyItems.filter(Boolean).slice(0, 10) : [];
+    if (!items.length) {
+      card.classList.add('hidden');
+      setText('heavy-count-chip', '0 项');
+      list.innerHTML = '';
+      return;
+    }
+
+    card.classList.remove('hidden');
+    const sumTok = items.reduce((acc, it) => acc + Number(it.estTokens || 0), 0);
+    setText('heavy-count-chip', `${items.length} 项 · 约 ${fmtTokens(sumTok, 1)}`);
+
+    const kindMap = {
+      tool: { text: '工具', cls: 'tool' },
+      user: { text: '用户', cls: 'user' },
+      assistant: { text: '回复', cls: 'assistant' },
+      thinking: { text: '思考', cls: 'thinking' },
+      checkpoint: { text: '摘要', cls: 'checkpoint' }
+    };
+    const maxTok = Math.max(...items.map((it) => Number(it.estTokens || 0)), 1);
+
+    list.innerHTML = items.map((it, idx) => {
+      const rank = it.rank ?? (idx + 1);
+      const km = kindMap[it.kind] || { text: it.kind || '其他', cls: 'other' };
+      const estTok = Number(it.estTokens || 0);
+      const sharePct = it.sharePercent != null && Number.isFinite(Number(it.sharePercent))
+        ? Number(it.sharePercent)
+        : null;
+      const barW = Math.max(2, Math.min(100, (estTok / maxTok) * 100)).toFixed(1);
+      const stepNote = it.stepIndex != null ? `Step ${it.stepIndex}` : '';
+      const charsNote = it.chars > 0 ? `${fmtInt(it.chars)} 字符` : '';
+      const metaTip = [stepNote, charsNote].filter(Boolean).join(' · ');
+      const shareStr = sharePct !== null ? ` (${sharePct.toFixed(1)}%)` : '';
+      const preview = it.preview ? String(it.preview).trim() : '';
+
+      return (
+        `<div class="heavy-item" title="${escZh(metaTip)}">` +
+        `<div class="heavy-item-top">` +
+        `<span class="heavy-left">` +
+        `<span class="heavy-rank num">#${esc(rank)}</span>` +
+        `<span class="heavy-kind-tag ${km.cls}">${escZh(km.text)}</span>` +
+        `<span class="heavy-label" title="${esc(it.label || '')}">${esc(it.label || '未命名步骤')}</span>` +
+        `</span>` +
+        `<span class="heavy-val num-strong">${escZh(`~${fmtTokens(estTok, 1)} tok${shareStr}`)}</span>` +
+        `</div>` +
+        `<div class="heavy-bar-track"><div class="heavy-bar-fill ${km.cls}" style="width:${barW}%"></div></div>` +
+        (preview ? `<div class="heavy-preview" title="${esc(preview)}">${esc(preview)}</div>` : '') +
+        `</div>`
+      );
+    }).join('');
+  }
+
   function renderServerBreakdownCard(bd) {
     const card = $('breakdown-card');
     const list = $('breakdown-groups');
@@ -1185,6 +1456,13 @@
       ['归档步数 / 模型请求轮数', `${fmtInt(audit.totalSteps)} 步 / ${fmtInt(audit.turnsCount)} 轮`],
       ['累计工具调用次数', `${fmtInt(audit.toolCallsCount)} 次`]
     ];
+    if (snap.sessionDiagnostics && (snap.sessionDiagnostics.eventsCount > 0 || snap.sessionDiagnostics.routingCount > 0)) {
+      const sd = snap.sessionDiagnostics;
+      reqRows.push([
+        '本会话取证记录',
+        `异常 ${fmtInt(sd.eventsCount || 0)} 条 · 灰度路由 ${fmtInt(sd.routingCount || 0)} 次（${sd.sqliteUsed ? 'SQLite' : 'Transcript'}）`
+      ]);
+    }
 
     const reqKv = $('req-kv');
     if (reqKv) {
@@ -1244,6 +1522,175 @@
     }
   }
 
+  function renderAgentTreeCard(agentTree) {
+    const card = $('agent-tree-card');
+    const list = $('agent-tree-list');
+    if (!card || !list) return;
+
+    if (!agentTree) {
+      card.classList.add('hidden');
+      setText('agent-tree-chip', '0 个子代理');
+      const titleEl = $('agent-tree-title');
+      if (titleEl) {
+        titleEl.classList.add('hidden');
+        setText(titleEl, '');
+      }
+      list.innerHTML = '';
+      return;
+    }
+
+    card.classList.remove('hidden');
+    const children = Array.isArray(agentTree.children) ? agentTree.children.filter(Boolean) : [];
+    const childrenCount = Number(agentTree.childrenCount ?? children.length ?? 0);
+    const activeCount = Number(agentTree.activeChildrenCount ?? 0);
+    const totals = agentTree.treeTotals || {};
+    const totTokens = Number(totals.totalTokens || 0);
+    const totCost = Number(totals.costUSD || 0);
+    const totSaved = Number(totals.cacheSavingsUSD || 0);
+    const totTurns = Number(totals.turnsCount || 0);
+
+    const titleEl = $('agent-tree-title');
+    if (titleEl) {
+      const swarmTitle = agentTree.isSwarm && agentTree.swarmTitle ? String(agentTree.swarmTitle).trim() : '';
+      if (swarmTitle) {
+        titleEl.classList.remove('hidden');
+        setText(titleEl, swarmTitle);
+        titleEl.setAttribute('title', formatZh(`Swarm 协作任务：${swarmTitle}`));
+      } else {
+        titleEl.classList.add('hidden');
+        setText(titleEl, '');
+      }
+    }
+
+    const chipEl = $('agent-tree-chip');
+    setText('agent-tree-chip', `含 ${fmtInt(childrenCount)} 个子代理 · 总计 ${fmtTokens(totTokens, 1)} · ${fmtUSD(totCost)}`);
+    if (chipEl) {
+      const tipParts = [
+        agentTree.isSwarm && agentTree.swarmTitle ? `Swarm：${agentTree.swarmTitle}` : '',
+        `活跃 ${fmtInt(activeCount)} / 共 ${fmtInt(childrenCount)} 个子代理`,
+        `整树 ${fmtInt(totTurns)} 轮`
+      ].filter(Boolean);
+      chipEl.setAttribute('title', formatZh(tipParts.join(' · ')));
+    }
+
+    setText('agent-tree-total-tok', fmtTokens(totTokens));
+    setText(
+      'agent-tree-total-sub',
+      `${fmtInt(totTurns)} 轮 · 入 ${fmtTokens(totals.inputTokens || 0, 1)} / 缓 ${fmtTokens(totals.cacheTokens || 0, 1)}`
+    );
+    setText('agent-tree-total-cost', fmtUSD(totCost));
+    setText('agent-tree-total-cny', `约 ${fmtCNY(totCost)}`);
+    setText('agent-tree-cache-saved', fmtUSD(totSaved));
+    setText('agent-tree-cache-sub', totSaved > 0 ? `约 ${fmtCNY(totSaved)}` : `缓存 ${fmtTokens(totals.cacheTokens || 0, 1)}`);
+
+    if (!children.length) {
+      list.innerHTML = `<div class="kv-row"><span class="muted">${escZh('当前暂无子代理执行明细')}</span></div>`;
+      return;
+    }
+
+    const stateMap = {
+      working: { text: '运行中', cls: 'good' },
+      running: { text: '运行中', cls: 'good' },
+      active: { text: '运行中', cls: 'good' },
+      waiting: { text: '待命', cls: 'neutral' },
+      idle: { text: '待命', cls: 'neutral' },
+      done: { text: '已完成', cls: 'good' },
+      completed: { text: '已完成', cls: 'good' },
+      stopped: { text: '已停止', cls: 'neutral' },
+      killed: { text: '已结束', cls: 'neutral' },
+      error: { text: '异常', cls: 'danger' },
+      failed: { text: '失败', cls: 'danger' }
+    };
+
+    list.innerHTML = children.map((c) => {
+      const name = c.name || (c.id ? String(c.id).slice(0, 8) : '未命名子代理');
+      const roleChip = c.role ? `<span class="turn-chip">${escZh(c.role)}</span>` : '';
+      const rawState = String(c.state || '').toLowerCase();
+      const stInfo = stateMap[rawState] || { text: c.state || '未知', cls: 'neutral' };
+      const modelChip = c.model ? `<span class="turn-chip">${esc(c.model)}</span>` : '';
+      const savedHtml = Number(c.cacheSavingsUSD || 0) > 0
+        ? `<span class="good-text">${escZh(`省 ${fmtUSD(c.cacheSavingsUSD)}`)}</span>`
+        : '';
+      return (
+        `<div class="agent-tree-row">` +
+        `<div class="agent-tree-top">` +
+        `<span class="agent-tree-left">` +
+        `<span class="agent-tree-name">${esc(name)}</span>` +
+        roleChip +
+        `<span class="status-pill ${stInfo.cls}">${escZh(stInfo.text)}</span>` +
+        `</span>` +
+        `<span class="agent-tree-right">` +
+        `<strong>${esc(fmtTokens(c.totalTokens || 0, 1))}</strong>` +
+        `<span class="muted">${esc(fmtUSD(c.costUSD || 0))}</span>` +
+        `</span>` +
+        `</div>` +
+        `<div class="agent-tree-meta">` +
+        `<span>${escZh(`${fmtInt(c.turnsCount || 0)} 轮`)}</span>` +
+        modelChip +
+        savedHtml +
+        `</div>` +
+        `</div>`
+      );
+    }).join('');
+  }
+
+  function renderCompactionsCard(compactions = []) {
+    const card = $('compactions-card');
+    const list = $('compactions-list');
+    if (!card || !list) return;
+
+    const items = Array.isArray(compactions) ? compactions.filter(Boolean) : [];
+    if (!items.length) {
+      card.classList.add('hidden');
+      setText('compactions-count-chip', '0 次压缩');
+      list.innerHTML = '';
+      return;
+    }
+
+    card.classList.remove('hidden');
+    const totalSaved = items.reduce((acc, c) => acc + Number(c.savedTokens || 0), 0);
+    setText('compactions-count-chip', `${fmtInt(items.length)} 次压缩`);
+    $('compactions-count-chip')?.setAttribute(
+      'title',
+      formatZh(`累计释放约 ${fmtTokens(totalSaved, 1)} Token 上下文窗口`)
+    );
+
+    list.innerHTML = items.map((c, idx) => {
+      const cIdx = c.index ?? (items.length - idx);
+      const beforeTok = Number(c.beforeTokens || 0);
+      const afterTok = Number(c.afterTokens || 0);
+      const savedTok = Number(c.savedTokens ?? Math.max(0, beforeTok - afterTok));
+      const savedPct = c.savedPercent != null && Number.isFinite(Number(c.savedPercent))
+        ? Number(c.savedPercent)
+        : (beforeTok > 0 ? (savedTok / beforeTok) * 100 : 0);
+      const timeStr = fmtLocalTime(c.createdAt);
+      const stepStr = c.stepIndex != null ? `Step ${c.stepIndex}` : '';
+      const preview = c.summaryPreview ? String(c.summaryPreview).trim() : '（点击展开查看压缩摘要原文）';
+      const full = c.summaryFull ? String(c.summaryFull) : preview;
+
+      return (
+        `<div class="compaction-item">` +
+        `<div class="compaction-top">` +
+        `<span class="turn-top-left">` +
+        `<span class="turn-idx">${esc(`#C${cIdx}`)}</span>` +
+        `<span class="num">${esc(`${fmtTokens(beforeTok, 1)} → ${fmtTokens(afterTok, 1)}`)}</span>` +
+        `</span>` +
+        `<span class="delta-tag compact" title="${escZh(`本次释放 ${fmtInt(savedTok)} Token`)}">${esc(`-${fmtTokens(savedTok, 1)} (-${savedPct.toFixed(0)}%)`)}</span>` +
+        `</div>` +
+        `<div class="compaction-meta">` +
+        (timeStr ? `<span>${esc(timeStr)}</span>` : '') +
+        (timeStr && stepStr ? `<span>·</span>` : '') +
+        (stepStr ? `<span>${esc(stepStr)}</span>` : '') +
+        `</div>` +
+        `<details class="compaction-details">` +
+        `<summary class="compaction-summary-toggle"><span class="compaction-preview-text">${esc(preview)}</span></summary>` +
+        `<pre class="compaction-summary">${esc(full)}</pre>` +
+        `</details>` +
+        `</div>`
+      );
+    }).join('');
+  }
+
   // -------------------------------------------------------------------------
   // TAB 2: Token History & Interactive Multi-View Charts
   // -------------------------------------------------------------------------
@@ -1299,8 +1746,13 @@
     // Render active chart view
     const navRow = $('heat-nav-row');
     if (navRow) navRow.classList.toggle('hidden', state.chartMode !== 'daily');
+    const hourlyRow = $('hourly-day-row');
+    if (hourlyRow) hourlyRow.classList.toggle('hidden', state.chartMode !== 'hourly');
 
-    if (state.chartMode === 'daily') {
+    if (state.chartMode === 'hourly') {
+      const hourlyObj = hist.hourlyBySource?.[srcKey] || hist.hourlyBySource?.all || null;
+      renderHourlyBars(hourlyObj, hist);
+    } else if (state.chartMode === 'daily') {
       renderDailyHeatmap(dailyMap, hist);
     } else if (state.chartMode === 'weekly') {
       renderWeeklyBars(dailyMap, hist);
@@ -1311,6 +1763,8 @@
     } else if (state.chartMode === 'cumulative') {
       renderCumulativeCurve(dailyMap, hist);
     }
+
+    renderDiagnosticsCard(hist.diagnostics || null);
   }
 
   function parseLocalDate(ymd) {
@@ -1356,14 +1810,43 @@
     if (!box) return;
     if (!rec || !rec.total) {
       box.innerHTML =
+        `<div class="inspector-main">` +
         `<span><strong>${escZh(title)}</strong></span>` +
-        `<span class="muted">${escZh('当日 / 区间无 Token 消耗记录')}</span>`;
+        `<span class="muted">${escZh('当日 / 区间无 Token 消耗记录')}</span>` +
+        `</div>`;
       return;
     }
     const usd = rec.costUSD > 0 ? rec.costUSD : rec.refCostUSD;
+    const byModel = Array.isArray(rec.byModel)
+      ? rec.byModel.filter((m) => m && m.name && Number(m.tokens || 0) > 0).slice(0, 4)
+      : [];
+    let modelsRowHtml = '';
+    if (byModel.length) {
+      const denom = Math.max(1, Number(rec.total || 0), byModel.reduce((s, m) => s + Number(m.tokens || 0), 0));
+      const chips = byModel.map((m) => {
+        const tok = Number(m.tokens || 0);
+        const share = Math.round((tok / denom) * 100);
+        const tipParts = [
+          m.name,
+          `${fmtTokens(tok, 1)} tok (${share}%)`,
+          m.steps ? `${fmtInt(m.steps)} 次` : '',
+          m.costUSD > 0 ? `约 ${fmtUSD(m.costUSD)}` : ''
+        ].filter(Boolean);
+        return (
+          `<span class="inspector-model-chip" title="${escZh(tipParts.join(' · '))}">` +
+          `<span class="inspector-model-name">${escZh(m.name)}</span>` +
+          `<span class="num muted">${escZh(`${fmtTokens(tok, 1)} (${share}%)`)}</span>` +
+          `</span>`
+        );
+      }).join('');
+      modelsRowHtml = `<div class="inspector-models-row">${chips}</div>`;
+    }
     box.innerHTML =
+      `<div class="inspector-main">` +
       `<span><strong>${escZh(title)}</strong> · ${escZh(`总计 ${fmtTokens(rec.total)} (${fmtInt(rec.steps || 0)} 次)`)}</span>` +
-      `<span class="muted num">${escZh(`输入 ${fmtTokens(rec.input, 1)} / 缓存 ${fmtTokens(rec.cache, 1)} / 输出 ${fmtTokens(rec.output, 1)} · 约 ${fmtUSD(usd)} (${fmtCNY(usd)})`)}</span>`;
+      `<span class="muted num">${escZh(`输入 ${fmtTokens(rec.input, 1)} / 缓存 ${fmtTokens(rec.cache, 1)} / 输出 ${fmtTokens(rec.output, 1)} · 约 ${fmtUSD(usd)} (${fmtCNY(usd)})`)}</span>` +
+      `</div>` +
+      modelsRowHtml;
   }
 
   function updateSummaryRibbon(stats, planStatus, monthsSpan = 1) {
@@ -1512,10 +1995,12 @@
             agg.steps += rec.steps;
             agg.costUSD += rec.costUSD;
             agg.refCostUSD += rec.refCostUSD;
+            mergeDayByModel(agg, rec);
           }
         }
         cur.setDate(cur.getDate() + 1);
       }
+      finalizeAggByModel(agg);
       buckets.push({
         key: `${toYmd(ws)} ~ ${toYmd(we > today ? today : we)}`,
         shortLabel: `${ws.getMonth() + 1}/${ws.getDate()}`,
@@ -1524,6 +2009,37 @@
     }
 
     renderBarBuckets(stage, buckets, dailyMap, hist, 6);
+  }
+
+  function mergeDayByModel(agg, rec) {
+    if (!Array.isArray(rec?.byModel) || !rec.byModel.length) return;
+    if (!agg._modelMap) agg._modelMap = new Map();
+    for (const m of rec.byModel) {
+      if (!m || !m.name) continue;
+      const prev = agg._modelMap.get(m.name) || { name: m.name, tokens: 0, steps: 0, costUSD: 0 };
+      prev.tokens += Number(m.tokens || 0);
+      prev.steps += Number(m.steps || 0);
+      prev.costUSD += Number(m.costUSD || 0);
+      agg._modelMap.set(m.name, prev);
+    }
+  }
+
+  function finalizeAggByModel(agg) {
+    if (!agg._modelMap || !agg._modelMap.size) {
+      agg.byModel = [];
+      return agg;
+    }
+    agg.byModel = [...agg._modelMap.values()]
+      .sort((a, b) => b.tokens - a.tokens)
+      .slice(0, 6)
+      .map((m) => ({
+        name: m.name,
+        tokens: m.tokens,
+        steps: m.steps,
+        costUSD: Number(m.costUSD.toFixed(6))
+      }));
+    delete agg._modelMap;
+    return agg;
   }
 
   function renderMonthlyBars(dailyMap, hist) {
@@ -1545,8 +2061,10 @@
           agg.steps += rec.steps;
           agg.costUSD += rec.costUSD;
           agg.refCostUSD += rec.refCostUSD;
+          mergeDayByModel(agg, rec);
         }
       }
+      finalizeAggByModel(agg);
       buckets.push({
         key: `${ym} 自然月`,
         shortLabel: `${d.getMonth() + 1}月`,
@@ -1619,8 +2137,10 @@
           agg.steps += rec.steps;
           agg.costUSD += rec.costUSD;
           agg.refCostUSD += rec.refCostUSD;
+          mergeDayByModel(agg, rec);
         }
       }
+      finalizeAggByModel(agg);
       months.push({ m, key: `${year} 年 ${m} 月`, agg });
     }
 
@@ -1732,8 +2252,10 @@
       }
       const dayTok = pt.dayRec?.total ? `当日 +${fmtTokens(pt.dayRec.total)}` : '当日无新增';
       box.innerHTML =
+        `<div class="inspector-main">` +
         `<span><strong>${escZh(`截至 ${pt.key}`)}</strong> · ${escZh(`累计 ${fmtTokens(pt.cumTokens)}`)}</span>` +
-        `<span class="muted num">${escZh(`${dayTok} · 累计折算 ${fmtUSD(pt.cumCost)} (${fmtCNY(pt.cumCost)})`)}</span>`;
+        `<span class="muted num">${escZh(`${dayTok} · 累计折算 ${fmtUSD(pt.cumCost)} (${fmtCNY(pt.cumCost)})`)}</span>` +
+        `</div>`;
     };
 
     showPoint(last);
@@ -1752,6 +2274,265 @@
       hist.planStatus,
       Math.max(1, Math.ceil(series.length / 30))
     );
+  }
+
+  function renderHourlyBars(hourlyObj, hist) {
+    const stage = $('chart-stage');
+    if (!stage) return;
+
+    const dayKey = state.hourlyDay === 'yesterday' ? 'yesterday' : 'today';
+    const dayLabel = dayKey === 'yesterday' ? '昨日' : '今日';
+    document.querySelectorAll('#hourly-day-seg .seg-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.hday === dayKey);
+    });
+
+    let dateLabel = hist?.todayKey || '';
+    if (dayKey === 'yesterday' && hist?.todayKey) {
+      const yDt = parseLocalDate(hist.todayKey);
+      yDt.setDate(yDt.getDate() - 1);
+      dateLabel = toYmd(yDt);
+    }
+    setText('hourly-range-label', dateLabel ? `${dayLabel}（${dateLabel}）· 00:00–23:59` : `${dayLabel} · 00:00–23:59`);
+
+    const rawList = Array.isArray(hourlyObj?.[dayKey]) ? hourlyObj[dayKey] : [];
+    const byHour = new Map();
+    for (let i = 0; i < rawList.length; i++) {
+      const item = rawList[i];
+      if (!item || typeof item !== 'object') continue;
+      const h = item.hour != null && Number.isFinite(Number(item.hour)) ? Number(item.hour) : i;
+      if (h >= 0 && h < 24) byHour.set(h, item);
+    }
+
+    const buckets = [];
+    let sumTok = 0;
+    let sumCost = 0;
+    let lastActiveIdx = -1;
+    for (let h = 0; h < 24; h++) {
+      const r = byHour.get(h) || {};
+      const total = Number(r.total || 0);
+      const input = Number(r.input || 0);
+      const cache = Number(r.cache || 0);
+      const output = Number(r.output || 0);
+      const steps = Number(r.steps || 0);
+      const costUSD = Number(r.costUSD || 0);
+      const refCostUSD = Number(r.refCostUSD ?? costUSD);
+      const agg = {
+        total,
+        input,
+        cache,
+        output,
+        steps,
+        costUSD,
+        refCostUSD,
+        byModel: Array.isArray(r.byModel) ? r.byModel : []
+      };
+      sumTok += total;
+      sumCost += costUSD > 0 ? costUSD : refCostUSD;
+      if (total > 0) lastActiveIdx = h;
+      const hh = String(h).padStart(2, '0');
+      buckets.push({
+        hour: h,
+        key: `${dayLabel} ${hh}:00–${hh}:59`,
+        shortLabel: hh,
+        agg
+      });
+    }
+
+    const defaultIdx = lastActiveIdx >= 0
+      ? lastActiveIdx
+      : (dayKey === 'today' ? Math.min(23, Math.max(0, new Date().getHours())) : 23);
+    const maxVal = Math.max(...buckets.map((b) => b.agg.total), 1);
+
+    stage.innerHTML = `<div class="bar-chart bar-chart-hourly">${buckets.map((b, idx) => {
+      const hPct = b.agg.total > 0 ? Math.max(4, (b.agg.total / maxVal) * 100) : 2;
+      const showLbl = idx % 3 === 0 || idx === 23;
+      return (
+        `<div class="bar-col${idx === defaultIdx ? ' selected' : ''}" data-hidx="${idx}" title="${escZh(`${b.key}：${fmtTokens(b.agg.total)}`)}">` +
+        `<div class="bar-pillar" style="height:${hPct.toFixed(1)}%"></div>` +
+        `<span class="bar-lbl">${showLbl ? esc(b.shortLabel) : ''}</span>` +
+        `</div>`
+      );
+    }).join('')}</div>`;
+
+    stage.querySelectorAll('.bar-col').forEach((col) => {
+      const trigger = (lock) => {
+        const b = buckets[Number(col.dataset.hidx)];
+        if (!b) return;
+        if (lock) {
+          stage.querySelectorAll('.bar-col.selected').forEach((n) => n.classList.remove('selected'));
+          col.classList.add('selected');
+        }
+        updateInspector(b.key, b.agg);
+      };
+      col.addEventListener('mouseenter', () => trigger(false));
+      col.addEventListener('click', () => trigger(true));
+    });
+
+    const defBucket = buckets[defaultIdx];
+    if (defBucket) updateInspector(defBucket.key, defBucket.agg);
+
+    updateSummaryRibbon(
+      { totalTokens: sumTok, costUSD: sumCost, calendarDays: 1, activeDays: sumTok > 0 ? 1 : 0 },
+      hist?.planStatus,
+      1
+    );
+  }
+
+  function fmtDiagTime(isoStr, fallbackDate = '') {
+    if (isoStr) {
+      const d = new Date(isoStr);
+      if (!Number.isNaN(d.getTime())) {
+        const mo = String(d.getMonth() + 1).padStart(2, '0');
+        const da = String(d.getDate()).padStart(2, '0');
+        const hh = String(d.getHours()).padStart(2, '0');
+        const mm = String(d.getMinutes()).padStart(2, '0');
+        return `${mo}-${da} ${hh}:${mm}`;
+      }
+    }
+    return fallbackDate || '--';
+  }
+
+  function renderDiagnosticsCard(diag) {
+    const strip = $('diag-summary-strip');
+    const list = $('diagnostics-list');
+    if (!strip || !list) return;
+
+    const evSum = diag?.eventsSummary || {
+      total: 0,
+      safetyFilter: 0,
+      safetyWastedUSD: 0,
+      quota429: 0,
+      upstreamRetry: 0,
+      contextOverflow: 0
+    };
+    const rtSum = diag?.routingSummary || { total: 0, uniqueModels: 0 };
+    const totalEvents = Number(evSum.total || 0);
+    const totalRouting = Number(rtSum.total || 0);
+    const totalAll = totalEvents + totalRouting;
+
+    setText('diag-source-chip', diag?.sqliteEnabled ? 'SQLite 只读增强' : 'Transcript 模式');
+    setText('diag-count-chip', totalAll > 0 ? `共 ${fmtInt(totalAll)} 条` : '运行平稳 · 0 异常');
+
+    const q429 = Number(evSum.quota429 || 0);
+    const safetyCnt = Number(evSum.safetyFilter || 0);
+    const safetyWaste = Number(evSum.safetyWastedUSD || 0);
+    const retryCnt = Number(evSum.upstreamRetry || 0);
+    const overflowCnt = Number(evSum.contextOverflow || 0);
+
+    const pills = [
+      {
+        cls: q429 > 0 ? 'warn' : 'neutral',
+        text: `429 限流 ${fmtInt(q429)}`,
+        tip: '上游或配额池触发 429 限流次数'
+      },
+      {
+        cls: safetyCnt > 0 ? 'danger' : 'neutral',
+        text: `安全过滤 ${fmtInt(safetyCnt)} · 浪费 ${fmtUSD(safetyWaste)}`,
+        tip: `安全过滤中断次数及预计浪费折算成本（约 ${fmtCNY(safetyWaste)}）`
+      },
+      {
+        cls: retryCnt > 0 || overflowCnt > 0 ? 'warn' : 'neutral',
+        text: `上游重试 ${fmtInt(retryCnt)}`,
+        tip: overflowCnt > 0 ? `上游重试 ${fmtInt(retryCnt)} 次 · 上下文溢出 ${fmtInt(overflowCnt)} 次` : '上游超时或服务波动自动重试次数'
+      },
+      {
+        cls: totalRouting > 0 ? 'accent' : 'neutral',
+        text: `灰度路由 ${fmtInt(totalRouting)}`,
+        tip: rtSum.uniqueModels > 0 ? `涉及 ${fmtInt(rtSum.uniqueModels)} 个模型路由变化` : '请求模型与实际响应模型不一致的路由记录'
+      }
+    ];
+    strip.innerHTML = pills.map((p) =>
+      `<span class="diag-summary-pill ${p.cls}" title="${escZh(p.tip)}">${escZh(p.text)}</span>`
+    ).join('');
+
+    const activeTab = state.diagTab === 'routing' ? 'routing' : 'events';
+    document.querySelectorAll('#diag-tab-seg .seg-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.dtab === activeTab);
+    });
+
+    if (activeTab === 'routing') {
+      const routing = Array.isArray(diag?.recentRouting) ? diag.recentRouting.filter(Boolean) : [];
+      setText(
+        'diag-toolbar-meta',
+        rtSum.uniqueModels > 0
+          ? `共 ${fmtInt(totalRouting || routing.length)} 次 · 涉及 ${fmtInt(rtSum.uniqueModels)} 个模型`
+          : `共 ${fmtInt(totalRouting || routing.length)} 次路由变化`
+      );
+      if (!routing.length) {
+        list.innerHTML = `<div class="kv-row"><span class="muted">${escZh('暂未检测到服务端灰度路由或模型回退记录')}</span></div>`;
+        return;
+      }
+      list.innerHTML = routing.map((r) => {
+        const title = r.convTitle || (r.convId ? String(r.convId).slice(0, 8) : '未知会话');
+        const stepPart = r.stepIndex != null ? `Step ${r.stepIndex}` : '';
+        const timePart = r.date || '--';
+        const reasonPart = r.reason ? `<div class="diag-detail">${escZh(r.reason)}</div>` : '';
+        return (
+          `<div class="diag-item">` +
+          `<div class="diag-item-top">` +
+          `<span class="diag-item-left">` +
+          `<span class="status-pill neutral">${escZh('灰度路由')}</span>` +
+          `<span class="diag-route-arrow">${esc(r.requestedModel || '--')} → ${esc(r.respondedModel || '--')}</span>` +
+          `</span>` +
+          `<span class="muted xs num">${esc(timePart)}${stepPart ? ` · ${esc(stepPart)}` : ''}</span>` +
+          `</div>` +
+          `<div class="diag-item-meta">` +
+          `<span class="diag-item-title" title="${esc(title)}">${esc(title)}</span>` +
+          `</div>` +
+          reasonPart +
+          `</div>`
+        );
+      }).join('');
+      return;
+    }
+
+    const events = Array.isArray(diag?.recentEvents) ? diag.recentEvents.filter(Boolean) : [];
+    setText(
+      'diag-toolbar-meta',
+      overflowCnt > 0
+        ? `共 ${fmtInt(totalEvents || events.length)} 条异常 · 溢出 ${fmtInt(overflowCnt)}`
+        : `共 ${fmtInt(totalEvents || events.length)} 条异常事件`
+    );
+    if (!events.length) {
+      list.innerHTML = `<div class="kv-row"><span class="muted">${escZh('暂未检测到 429 限流、安全过滤或上游重试异常')}</span></div>`;
+      return;
+    }
+
+    const kindMap = {
+      quota_429: { text: '429 限流', cls: 'warn' },
+      rate_limit: { text: '429 限流', cls: 'warn' },
+      '429': { text: '429 限流', cls: 'warn' },
+      safety_filter: { text: '安全过滤', cls: 'danger' },
+      safety: { text: '安全过滤', cls: 'danger' },
+      upstream_retry: { text: '上游重试', cls: 'warn' },
+      retry: { text: '上游重试', cls: 'warn' },
+      context_overflow: { text: '上下文溢出', cls: 'danger' },
+      overflow: { text: '上下文溢出', cls: 'danger' }
+    };
+
+    list.innerHTML = events.map((ev) => {
+      const km = kindMap[String(ev.kind || '').toLowerCase()] || { text: ev.kind || '异常事件', cls: 'neutral' };
+      const title = ev.convTitle || (ev.convId ? String(ev.convId).slice(0, 8) : '未知会话');
+      const timeStr = fmtDiagTime(ev.createdAt, ev.date);
+      const stepPart = ev.stepIndex != null ? `Step ${ev.stepIndex}` : '';
+      const wastedHtml = Number(ev.wastedUSD || 0) > 0
+        ? `<span class="turn-chip cost">${escZh(`浪费 ${fmtUSD(ev.wastedUSD)}`)}</span>`
+        : '';
+      const detailHtml = ev.detail ? `<div class="diag-detail">${esc(ev.detail)}</div>` : '';
+      return (
+        `<div class="diag-item">` +
+        `<div class="diag-item-top">` +
+        `<span class="diag-item-left">` +
+        `<span class="status-pill ${km.cls}">${escZh(km.text)}</span>` +
+        `<span class="diag-item-title" title="${esc(title)}">${esc(title)}</span>` +
+        wastedHtml +
+        `</span>` +
+        `<span class="muted xs num">${esc(timeStr)}${stepPart ? ` · ${esc(stepPart)}` : ''}</span>` +
+        `</div>` +
+        detailHtml +
+        `</div>`
+      );
+    }).join('');
   }
 
   // -------------------------------------------------------------------------
@@ -2016,6 +2797,7 @@
     let inUSD = 0;
     let cacheUSD = 0;
     let outUSD = 0;
+    let cacheSavedUSD = 0;
     let inTok = ref.inputTokens;
     let cacheTok = ref.cacheTokens;
     let outTok = ref.outputTokens;
@@ -2025,6 +2807,7 @@
       inUSD = hyb.inputCostUSD;
       cacheUSD = hyb.cacheCostUSD;
       outUSD = hyb.outputCostUSD;
+      cacheSavedUSD = Number(hyb?.cacheSavingsUSD ?? 0);
     } else if (state.costMode === 'identified') {
       totalUSD = ident.pricedCostUSD;
       inUSD = ident.pricedInputCostUSD;
@@ -2033,11 +2816,13 @@
       inTok = ident.byCategory.inputTokens;
       cacheTok = ident.byCategory.cacheTokens;
       outTok = ident.byCategory.outputTokens;
+      cacheSavedUSD = Number(ident?.pricedCacheSavingsUSD ?? ident?.cacheSavingsUSD ?? 0);
     } else {
       totalUSD = ref.totalCostUSD;
       inUSD = ref.inputCostUSD;
       cacheUSD = ref.cacheCostUSD;
       outUSD = ref.outputCostUSD;
+      cacheSavedUSD = Number(ref?.cacheSavingsUSD ?? 0);
     }
 
     setText('cost-big-usd', fmtUSD(totalUSD));
@@ -2102,6 +2887,20 @@
     setText('cat-in-tok', `${fmtTokens(inTok)} tok`);
     setText('cat-cache-cost', fmtUSD(cacheUSD));
     setText('cat-cache-tok', `${fmtTokens(cacheTok)} tok`);
+    const catCacheSavedEl = $('cat-cache-saved');
+    if (catCacheSavedEl) {
+      if (Number.isFinite(cacheSavedUSD) && cacheSavedUSD > 0) {
+        catCacheSavedEl.classList.remove('hidden');
+        setText(catCacheSavedEl, `缓存已省 ${fmtUSD(cacheSavedUSD)}`);
+        catCacheSavedEl.setAttribute(
+          'title',
+          formatZh(`较原价输入预计节省 ${fmtUSD(cacheSavedUSD)}（约 ${fmtCNY(cacheSavedUSD)}）`)
+        );
+      } else {
+        catCacheSavedEl.classList.add('hidden');
+        setText(catCacheSavedEl, '');
+      }
+    }
     setText('cat-out-cost', fmtUSD(outUSD));
     setText('cat-out-tok', `${fmtTokens(outTok)} tok`);
 
@@ -2128,6 +2927,45 @@
             `<div class="model-row-sub">` +
             `<span>${escZh(`${fmtInt(m.requests)} 次请求 · 总计 ${fmtTokens(m.tokens)}`)}</span>` +
             `<span class="num">${escZh(`入 ${fmtTokens(m.inputTokens, 1)} / 缓 ${fmtTokens(m.cacheTokens, 1)} / 出 ${fmtTokens(m.outputTokens, 1)}`)}</span>` +
+            `</div>` +
+            `</div>`
+          );
+        }).join('');
+      }
+    }
+
+    // Project / Workspace Leaderboard (Top 10)
+    const projWrap = $('project-leaderboard-wrap');
+    const projBoard = $('project-leaderboard');
+    if (projWrap && projBoard) {
+      const projects = Array.isArray(srcAnalytics.byProject)
+        ? srcAnalytics.byProject.filter(Boolean).slice(0, 10)
+        : [];
+      if (!projects.length) {
+        projWrap.classList.add('hidden');
+        projBoard.innerHTML = '';
+      } else {
+        projWrap.classList.remove('hidden');
+        const maxProjTok = Math.max(...projects.map((p) => Number(p.tokens || 0)), 1);
+        projBoard.innerHTML = projects.map((p) => {
+          const tok = Number(p.tokens || 0);
+          const costUSD = Number(p.costUSD || 0);
+          const savedUSD = Number(p.cacheSavingsUSD || 0);
+          const wPct = Math.max(2, (tok / maxProjTok) * 100).toFixed(1);
+          const tip = `输入 ${fmtTokens(p.inputTokens || 0, 1)} / 缓存 ${fmtTokens(p.cacheTokens || 0, 1)} / 输出 ${fmtTokens(p.outputTokens || 0, 1)}${savedUSD > 0 ? ` · 缓存已省 ${fmtUSD(savedUSD)}` : ''}`;
+          const rightSub = savedUSD > 0
+            ? `<span class="num good-text">${escZh(`缓存已省 ${fmtUSD(savedUSD)}`)}</span>`
+            : `<span class="num">${escZh(`入 ${fmtTokens(p.inputTokens || 0, 1)} / 缓 ${fmtTokens(p.cacheTokens || 0, 1)} / 出 ${fmtTokens(p.outputTokens || 0, 1)}`)}</span>`;
+          return (
+            `<div class="model-row" title="${escZh(tip)}">` +
+            `<div class="model-row-top">` +
+            `<span class="model-name">${esc(p.name || '未归类工作区')}</span>` +
+            `<span class="num-strong">${escZh(`${fmtUSD(costUSD)}（${fmtCNY(costUSD)}）`)}</span>` +
+            `</div>` +
+            `<div class="thin-track"><div class="thin-fill accent" style="width:${wPct}%"></div></div>` +
+            `<div class="model-row-sub">` +
+            `<span>${escZh(`${fmtInt(p.conversations || 0)} 会话 · ${fmtInt(p.requests || 0)} 次请求 · 总计 ${fmtTokens(tok)}`)}</span>` +
+            rightSub +
             `</div>` +
             `</div>`
           );
@@ -2218,16 +3056,42 @@
       }, { passive: true });
     }
 
-    // Per-turn timeline filter buttons
+    // Per-turn timeline view & filter buttons
+    const rerenderTurns = () => {
+      if (state.contextData) {
+        renderTurnsTimelineCard(
+          state.contextData.turns || [],
+          state.contextData.audit?.turnsCount || 0,
+          state.contextData.promptTurns || [],
+          state.contextData.context?.latestPromptStartup || null
+        );
+      }
+    };
+    document.querySelectorAll('#turns-view-seg .seg-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        state.turnsView = btn.dataset.tview === 'prompts' ? 'prompts' : 'steps';
+        document.querySelectorAll('#turns-view-seg .seg-btn').forEach((b) =>
+          b.classList.toggle('active', b === btn)
+        );
+        rerenderTurns();
+      });
+    });
     document.querySelectorAll('#turns-filter-seg .seg-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         state.turnsFilter = btn.dataset.tfilter || 'all';
         document.querySelectorAll('#turns-filter-seg .seg-btn').forEach((b) =>
           b.classList.toggle('active', b === btn)
         );
-        if (state.contextData) {
-          renderTurnsTimelineCard(state.contextData.turns || [], state.contextData.audit?.turnsCount || 0);
-        }
+        rerenderTurns();
+      });
+    });
+    document.querySelectorAll('#prompt-filter-seg .seg-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        state.promptTurnsFilter = btn.dataset.pfilter === 'cold' ? 'cold' : 'all';
+        document.querySelectorAll('#prompt-filter-seg .seg-btn').forEach((b) =>
+          b.classList.toggle('active', b === btn)
+        );
+        rerenderTurns();
       });
     });
 
@@ -2604,6 +3468,26 @@
           b.classList.toggle('active', b === btn)
         );
         if (state.historyData) renderHistoryPanel(state.historyData);
+      });
+    });
+
+    document.querySelectorAll('#hourly-day-seg .seg-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        state.hourlyDay = btn.dataset.hday === 'yesterday' ? 'yesterday' : 'today';
+        document.querySelectorAll('#hourly-day-seg .seg-btn').forEach((b) =>
+          b.classList.toggle('active', b === btn)
+        );
+        if (state.historyData) renderHistoryPanel(state.historyData);
+      });
+    });
+
+    document.querySelectorAll('#diag-tab-seg .seg-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        state.diagTab = btn.dataset.dtab === 'routing' ? 'routing' : 'events';
+        document.querySelectorAll('#diag-tab-seg .seg-btn').forEach((b) =>
+          b.classList.toggle('active', b === btn)
+        );
+        if (state.historyData) renderDiagnosticsCard(state.historyData.diagnostics || null);
       });
     });
 

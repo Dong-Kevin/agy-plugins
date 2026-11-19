@@ -30,7 +30,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/m
 irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.ps1 | iex
 ```
 
-- You can also download `context-viewer-v1.7.11.zip` from [Releases](https://github.com/Dong-Kevin/agy-plugins/releases), extract it, and run `./install.sh` (or `agy plugin install ./plugins/agy-context-viewer`).
+- You can also download `context-viewer-v1.8.0.zip` from [Releases](https://github.com/Dong-Kevin/agy-plugins/releases), extract it, and run `./install.sh` (or `agy plugin install ./plugins/agy-context-viewer`).
 - When installed via `agy plugin install` alone, invoke the CLI with `node ~/.gemini/config/plugins/context-viewer/sidecars/dashboard/cli.mjs`.
 
 </details>
@@ -51,13 +51,17 @@ irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-co
 <summary>Quick <code>agy-context</code> Terminal Commands</summary>
 
 ```bash
-agy-context                    # Rich ANSI terminal summary (gauge, speed, last 5 turns, dual quota pools)
-agy-context statusline install # Enable native agy CLI bottom status bar (model, context %, tok/s, cost & 5h/W quota)
-agy-context watch              # Live terminal monitor panel (tmux-friendly, auto-refreshes with active session)
+agy-context                    # Rich ANSI terminal summary (gauge, cold/hot startup, speed, heavy Top 3, Swarm tree, dual pools)
+agy-context statusline install # Enable native agy CLI bottom status bar (model, context %, cold-start ❄C alert, tok/s, cost & 5h/W quota)
+agy-context watch              # Live terminal monitor panel (tmux-friendly, auto-refreshes with active session & Swarm tree)
 agy-context aux                # Reveal and switch Antigravity's Right Aux Pane straight to Context Dashboard
 agy-context float              # Toggle pinned floating window ('close' to hide, 'quit' to stop daemon)
 agy-context menubar quota      # Switch Menu Bar mode ('context' | 'speed' | 'quota' | 'on' | 'off' | 'status')
-agy-context turns              # Inspect last 20 turns with context ±Delta, cache hit %, and tool calls
+agy-context turns [--prompts]  # Inspect per-turn context ±Delta & tool calls, or group by Prompt cold/hot startup
+agy-context heavy              # Show Top 10 heavyweight context consumers in the current session
+agy-context tree               # Show aggregated Swarm / Subagent tree throughput and API cost
+agy-context compact [--full]   # Inspect context compaction history and summary snapshots
+agy-context events             # Inspect cross-session 429 / safety filter waste / canary routing & Top 10 projects
 agy-context web                # Launch standalone web dashboard on 127.0.0.1:18970
 agy-context json               # Output structured JSON summary (append --full for full telemetry)
 ```
@@ -68,8 +72,8 @@ agy-context json               # Output structured JSON summary (append --full f
 
 ## Core Highlights & Preview
 
-- **Active Session Diagnostics**: Dynamically tracks live host context window limits (e.g., `256K` / `512K` / `840K` / `1M`, auto-syncing whenever server tiers expand or roll back), splits System / Tools / Chat tokens, and tracks TTFT, streaming `tok/s`, cache hit rate, and per-turn growth.
-- **Unified Telemetry**: Aggregates Desktop + `agy` CLI history across a **53-week heatmap**, clean **Gemini vs. Non-Gemini (Claude · GPT)** 5h + Weekly quota pools, and public API cost reference.
+- **Active Session Diagnostics**: Dynamically tracks live host context window limits (`256K` / `512K` / `840K` / `1M`, with read-only SQLite fallback offline), displays `repo@branch`, `/btw` branch deduplication, System / Tools / Messages breakdown, TTFT & streaming `tok/s`, **dual-line context vs. cache-read trend**, **Prompt cold/hot startup diagnosis**, **Top 10 heavyweight eaters**, **compaction history drawer**, and **Swarm / Subagent tree aggregation**.
+- **Unified Telemetry & Forensics**: Aggregates Antigravity Desktop, IDE & `agy` CLI history across a **53-week heatmap (with per-day model breakdown)**, **Today/Yesterday 24h hourly bars**, **Top projects**, **429 / safety-filter waste / canary routing diagnostics**, clean **Gemini vs. Non-Gemini (Claude · GPT)** 5h + Weekly quota pools, and **Prompt cache savings**.
 
 <p align="center">
   <strong>macOS Menu Bar Live Badge &amp; Hover Tooltip:</strong><br/>

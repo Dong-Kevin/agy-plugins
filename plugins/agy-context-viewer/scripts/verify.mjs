@@ -5,7 +5,7 @@
  *   node scripts/verify.mjs
  */
 
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   copyFileSync,
@@ -3819,7 +3819,7 @@ async function main() {
     mkdirSync(unicodeDashDir, { recursive: true });
     mkdirSync(unicodeBinDir, { recursive: true });
     copyFileSync(join(ROOT, 'plugin.json'), join(unicodePluginDir, 'plugin.json'));
-    for (const f of ['sidecar.json', 'package.json', 'pricing.mjs', 'collector.mjs', 'float_window.mjs', 'cli.mjs']) {
+    for (const f of ['sidecar.json', 'package.json', 'pricing.mjs', 'sqlite_reader.mjs', 'collector.mjs', 'float_window.mjs', 'cli.mjs']) {
       copyFileSync(join(ROOT, 'sidecars', 'dashboard', f), join(unicodeDashDir, f));
     }
     const unicodeCliEntry = join(unicodeDashDir, 'cli.mjs');
@@ -5279,6 +5279,8 @@ async function main() {
     // Real VM behavioral test for R4 (out-of-order conversation switches & per-conversation ETag) and UX #2 (collapsible summary & toggle)
     await verifyDashboardFrontendBehavior(cvAppSource);
     await verifyContextAuxBridgeBehavior(cvAppSource);
+    await verifyBatch1Features(cvHtmlSource, cvAppSource);
+    await verifyBatch2Features(cvHtmlSource, cvAppSource);
 
     // macOS Swift native host typecheck
     if (process.platform === 'darwin' && existsSync('/usr/bin/swiftc')) {
@@ -6194,6 +6196,1586 @@ async function verifyContextAuxBridgeBehavior(appSource) {
       sc3.toggleConvCalls[0] === convA,
     `/sidebar 兜底转发应不上报 hello、不误发关闭键并通过 toggleConversation 展开目标对话：hello=${JSON.stringify(sc3.helloCalls)}, conv=${JSON.stringify(sc3.toggleConvCalls)}, hiddenAux=${JSON.stringify(sc3.ignoredHiddenToggleAuxCalls)}, trig=${JSON.stringify(sc3.trigState)}`
   );
+}
+
+async function verifyBatch1Features(cvHtmlSource, cvAppSource) {
+  const pricingMod = await import(pathToFileURL(join(ROOT, 'sidecars', 'dashboard', 'pricing.mjs')).href);
+  const collectorMod = await import(pathToFileURL(join(ROOT, 'sidecars', 'dashboard', 'collector.mjs')).href);
+  const {
+    MODEL_PRICING_TABLE,
+    calculateRequestApiCost,
+    summarizeApiCost,
+    calculateReferenceCost
+  } = pricingMod;
+  const { scanConversation, collectTokenHistory } = collectorMod;
+
+  // 1. pricing.mjs: cacheSavingsUSD accuracy across single request, summary (+ byModel), and reference cost
+  const pricedKeys = Object.keys(MODEL_PRICING_TABLE).filter((k) => {
+    const r = MODEL_PRICING_TABLE[k]?.[0];
+    return r && r.inputPerMillion > r.cacheReadPerMillion;
+  });
+  assert(pricedKeys.length >= 2, 'Batch1: MODEL_PRICING_TABLE 应至少包含 2 个带缓存价差的已收录模型');
+  const modelA = pricedKeys[0];
+  const modelB = pricedKeys[1];
+
+  const reqA1 = calculateRequestApiCost({
+    model: modelA,
+    inputTokens: 12_000,
+    cacheTokens: 150_000,
+    outputTokens: 2_500
+  });
+  assert(reqA1.isPriced === true, 'Batch1: modelA 必须成功计价');
+  const expectedSaveA1 = Number(
+    ((150_000 * Math.max(0, reqA1.matchedTier.inputPerMillion - reqA1.matchedTier.cacheReadPerMillion)) / 1_000_000).toFixed(6)
+  );
+  assert(
+    reqA1.cacheSavingsUSD === expectedSaveA1 && reqA1.cacheSavingsUSD > 0,
+    `Batch1: calculateRequestApiCost cacheSavingsUSD 精度不符：actual=${reqA1.cacheSavingsUSD}, expected=${expectedSaveA1}`
+  );
+
+  const reqB1 = calculateRequestApiCost({
+    model: modelB,
+    inputTokens: 8_000,
+    cacheTokens: 80_000,
+    outputTokens: 1_200
+  });
+  assert(reqB1.isPriced === true, 'Batch1: modelB 必须成功计价');
+  const expectedSaveB1 = Number(
+    ((80_000 * Math.max(0, reqB1.matchedTier.inputPerMillion - reqB1.matchedTier.cacheReadPerMillion)) / 1_000_000).toFixed(6)
+  );
+  assert(reqB1.cacheSavingsUSD === expectedSaveB1, 'Batch1: modelB cacheSavingsUSD 精度不符');
+
+  const unpricedRes = calculateRequestApiCost({
+    model: 'unlisted-synth-model-99',
+    inputTokens: 5_000,
+    cacheTokens: 20_000,
+    outputTokens: 500
+  });
+  assert(unpricedRes.isPriced === false, 'Batch1: 未收录模型 isPriced 应为 false');
+
+  const sumRes = summarizeApiCost([
+    { model: modelA, inputTokens: 12_000, cacheTokens: 150_000, outputTokens: 2_500 },
+    { model: modelA, inputTokens: 6_000, cacheTokens: 75_000, outputTokens: 1_000 },
+    { model: modelB, inputTokens: 8_000, cacheTokens: 80_000, outputTokens: 1_200 },
+    { model: 'unlisted-synth-model-99', inputTokens: 5_000, cacheTokens: 20_000, outputTokens: 500 }
+  ]);
+  const expectedSaveA2 = Number(
+    ((75_000 * Math.max(0, reqA1.matchedTier.inputPerMillion - reqA1.matchedTier.cacheReadPerMillion)) / 1_000_000).toFixed(6)
+  );
+  const expectedSumPricedSavings = Number((expectedSaveA1 + expectedSaveA2 + expectedSaveB1).toFixed(4));
+  const sumModelA = sumRes.byModel.find((m) => m.modelKey === reqA1.modelKey);
+  const sumModelB = sumRes.byModel.find((m) => m.modelKey === reqB1.modelKey);
+  const sumUnpriced = sumRes.byModel.find((m) => m.unpriced);
+  assert(
+    sumRes.pricedCacheSavingsUSD === expectedSumPricedSavings &&
+      sumModelA?.cacheSavingsUSD === Number((expectedSaveA1 + expectedSaveA2).toFixed(6)) &&
+      sumModelB?.cacheSavingsUSD === expectedSaveB1 &&
+      sumUnpriced?.cacheSavingsUSD === 0,
+    `Batch1: summarizeApiCost 缓存节省汇总异常：${JSON.stringify({ pricedCacheSavingsUSD: sumRes.pricedCacheSavingsUSD, expectedSumPricedSavings, sumModelA, sumModelB, sumUnpriced })}`
+  );
+
+  const refRes = calculateReferenceCost(
+    { inputTokens: 20_000, cacheTokens: 1_200_000, outputTokens: 10_000 },
+    'gemini-3.8-flash'
+  );
+  const expectedRefSave = Number(
+    ((1_200_000 * Math.max(0, refRes.tier.inputPerMillion - refRes.tier.cacheReadPerMillion)) / 1_000_000).toFixed(4)
+  );
+  assert(
+    refRes.cacheSavingsUSD === expectedRefSave && refRes.cacheSavingsUSD > 0,
+    `Batch1: calculateReferenceCost cacheSavingsUSD 异常：actual=${refRes.cacheSavingsUSD}, expected=${expectedRefSave}`
+  );
+
+  // 2 & 3. collector.mjs + cli.mjs isolated fixture suite
+  const envKeys = [
+    'AG_DIR',
+    'AG_CLI_DIR',
+    'ANTIGRAVITY_EXECUTABLE_DATA_DIR',
+    'ANTIGRAVITY_LS_ADDRESS',
+    'ANTIGRAVITY_CSRF_TOKEN',
+    'ANTIGRAVITY_AGENTAPI_EXE',
+    'ANTIGRAVITY_CONVERSATION_ID',
+    'ANTIGRAVITY_CLI_MODE'
+  ];
+  const savedEnv = Object.fromEntries(envKeys.map((k) => [k, process.env[k]]));
+  const origCwd = process.cwd();
+  const tmpBatchRoot = mkdtempSync(join(tmpdir(), 'agy-cv-batch1-'));
+
+  try {
+    const agDir = join(tmpBatchRoot, 'ag-data');
+    const cliDir = join(tmpBatchRoot, 'cli-data');
+    const stateDir = join(agDir, 'sidecar_data', 'context-viewer');
+    mkdirSync(stateDir, { recursive: true });
+    mkdirSync(cliDir, { recursive: true });
+
+    const convMain = ['a1b1c1d1', '2222', '3333', '4444', '555555550001'].join('-');
+    const convMany = ['a1b1c1d1', '2222', '3333', '4444', '555555550002'].join('-');
+    const convRepoBranch = ['a1b1c1d1', '2222', '3333', '4444', '555555550003'].join('-');
+    const convRepoDetached = ['a1b1c1d1', '2222', '3333', '4444', '555555550004'].join('-');
+    const convColdSL = ['a1b1c1d1', '2222', '3333', '4444', '555555550005'].join('-');
+
+    const nowDate = new Date();
+    const todayIsoPrefix = `${nowDate.getFullYear()}-${String(nowDate.getMonth() + 1).padStart(2, '0')}-${String(nowDate.getDate()).padStart(2, '0')}`;
+
+    const mainLogsDir = join(agDir, 'brain', convMain, '.system_generated', 'logs');
+    mkdirSync(mainLogsDir, { recursive: true });
+    const genericToolContent =
+      `Created At: ${todayIsoPrefix}T10:01:06Z\n` +
+      `Completed At: ${todayIsoPrefix}T10:01:07Z\n` +
+      `Showing lines 1-80 of 80\n` +
+      'ROADMAP body content for heavy item verification. '.repeat(260);
+    const mainSteps = [
+      {
+        step_index: 0,
+        type: 'PLANNER_RESPONSE',
+        created_at: `${todayIsoPrefix}T10:00:00Z`,
+        model: modelA,
+        input_tokens: 1_200,
+        cache_read_tokens: 0,
+        output_tokens: 180,
+        content: 'Initial system turn before user input'
+      },
+      {
+        step_index: 1,
+        type: 'USER_INPUT',
+        created_at: `${todayIsoPrefix}T10:01:00Z`,
+        content: `<ADDITIONAL_METADATA>hidden meta</ADDITIONAL_METADATA><USER_SETTINGS_CHANGE>Model Selection from X to ${modelA}.</USER_SETTINGS_CHANGE><USER_REQUEST>  检查文档 https://example.com/docs/context-viewer 并分析冷启动原因  </USER_REQUEST>`
+      },
+      {
+        step_index: 2,
+        type: 'PLANNER_RESPONSE',
+        created_at: `${todayIsoPrefix}T10:01:05Z`,
+        model: modelA,
+        input_tokens: 9_000,
+        cache_read_tokens: 1_000,
+        output_tokens: 320,
+        thinking: 'Detailed reasoning trace '.repeat(90),
+        tool_calls: [{ name: 'default_api:read_file', args: { Path: '/tmp/workspace/ROADMAP.md' } }],
+        content: 'Reading ROADMAP.md now'
+      },
+      {
+        step_index: 3,
+        type: 'GENERIC',
+        created_at: `${todayIsoPrefix}T10:01:07Z`,
+        content: genericToolContent
+      },
+      {
+        step_index: 4,
+        type: 'PLANNER_RESPONSE',
+        created_at: `${todayIsoPrefix}T10:01:12Z`,
+        model: modelA,
+        input_tokens: 1_500,
+        cache_read_tokens: 8_500,
+        output_tokens: 400,
+        tool_calls: [{ name: 'default_api:edit_file', args: { Path: '/tmp/workspace/collector.mjs' } }],
+        content: 'Applied patch after reading ROADMAP'
+      },
+      {
+        step_index: 5,
+        type: 'CHECKPOINT',
+        created_at: `${todayIsoPrefix}T10:02:00Z`,
+        content: 'Session compaction summary block '.repeat(60)
+      },
+      {
+        step_index: 6,
+        type: 'USER_INPUT',
+        created_at: `${todayIsoPrefix}T10:03:00Z`,
+        content: '<USER_REQUEST>继续优化缓存逻辑</USER_REQUEST>'
+      },
+      {
+        step_index: 7,
+        type: 'PLANNER_RESPONSE',
+        created_at: `${todayIsoPrefix}T10:03:05Z`,
+        model: modelA,
+        input_tokens: 5_000,
+        cache_read_tokens: 5_000,
+        output_tokens: 450,
+        content: 'Warm startup response'
+      },
+      {
+        step_index: 8,
+        type: 'USER_INPUT',
+        created_at: `${todayIsoPrefix}T10:04:00Z`,
+        content: '<USER_REQUEST>验证最终构建</USER_REQUEST>'
+      },
+      {
+        step_index: 9,
+        type: 'PLANNER_RESPONSE',
+        created_at: `${todayIsoPrefix}T10:04:06Z`,
+        model: modelA,
+        input_tokens: 1_000,
+        cache_read_tokens: 9_000,
+        output_tokens: 500,
+        tool_calls: [{ name: 'default_api:run_command', args: { toolSummary: 'Run verify' } }],
+        content: 'Hot startup response'
+      },
+      {
+        step_index: 10,
+        type: 'USER_INPUT',
+        created_at: `${todayIsoPrefix}T10:05:00Z`,
+        content: 'pending follow-up text for projected next min'
+      }
+    ];
+    writeFileSync(join(mainLogsDir, 'transcript.jsonl'), mainSteps.map((s) => JSON.stringify(s)).join('\n') + '\n');
+
+    // Multi-turn & 8-model session (>24 sparkline, >20 promptTurns, >6 models per day)
+    const manyLogsDir = join(agDir, 'brain', convMany, '.system_generated', 'logs');
+    mkdirSync(manyLogsDir, { recursive: true });
+    const eightModels = [
+      modelA,
+      modelB,
+      'custom-model-c',
+      'custom-model-d',
+      'custom-model-e',
+      'custom-model-f',
+      'custom-model-g',
+      'custom-model-h'
+    ];
+    const manySteps = [];
+    for (let i = 0; i < 32; i++) {
+      manySteps.push({
+        step_index: i * 2,
+        type: 'USER_INPUT',
+        created_at: `${todayIsoPrefix}T11:${String(i).padStart(2, '0')}:00Z`,
+        content: `<USER_REQUEST>Batch question ${i + 1}</USER_REQUEST>`
+      });
+      manySteps.push({
+        step_index: i * 2 + 1,
+        type: 'PLANNER_RESPONSE',
+        created_at: `${todayIsoPrefix}T11:${String(i).padStart(2, '0')}:05Z`,
+        model: eightModels[i % eightModels.length],
+        input_tokens: 1_000,
+        cache_read_tokens: 2_000 + i * 300,
+        output_tokens: 120,
+        content: `Answer ${i + 1}`
+      });
+    }
+    writeFileSync(join(manyLogsDir, 'transcript.jsonl'), manySteps.map((s) => JSON.stringify(s)).join('\n') + '\n');
+
+    // Temporary git directories for repoInfo (branch + worktree detached HEAD)
+    const branchRepoDir = join(tmpBatchRoot, 'repo-branch-demo');
+    mkdirSync(join(branchRepoDir, '.git'), { recursive: true });
+    writeFileSync(join(branchRepoDir, '.git', 'HEAD'), 'ref: refs/heads/feat/batch1-verify\n');
+    const cliBranchLogDir = join(cliDir, 'brain', convRepoBranch, '.system_generated', 'logs');
+    mkdirSync(cliBranchLogDir, { recursive: true });
+    writeFileSync(join(cliBranchLogDir, 'transcript.jsonl'), JSON.stringify(mainSteps[0]) + '\n');
+
+    const detachedRepoDir = join(tmpBatchRoot, 'repo-detached-demo');
+    const worktreeGitDir = join(tmpBatchRoot, 'repo-detached-gitdir');
+    mkdirSync(detachedRepoDir, { recursive: true });
+    mkdirSync(worktreeGitDir, { recursive: true });
+    writeFileSync(join(worktreeGitDir, 'HEAD'), 'deadbeef1234567890abcdef1234567890abcdef\n');
+    writeFileSync(join(detachedRepoDir, '.git'), `gitdir: ${worktreeGitDir}\n`);
+    const cliDetachedLogDir = join(cliDir, 'brain', convRepoDetached, '.system_generated', 'logs');
+    mkdirSync(cliDetachedLogDir, { recursive: true });
+    writeFileSync(join(cliDetachedLogDir, 'transcript.jsonl'), JSON.stringify(mainSteps[0]) + '\n');
+
+    process.env.AG_DIR = agDir;
+    process.env.AG_CLI_DIR = cliDir;
+    process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR = stateDir;
+    delete process.env.ANTIGRAVITY_LS_ADDRESS;
+    delete process.env.ANTIGRAVITY_CSRF_TOKEN;
+    delete process.env.ANTIGRAVITY_AGENTAPI_EXE;
+    delete process.env.ANTIGRAVITY_CONVERSATION_ID;
+    delete process.env.ANTIGRAVITY_CLI_MODE;
+
+    const snapMain = await scanConversation(convMain, { force: true, skipWorkspaceLookup: true });
+    assert(snapMain.ok === true, 'Batch1: scanConversation(convMain) 应成功');
+    assert(snapMain.promptTurns.length === 4, `Batch1: promptTurns 应为 4 组，实际 ${snapMain.promptTurns.length}`);
+    const [ptHot, ptWarm, ptCold, ptImplicit] = snapMain.promptTurns;
+    assert(
+      ptHot.promptIndex === 4 && ptHot.startupState === 'hot' && ptHot.startupCacheHitPercent === 90 &&
+        ptWarm.promptIndex === 3 && ptWarm.startupState === 'warm' && ptWarm.startupCacheHitPercent === 50 &&
+        ptCold.promptIndex === 2 && ptCold.startupState === 'cold' && ptCold.startupCacheHitPercent === 10 && ptCold.callsCount === 2 &&
+        ptImplicit.promptIndex === 1 && ptImplicit.promptPreview === '(会话初始轮次)',
+      `Batch1: promptTurns 冷/温/热分类或分组异常：${JSON.stringify(snapMain.promptTurns)}`
+    );
+    assert(
+      ptCold.promptPreview.includes('https://example.com/docs/context-viewer') &&
+        !ptCold.promptPreview.includes('<API>') &&
+        !ptCold.promptPreview.includes('<USER_REQUEST>') &&
+        ptCold.promptFull.includes('https://example.com/docs/context-viewer'),
+      `Batch1: extractPromptPreview 应保留正常 URL 且剥离系统标签：preview=${ptCold.promptPreview}`
+    );
+    assert(
+      snapMain.context.latestPromptStartup?.state === 'hot' &&
+        snapMain.context.latestPromptStartup?.cacheHitPercent === 90 &&
+        snapMain.context.latestPromptStartup?.promptIndex === 4 &&
+        snapMain.context.latestPromptStartup?.callsCount === 1,
+      `Batch1: latestPromptStartup 异常：${JSON.stringify(snapMain.context.latestPromptStartup)}`
+    );
+
+    // heavyItems Top 10 sorting + GENERIC tool attribution + stripped Created At header
+    assert(
+      Array.isArray(snapMain.heavyItems) && snapMain.heavyItems.length >= 4 && snapMain.heavyItems.length <= 10,
+      `Batch1: heavyItems 数量异常：${snapMain.heavyItems?.length}`
+    );
+    for (let i = 1; i < snapMain.heavyItems.length; i++) {
+      assert(
+        snapMain.heavyItems[i - 1].estTokens >= snapMain.heavyItems[i].estTokens &&
+          snapMain.heavyItems[i].rank === i + 1,
+        'Batch1: heavyItems 必须按 estTokens 降序并赋予连续 1-based rank'
+      );
+    }
+    const topHeavy = snapMain.heavyItems[0];
+    assert(
+      topHeavy.rank === 1 &&
+        topHeavy.kind === 'tool' &&
+        topHeavy.label === 'read_file (ROADMAP.md)' &&
+        !topHeavy.preview.includes('Created At:') &&
+        topHeavy.preview.includes('ROADMAP body content'),
+      `Batch1: GENERIC 工具项关联或去除 Created At 头部失败：${JSON.stringify(topHeavy)}`
+    );
+
+    // context.promptUsed / projectedNextMin / sessionCacheSavingsUSD
+    assert(
+      snapMain.context.promptUsed === 10_000 &&
+        snapMain.context.pendingTokens > 0 &&
+        snapMain.context.projectedNextMin === snapMain.context.used &&
+        snapMain.context.projectedNextMin === 10_500 + snapMain.context.pendingTokens &&
+        snapMain.context.sessionCacheSavingsUSD > 0,
+      `Batch1: context 新增指标异常：${JSON.stringify({
+        promptUsed: snapMain.context.promptUsed,
+        used: snapMain.context.used,
+        pendingTokens: snapMain.context.pendingTokens,
+        projectedNextMin: snapMain.context.projectedNextMin,
+        sessionCacheSavingsUSD: snapMain.context.sessionCacheSavingsUSD
+      })}`
+    );
+
+    // repoInfo: branch name & 7-char detached HEAD via read-only .git/HEAD
+    process.env.ANTIGRAVITY_CLI_MODE = '1';
+    try {
+      process.chdir(branchRepoDir);
+      process.env.ANTIGRAVITY_CONVERSATION_ID = convRepoBranch;
+      const snapBranch = await scanConversation(convRepoBranch, { force: true, skipWorkspaceLookup: true });
+      assert(
+        snapBranch.repoInfo?.name === 'repo-branch-demo' &&
+          snapBranch.repoInfo?.branch === 'feat/batch1-verify' &&
+          snapBranch.repoInfo?.label === 'repo-branch-demo@feat/batch1-verify',
+        `Batch1: repoInfo 分支解析失败：${JSON.stringify(snapBranch.repoInfo)}`
+      );
+
+      process.chdir(detachedRepoDir);
+      process.env.ANTIGRAVITY_CONVERSATION_ID = convRepoDetached;
+      const snapDetached = await scanConversation(convRepoDetached, { force: true, skipWorkspaceLookup: true });
+      assert(
+        snapDetached.repoInfo?.name === 'repo-detached-demo' &&
+          snapDetached.repoInfo?.branch === 'deadbee' &&
+          snapDetached.repoInfo?.label === 'repo-detached-demo@deadbee',
+        `Batch1: repoInfo detached HEAD / worktree 解析失败：${JSON.stringify(snapDetached.repoInfo)}`
+      );
+    } finally {
+      process.chdir(origCwd);
+      delete process.env.ANTIGRAVITY_CLI_MODE;
+      delete process.env.ANTIGRAVITY_CONVERSATION_ID;
+    }
+
+    // sparkline > 24 turns + collectTokenHistory daily byModel Top 6 & hybrid.cacheSavingsUSD
+    const snapMany = await scanConversation(convMany, { force: true, skipWorkspaceLookup: true });
+    assert(
+      snapMany.sparkline.length === 32 && snapMany.promptTurns.length === 20,
+      `Batch1: sparkline (>24) 或 promptTurns (Top 20) 长度异常：sparkline=${snapMany.sparkline.length}, promptTurns=${snapMany.promptTurns.length}`
+    );
+
+    const hist = await collectTokenHistory({ force: true });
+    assert(hist.ok === true, 'Batch1: collectTokenHistory 应成功');
+    const dailyRec = hist.dailyMapBySource?.all?.[todayIsoPrefix];
+    assert(
+      dailyRec &&
+        Array.isArray(dailyRec.byModel) &&
+        dailyRec.byModel.length === 6 &&
+        !('_byModelMap' in dailyRec),
+      `Batch1: dailyMapBySource.all[${todayIsoPrefix}].byModel 应截断至 Top 6 且不含临时 map：${JSON.stringify(dailyRec)}`
+    );
+    for (let i = 1; i < dailyRec.byModel.length; i++) {
+      assert(
+        dailyRec.byModel[i - 1].tokens >= dailyRec.byModel[i].tokens,
+        'Batch1: daily byModel 必须按 tokens 降序排列'
+      );
+    }
+    const hybridAll = hist.analyticsBySource?.all?.costs?.allTime?.hybrid;
+    assert(
+      hybridAll && typeof hybridAll.cacheSavingsUSD === 'number' && hybridAll.cacheSavingsUSD > 0,
+      `Batch1: hybrid.cacheSavingsUSD 应大于 0：${JSON.stringify(hybridAll)}`
+    );
+
+    // 3. cli.mjs verification: turns --prompts, heavy, json, statusline cold->hot transition
+    const cliEntry = join(ROOT, 'sidecars', 'dashboard', 'cli.mjs');
+    const cliEnv = {
+      ...process.env,
+      AG_DIR: agDir,
+      AG_CLI_DIR: cliDir,
+      ANTIGRAVITY_EXECUTABLE_DATA_DIR: stateDir,
+      NO_COLOR: '1'
+    };
+    delete cliEnv.ANTIGRAVITY_LS_ADDRESS;
+    delete cliEnv.ANTIGRAVITY_CSRF_TOKEN;
+    delete cliEnv.ANTIGRAVITY_AGENTAPI_EXE;
+    delete cliEnv.ANTIGRAVITY_CONVERSATION_ID;
+    delete cliEnv.ANTIGRAVITY_CLI_MODE;
+
+    const promptsCliOut = execFileSync(process.execPath, [cliEntry, 'turns', convMain, '--prompts'], {
+      env: cliEnv,
+      encoding: 'utf-8',
+      timeout: 15000
+    });
+    assert(
+      promptsCliOut.includes('#P4') &&
+        promptsCliOut.includes('#P2') &&
+        promptsCliOut.includes('热') &&
+        promptsCliOut.includes('冷'),
+      `Batch1: cli turns --prompts 输出异常：${promptsCliOut}`
+    );
+
+    const heavyCliOut = execFileSync(process.execPath, [cliEntry, 'heavy', convMain], {
+      env: cliEnv,
+      encoding: 'utf-8',
+      timeout: 15000
+    });
+    assert(
+      heavyCliOut.includes('read_file (ROADMAP.md)') && heavyCliOut.includes('Top'),
+      `Batch1: cli heavy 输出异常：${heavyCliOut}`
+    );
+
+    const jsonCliRaw = execFileSync(process.execPath, [cliEntry, 'json', convMain], {
+      env: cliEnv,
+      encoding: 'utf-8',
+      timeout: 15000
+    });
+    const jsonCli = JSON.parse(jsonCliRaw);
+    assert(
+      'repoInfo' in (jsonCli.conversation || {}) &&
+        jsonCli.conversation?.promptUsed === 10_000 &&
+        jsonCli.conversation?.projectedNextMin === snapMain.context.projectedNextMin &&
+        jsonCli.conversation?.sessionCacheSavingsUSD > 0 &&
+        jsonCli.conversation?.latestPromptStartup?.state === 'hot' &&
+        Array.isArray(jsonCli.promptTurns) && jsonCli.promptTurns.length === 4 &&
+        Array.isArray(jsonCli.heavyItems) && jsonCli.heavyItems.length > 0 &&
+        typeof jsonCli.globalHistory?.periodCacheSavingsUSD === 'number' &&
+        jsonCli.globalHistory.periodCacheSavingsUSD > 0 &&
+        typeof jsonCli.globalHistory?.allTimeCacheSavingsUSD === 'number' &&
+        jsonCli.globalHistory.allTimeCacheSavingsUSD > 0,
+      `Batch1: cli json 新增字段不完整：${jsonCliRaw.slice(0, 600)}`
+    );
+
+    // statusline cold first hop -> ❄C, subsequent hot hop -> C (no ❄C)
+    const coldSlDir = join(agDir, 'brain', convColdSL, '.system_generated', 'logs');
+    mkdirSync(coldSlDir, { recursive: true });
+    const coldSlLog = join(coldSlDir, 'transcript.jsonl');
+    const slStepsCold = [
+      {
+        step_index: 0,
+        type: 'USER_INPUT',
+        created_at: `${todayIsoPrefix}T12:00:00Z`,
+        content: '<USER_REQUEST>第一轮提问</USER_REQUEST>'
+      },
+      {
+        step_index: 1,
+        type: 'PLANNER_RESPONSE',
+        created_at: `${todayIsoPrefix}T12:00:05Z`,
+        model: modelA,
+        input_tokens: 1_000,
+        cache_read_tokens: 9_000,
+        output_tokens: 300,
+        content: 'First hot reply'
+      },
+      {
+        step_index: 2,
+        type: 'USER_INPUT',
+        created_at: `${todayIsoPrefix}T12:10:00Z`,
+        content: '<USER_REQUEST>缓存过期后的第二轮提问</USER_REQUEST>'
+      },
+      {
+        step_index: 3,
+        type: 'PLANNER_RESPONSE',
+        created_at: `${todayIsoPrefix}T12:10:05Z`,
+        model: modelA,
+        input_tokens: 9_800,
+        cache_read_tokens: 200,
+        output_tokens: 250,
+        content: 'Cold first hop reply'
+      }
+    ];
+    writeFileSync(coldSlLog, slStepsCold.map((s) => JSON.stringify(s)).join('\n') + '\n');
+    const slColdOut = execFileSync(
+      process.execPath,
+      [cliEntry, 'statusline', convColdSL, '--plain', '--width', '120'],
+      { env: cliEnv, encoding: 'utf-8', timeout: 15000 }
+    ).trim();
+    assert(
+      slColdOut.includes('❄C 2%'),
+      `Batch1: statusline 冷启动首跳应显示 ❄C 2%，实际：${slColdOut}`
+    );
+
+    const slStepsRecovered = [
+      ...slStepsCold,
+      {
+        step_index: 4,
+        type: 'PLANNER_RESPONSE',
+        created_at: `${todayIsoPrefix}T12:10:12Z`,
+        model: modelA,
+        input_tokens: 1_000,
+        cache_read_tokens: 9_000,
+        output_tokens: 300,
+        content: 'Second hop back to hot cache'
+      }
+    ];
+    writeFileSync(coldSlLog, slStepsRecovered.map((s) => JSON.stringify(s)).join('\n') + '\n');
+    const slHotOut = execFileSync(
+      process.execPath,
+      [cliEntry, 'statusline', convColdSL, '--plain', '--width', '120'],
+      { env: cliEnv, encoding: 'utf-8', timeout: 15000 }
+    ).trim();
+    assert(
+      slHotOut.includes('C 90%') && !slHotOut.includes('❄C'),
+      `Batch1: statusline 后续热步应恢复正常 C 90% 且不含 ❄C，实际：${slHotOut}`
+    );
+
+    // 4. Frontend index.html + app.js VM test for Batch 1 UI elements
+    for (const reqId of ['conv-repo-chip', 'cum-cache-saved', 'turns-view-seg', 'heavy-card', 'cat-cache-saved']) {
+      assert(cvHtmlSource.includes(`id="${reqId}"`), `Batch1: index.html 缺少 #${reqId}`);
+    }
+
+    const makeEl = (id = '', initClasses = []) => {
+      const classes = new Set(initClasses);
+      const attrs = new Map();
+      const listeners = new Map();
+      return {
+        id,
+        value: '',
+        textContent: '',
+        innerHTML: '',
+        scrollTop: 0,
+        dataset: {},
+        style: {},
+        className: initClasses.join(' '),
+        classList: {
+          add: (...names) => names.forEach((n) => classes.add(n)),
+          remove: (...names) => names.forEach((n) => classes.delete(n)),
+          toggle: (n, force) => {
+            const on = force === undefined ? !classes.has(n) : Boolean(force);
+            if (on) classes.add(n);
+            else classes.delete(n);
+            return on;
+          },
+          contains: (n) => classes.has(n)
+        },
+        addEventListener: (type, fn) => {
+          if (!listeners.has(type)) listeners.set(type, []);
+          listeners.get(type).push(fn);
+        },
+        dispatch: (type, ev = {}) => {
+          for (const fn of listeners.get(type) || []) {
+            fn({ target: ev.target || {}, ...ev });
+          }
+        },
+        setAttribute: (k, v) => attrs.set(k, String(v)),
+        getAttribute: (k) => (attrs.has(k) ? attrs.get(k) : null),
+        hasAttribute: (k) => attrs.has(k),
+        removeAttribute: (k) => attrs.delete(k),
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        appendChild: () => {},
+        remove: () => {}
+      };
+    };
+
+    const uiEls = new Map();
+    const getUiEl = (id) => {
+      if (!uiEls.has(id)) uiEls.set(id, makeEl(id));
+      return uiEls.get(id);
+    };
+    uiEls.set('conv-repo-chip', makeEl('conv-repo-chip', ['meta-chip', 'repo-chip', 'hidden']));
+    uiEls.set('cum-cache-saved', makeEl('cum-cache-saved', ['hidden']));
+    uiEls.set('heavy-card', makeEl('heavy-card', ['card', 'hidden']));
+    uiEls.set('cat-cache-saved', makeEl('cat-cache-saved', ['hidden']));
+
+    const btnViewSteps = makeEl('btn-tview-steps', ['seg-btn', 'active']);
+    btnViewSteps.dataset.tview = 'steps';
+    const btnViewPrompts = makeEl('btn-tview-prompts', ['seg-btn']);
+    btnViewPrompts.dataset.tview = 'prompts';
+    const viewSegBtns = [btnViewSteps, btnViewPrompts];
+
+    const uiSnap = {
+      ...snapMain,
+      repoInfo: { name: 'agy-plugins', branch: 'main', label: 'agy-plugins@main' }
+    };
+    const uiHist = hist;
+    const rootAttrs = new Map();
+    const rootStyles = new Map();
+    const vmTimers = [];
+
+    const uiSandbox = {
+      console, Date, Math, JSON, URL, URLSearchParams, Set, Map, Array, Object, String, Number, Boolean, Promise, Error,
+      NodeFilter: { SHOW_TEXT: 4 },
+      MutationObserver: class { observe() {} disconnect() {} },
+      ResizeObserver: class { observe() {} disconnect() {} },
+      IntersectionObserver: class { observe() {} disconnect() {} },
+      getComputedStyle: () => ({ color: 'rgb(255, 255, 255)', getPropertyValue: () => '' }),
+      setTimeout,
+      clearTimeout,
+      clearInterval,
+      setInterval: (fn, ms) => {
+        vmTimers.push({ fn, ms });
+        return vmTimers.length;
+      },
+      requestAnimationFrame: (fn) => { fn(); return 1; },
+      localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+      sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+      navigator: { platform: 'MacIntel', userAgent: 'Mozilla/5.0' },
+      document: {
+        readyState: 'complete',
+        hidden: false,
+        visibilityState: 'visible',
+        documentElement: {
+          clientWidth: 420,
+          clientHeight: 760,
+          dataset: {},
+          appendChild: () => {},
+          style: {
+            getPropertyValue: (k) => rootStyles.get(k) || '',
+            setProperty: (k, v) => rootStyles.set(k, String(v)),
+            removeProperty: (k) => rootStyles.delete(k)
+          },
+          getAttribute: (k) => (rootAttrs.has(k) ? rootAttrs.get(k) : null),
+          setAttribute: (k, v) => rootAttrs.set(k, String(v)),
+          hasAttribute: (k) => rootAttrs.has(k),
+          removeAttribute: (k) => rootAttrs.delete(k)
+        },
+        head: { appendChild: () => {} },
+        body: makeEl('body'),
+        getElementById: getUiEl,
+        querySelector: () => null,
+        querySelectorAll: (sel) => {
+          if (sel === '#turns-view-seg .seg-btn') return viewSegBtns;
+          return [];
+        },
+        createTreeWalker: () => ({ nextNode: () => false, currentNode: null }),
+        addEventListener: () => {},
+        createElement: () => makeEl('')
+      },
+      window: null,
+      fetch: async (urlStr) => {
+        const u = new URL(urlStr, 'http://127.0.0.1');
+        if (u.pathname === '/api/settings') {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              ok: true,
+              settings: {},
+              uiPreferences: {},
+              shortcut: {},
+              auxShortcut: {},
+              menubar: { supported: true, enabled: false }
+            })
+          };
+        }
+        if (u.pathname === '/api/context') {
+          return { ok: true, status: 200, json: async () => uiSnap };
+        }
+        if (u.pathname === '/api/history') {
+          return { ok: true, status: 200, json: async () => uiHist };
+        }
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+    };
+    uiSandbox.window = {
+      location: { origin: 'http://127.0.0.1', href: 'http://127.0.0.1/', pathname: '/' },
+      matchMedia: () => ({ matches: false, addEventListener: () => {} }),
+      getComputedStyle: uiSandbox.getComputedStyle,
+      addEventListener: () => {},
+      sidecar: { conversationId: convMain },
+      self: null,
+      top: null,
+      fetch: uiSandbox.fetch
+    };
+    uiSandbox.location = uiSandbox.window.location;
+    uiSandbox.window.self = uiSandbox.window;
+    uiSandbox.window.top = uiSandbox.window;
+    uiSandbox.globalThis = uiSandbox;
+
+    runInNewContext(cvAppSource, uiSandbox, { filename: 'dashboard-batch1-ui.js' });
+    await new Promise((r) => setTimeout(r, 45));
+
+    // Check #conv-repo-chip
+    const repoChip = getUiEl('conv-repo-chip');
+    assert(
+      !repoChip.classList.contains('hidden') && repoChip.textContent.includes('agy-plugins@main'),
+      `Batch1 UI: #conv-repo-chip 未正确渲染 agy-plugins@main：hidden=${repoChip.classList.contains('hidden')}, text=${repoChip.textContent}`
+    );
+
+    // Check #cum-cache-saved
+    const cumSaved = getUiEl('cum-cache-saved');
+    assert(
+      !cumSaved.classList.contains('hidden') && cumSaved.textContent.includes('缓存已省') && cumSaved.textContent.includes('$'),
+      `Batch1 UI: #cum-cache-saved 未正确渲染：hidden=${cumSaved.classList.contains('hidden')}, text=${cumSaved.textContent}`
+    );
+
+    // Check dual-line #spark-svg (two stroke paths: total & cache)
+    const sparkSvgHtml = getUiEl('spark-svg').innerHTML;
+    const strokePaths = sparkSvgHtml.match(/<path\b[^>]*fill="none"[^>]*stroke="[^"]+"/g) || [];
+    assert(
+      strokePaths.length >= 2 &&
+        sparkSvgHtml.includes('stroke="var(--cv-accent)"') &&
+        sparkSvgHtml.includes('stroke="var(--good)"'),
+      `Batch1 UI: #spark-svg 应包含总上下文与缓存读取双折线 path，实际：${sparkSvgHtml}`
+    );
+
+    // Switch #turns-view-seg to prompts and verify .startup-pill rendering
+    btnViewPrompts.dispatch('click', { target: btnViewPrompts });
+    const turnsHtml = getUiEl('turns-timeline').innerHTML;
+    assert(
+      turnsHtml.includes('startup-pill') &&
+        turnsHtml.includes('startup-pill hot') &&
+        turnsHtml.includes('startup-pill cold') &&
+        turnsHtml.includes('#P4'),
+      `Batch1 UI: 切换至 prompts 视图后未渲染 .startup-pill：${turnsHtml.slice(0, 400)}`
+    );
+
+    // Check #heavy-card rendering
+    const heavyCard = getUiEl('heavy-card');
+    const heavyListHtml = getUiEl('heavy-items-list').innerHTML;
+    assert(
+      !heavyCard.classList.contains('hidden') && heavyListHtml.includes('read_file (ROADMAP.md)'),
+      `Batch1 UI: #heavy-card 未正确渲染重度消耗排行：hidden=${heavyCard.classList.contains('hidden')}, html=${heavyListHtml.slice(0, 300)}`
+    );
+
+    // Check #day-inspector displays byModel chips
+    const inspectorHtml = getUiEl('day-inspector').innerHTML;
+    assert(
+      inspectorHtml.includes('inspector-model-chip') && inspectorHtml.includes('inspector-models-row'),
+      `Batch1 UI: #day-inspector 未渲染当日 byModel 明细芯片：${inspectorHtml.slice(0, 400)}`
+    );
+
+    // Check #cat-cache-saved displays savings
+    const catSaved = getUiEl('cat-cache-saved');
+    assert(
+      !catSaved.classList.contains('hidden') && catSaved.textContent.includes('缓存已省') && catSaved.textContent.includes('$'),
+      `Batch1 UI: #cat-cache-saved 未正确渲染：hidden=${catSaved.classList.contains('hidden')}, text=${catSaved.textContent}`
+    );
+  } finally {
+    try { process.chdir(origCwd); } catch {}
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(tmpBatchRoot, { recursive: true, force: true });
+  }
+}
+
+async function verifyBatch2Features(cvHtmlSource, cvAppSource) {
+  const sqliteReaderUrl = pathToFileURL(join(ROOT, 'sidecars', 'dashboard', 'sqlite_reader.mjs')).href;
+  const collectorUrl = pathToFileURL(join(ROOT, 'sidecars', 'dashboard', 'collector.mjs')).href;
+  const {
+    isSqliteAvailable,
+    readConversationSummariesIndex,
+    readConversationSqliteSignals
+  } = await import(sqliteReaderUrl);
+  const {
+    findIdeDataDir,
+    scanConversation,
+    collectTokenHistory
+  } = await import(collectorUrl);
+
+  const encVarint = (n) => {
+    let v = BigInt(n);
+    const bytes = [];
+    while (v >= 0x80n) {
+      bytes.push(Number((v & 0x7fn) | 0x80n));
+      v >>= 7n;
+    }
+    bytes.push(Number(v));
+    return Buffer.from(bytes);
+  };
+  const encTag = (fn, wt) => encVarint((BigInt(fn) << 3n) | BigInt(wt));
+  const encVarintField = (fn, val) => Buffer.concat([encTag(fn, 0), encVarint(val)]);
+  const encBytesField = (fn, buf) => {
+    const b = Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf), 'utf-8');
+    return Buffer.concat([encTag(fn, 2), encVarint(b.length), b]);
+  };
+  const encPackedVarintField = (fn, arr) => encBytesField(fn, Buffer.concat(arr.map(encVarint)));
+  const encDuration = (sec, nanos = 0) => Buffer.concat([
+    ...(sec ? [encVarintField(1, sec)] : []),
+    ...(nanos ? [encVarintField(2, nanos)] : [])
+  ]);
+  const encKv = (key, val) => Buffer.concat([encBytesField(1, key), encBytesField(2, val)]);
+  const makeTestUuid = (n) => {
+    const hex = String(n).padStart(4, '0');
+    return [`b200${hex}`, '4000', '4000', '8000', `00000000${hex}`].join('-');
+  };
+
+  const tmpB2Root = mkdtempSync(join(tmpdir(), 'agy-ctx-batch2-'));
+  const savedEnv = {
+    AG_DIR: process.env.AG_DIR,
+    AG_IDE_DIR: process.env.AG_IDE_DIR,
+    AG_CLI_DIR: process.env.AG_CLI_DIR,
+    ANTIGRAVITY_EXECUTABLE_DATA_DIR: process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR,
+    ANTIGRAVITY_LS_ADDRESS: process.env.ANTIGRAVITY_LS_ADDRESS,
+    ANTIGRAVITY_CSRF_TOKEN: process.env.ANTIGRAVITY_CSRF_TOKEN,
+    ANTIGRAVITY_AGENTAPI_EXE: process.env.ANTIGRAVITY_AGENTAPI_EXE,
+    ANTIGRAVITY_CONVERSATION_ID: process.env.ANTIGRAVITY_CONVERSATION_ID,
+    ANTIGRAVITY_CLI_MODE: process.env.ANTIGRAVITY_CLI_MODE
+  };
+
+  try {
+    const agDir = join(tmpB2Root, 'antigravity');
+    const ideDir = join(tmpB2Root, 'antigravity-ide');
+    const cliDir = join(tmpB2Root, 'antigravity-cli');
+    const stateDir = join(tmpB2Root, 'state');
+    mkdirSync(join(agDir, 'conversations'), { recursive: true });
+    mkdirSync(join(ideDir, 'conversations'), { recursive: true });
+    mkdirSync(join(cliDir, 'conversations'), { recursive: true });
+    mkdirSync(stateDir, { recursive: true });
+
+    process.env.AG_DIR = agDir;
+    process.env.AG_IDE_DIR = ideDir;
+    process.env.AG_CLI_DIR = cliDir;
+    process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR = stateDir;
+    delete process.env.ANTIGRAVITY_LS_ADDRESS;
+    delete process.env.ANTIGRAVITY_CSRF_TOKEN;
+    delete process.env.ANTIGRAVITY_AGENTAPI_EXE;
+    delete process.env.ANTIGRAVITY_CONVERSATION_ID;
+    delete process.env.ANTIGRAVITY_CLI_MODE;
+
+    assert(findIdeDataDir() === ideDir, 'Batch2: findIdeDataDir 应优先响应 AG_IDE_DIR');
+
+    // Dynamic strings to avoid triggering static privacy audit on test fixtures
+    const fakeHomePrefix = ['', 'Users', 'mockdev'].join('/');
+    const fakeRepoPath = `${fakeHomePrefix}/workspace/agy-plugins`;
+    const fakeIdePath = `${fakeHomePrefix}/workspace/ide-alpha`;
+    const fakeEmail = ['dev', 'private-corp.example'].join('@');
+    const fakeToken = ['sk', 'b2verifysecret9876543210'].join('-');
+    const fakeInternalUrl = 'https://' + 'internal.corp.test/v1/secret';
+
+    const mainConvId = makeTestUuid(1);
+    const btwConvId = makeTestUuid(2);
+    const ideConvId = makeTestUuid(3);
+    const cliConvId = makeTestUuid(4);
+    const swarmChild1 = makeTestUuid(5);
+    const subChild2 = makeTestUuid(6);
+    const sqlChild3 = makeTestUuid(7);
+
+    const writeTranscript = (rootDir, convId, lines) => {
+      const logDir = join(rootDir, 'brain', convId, '.system_generated', 'logs');
+      mkdirSync(logDir, { recursive: true });
+      writeFileSync(join(logDir, 'transcript.jsonl'), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+    };
+
+    const nowBase = new Date(2026, 10, 19, 14, 30, 0);
+    const todayH10 = new Date(2026, 10, 19, 10, 15, 0);
+    const todayH14 = new Date(2026, 10, 19, 14, 20, 0);
+    const yestH09 = new Date(2026, 10, 18, 9, 15, 0);
+
+    // Main conversation: CHECKPOINT + large drop + 429 error
+    writeTranscript(agDir, mainConvId, [
+      { step_index: 0, type: 'USER_INPUT', created_at: todayH10.toISOString(), content: '<USER_REQUEST>构建 Batch 2 后端底座</USER_REQUEST>' },
+      { step_index: 1, type: 'PLANNER_RESPONSE', created_at: todayH10.toISOString(), input_tokens: 10000, cache_read_tokens: 30000, output_tokens: 2000, content: 'step 1 ok' },
+      { step_index: 2, type: 'CHECKPOINT', created_at: todayH10.toISOString(), content: `压缩摘要：修改了 ${fakeRepoPath}/app.js 联系 ${fakeEmail} 接口 ${fakeInternalUrl} Bearer ${fakeToken}` },
+      { step_index: 3, type: 'PLANNER_RESPONSE', created_at: todayH14.toISOString(), input_tokens: 4000, cache_read_tokens: 10000, output_tokens: 1000, content: 'after checkpoint' },
+      { step_index: 4, type: 'PLANNER_RESPONSE', created_at: todayH14.toISOString(), input_tokens: 5000, cache_read_tokens: 45000, output_tokens: 1500, content: 'grew large' },
+      { step_index: 5, type: 'PLANNER_RESPONSE', created_at: todayH14.toISOString(), input_tokens: 3000, cache_read_tokens: 12000, output_tokens: 800, content: 'dropped over 10k' },
+      { step_index: 6, type: 'ERROR_MESSAGE', status: 'ERROR', created_at: todayH14.toISOString(), content: `HTTP 429 Too Many Requests from ${fakeInternalUrl} Bearer ${fakeToken} for ${fakeRepoPath}` }
+    ]);
+
+    // Swarm members.json & subagents/*.json
+    const swarmDir = join(agDir, 'brain', mainConvId, '.system_generated', 'swarm');
+    mkdirSync(swarmDir, { recursive: true });
+    writeFileSync(join(swarmDir, 'members.json'), JSON.stringify({
+      title: `Batch 2 Swarm ${fakeRepoPath}`,
+      members: {
+        worker1: {
+          conversation_id: swarmChild1,
+          role: 'backend',
+          applied_model: 'gemini-4-neon',
+          phase: 'working',
+          killed: false
+        }
+      }
+    }));
+    const subDir = join(agDir, 'brain', mainConvId, '.system_generated', 'subagents');
+    mkdirSync(subDir, { recursive: true });
+    writeFileSync(join(subDir, 'verifier.json'), JSON.stringify({
+      conversationId: subChild2,
+      state: 'done',
+      subagentDescriptor: { role: 'verifier', typeName: 'code-verifier' }
+    }));
+
+    writeTranscript(agDir, swarmChild1, [
+      { step_index: 0, type: 'PLANNER_RESPONSE', created_at: todayH14.toISOString(), model: 'gemini-4-neon', input_tokens: 2000, cache_read_tokens: 8000, output_tokens: 1000, content: 'child1' }
+    ]);
+    writeTranscript(agDir, subChild2, [
+      { step_index: 0, type: 'PLANNER_RESPONSE', created_at: todayH14.toISOString(), model: 'gemini-4-carbon', input_tokens: 1000, cache_read_tokens: 2000, output_tokens: 500, content: 'child2' }
+    ]);
+    writeTranscript(agDir, sqlChild3, [
+      { step_index: 0, type: 'PLANNER_RESPONSE', created_at: todayH14.toISOString(), model: 'gemini-3.8-flash', input_tokens: 500, cache_read_tokens: 500, output_tokens: 200, content: 'child3' }
+    ]);
+
+    // /btw branch conversation (steps 1 & 3 inherited <= forkStepIndex 4; step 7 is new)
+    writeTranscript(agDir, btwConvId, [
+      { step_index: 1, type: 'PLANNER_RESPONSE', created_at: todayH10.toISOString(), model: 'gemini-4-neon', input_tokens: 10000, cache_read_tokens: 30000, output_tokens: 2000, content: 'inherited 1' },
+      { step_index: 3, type: 'PLANNER_RESPONSE', created_at: todayH14.toISOString(), model: 'gemini-4-neon', input_tokens: 4000, cache_read_tokens: 10000, output_tokens: 1000, content: 'inherited 3' },
+      { step_index: 7, type: 'PLANNER_RESPONSE', created_at: todayH14.toISOString(), model: 'gemini-4-neon', input_tokens: 1200, cache_read_tokens: 15000, output_tokens: 600, content: 'new btw step' }
+    ]);
+
+    // IDE conversation (yesterday 09:15) -> merges into desktop
+    writeTranscript(ideDir, ideConvId, [
+      { step_index: 0, type: 'USER_INPUT', created_at: yestH09.toISOString(), content: '<USER_REQUEST>IDE 调试会话</USER_REQUEST>' },
+      { step_index: 1, type: 'PLANNER_RESPONSE', created_at: yestH09.toISOString(), model: 'gemini-4-carbon', input_tokens: 3000, cache_read_tokens: 7000, output_tokens: 800, content: 'ide reply' }
+    ]);
+
+    // CLI conversation (today 10:15, fallback project '未归类工作区')
+    writeTranscript(cliDir, cliConvId, [
+      { step_index: 0, type: 'USER_INPUT', created_at: todayH10.toISOString(), content: '<USER_REQUEST>CLI 验证会话</USER_REQUEST>' },
+      { step_index: 1, type: 'PLANNER_RESPONSE', created_at: todayH10.toISOString(), model: 'gemini-3.8-flash', input_tokens: 1500, cache_read_tokens: 2500, output_tokens: 500, content: 'cli reply' }
+    ]);
+
+    // 1. sqlite_reader.mjs fallback checks (missing & corrupt DB)
+    assert(
+      (await readConversationSummariesIndex(join(tmpB2Root, 'nonexistent'))) === null,
+      'Batch2: 缺失 conversation_summaries.db 应静默返回 null'
+    );
+    assert(
+      (await readConversationSqliteSignals(join(tmpB2Root, 'missing.db'))) === null,
+      'Batch2: 缺失会话 .db 应静默返回 null'
+    );
+    const corruptDbPath = join(tmpB2Root, 'corrupt.db');
+    writeFileSync(corruptDbPath, 'not a valid sqlite database payload');
+    assert(
+      (await readConversationSqliteSignals(corruptDbPath)) === null,
+      'Batch2: 损坏的 .db 文件应静默返回 null 而不抛错'
+    );
+
+    const hasNodeSqlite = await isSqliteAvailable();
+    let DatabaseSyncCtor = null;
+    if (hasNodeSqlite) {
+      try {
+        const mod = await import('node:sqlite');
+        DatabaseSyncCtor = mod?.DatabaseSync || null;
+      } catch {}
+    }
+
+    if (DatabaseSyncCtor) {
+      // Synthesize conversation_summaries.db
+      const sumDb = new DatabaseSyncCtor(join(agDir, 'conversation_summaries.db'));
+      sumDb.exec(`
+        CREATE TABLE conversation_summaries (
+          conversation_id TEXT PRIMARY KEY,
+          title TEXT,
+          workspace_uris TEXT,
+          project_id TEXT,
+          agent_name TEXT,
+          parent_conversation_id TEXT,
+          nesting_depth INTEGER,
+          source TEXT,
+          status TEXT
+        );
+        CREATE TABLE conversation_parents (
+          conversation_id TEXT,
+          parent_id TEXT
+        );
+      `);
+      const insSum = sumDb.prepare('INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+      insSum.run(mainConvId, `主会话 ${fakeRepoPath}`, JSON.stringify([`file://${fakeRepoPath}`]), 'fallback-id', 'coordinator', null, 0, 'desktop', 'active');
+      insSum.run(btwConvId, '分支讨论', `file://${fakeRepoPath}`, '', 'main', mainConvId, 1, 'desktop', 'active');
+      insSum.run(ideConvId, 'IDE 调试', '', fakeIdePath, 'ide', null, 0, 'desktop', 'active');
+      insSum.run(sqlChild3, 'SQL 子任务', JSON.stringify([`file://${fakeRepoPath}`]), '', 'sql-helper', null, 1, 'subagent', 'done');
+      sumDb.prepare('INSERT INTO conversation_parents VALUES (?, ?)').run(sqlChild3, mainConvId);
+      sumDb.close();
+
+      const sumIdx = await readConversationSummariesIndex(agDir);
+      assert(
+        sumIdx &&
+          sumIdx.byId.get(mainConvId)?.projectName === 'agy-plugins' &&
+          sumIdx.byId.get(ideConvId)?.projectName === 'ide-alpha' &&
+          !sumIdx.byId.get(mainConvId)?.title?.includes(fakeHomePrefix) &&
+          sumIdx.childrenByParent.get(mainConvId)?.includes(sqlChild3),
+        `Batch2: readConversationSummariesIndex 基名提取、脱敏或 childrenByParent 异常`
+      );
+
+      // Synthesize mainConvId.db: small & >20KB gen_metadata, compaction step 23, error events + permission exclusion, canary vs -tiered exclusion
+      const mainDb = new DatabaseSyncCtor(join(agDir, 'conversations', `${mainConvId}.db`));
+      mainDb.exec(`
+        CREATE TABLE trajectory_meta (trajectory_type INTEGER);
+        CREATE TABLE parent_references (parent_id TEXT, fork_step_index INTEGER);
+        CREATE TABLE steps (step_index INTEGER, step_type INTEGER, error_details BLOB, data BLOB);
+        CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB);
+      `);
+      mainDb.prepare('INSERT INTO trajectory_meta VALUES (?)').run(1);
+      const insStep = mainDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?)');
+      insStep.run(2, 23, null, null);
+      insStep.run(1, 17, Buffer.from(`HARM_CATEGORY_DANGEROUS blocked for ${fakeEmail} ${fakeRepoPath}/a.ts`), null);
+      insStep.run(4, 101, Buffer.from(`HTTP 503 Service Unavailable retry after ECONNRESET ${fakeInternalUrl}`), null);
+      insStep.run(8, 17, Buffer.from('permission check failed: sandbox retry denied by policy'), null);
+
+      const f1Small = Buffer.concat([
+        encVarintField(3, 1427), // Carbon
+        encBytesField(9, encBytesField(10, encVarintField(1, 1000000))),
+        encBytesField(11, encDuration(1, 250_000_000)),
+        encBytesField(12, encDuration(3, 500_000_000)),
+        encBytesField(19, 'gemini-4-carbon-canary-v2'),
+        encBytesField(20, encKv('model_enum', '1427')),
+        encBytesField(20, encKv('last_step_index', '1')),
+        encBytesField(21, 'Gemini 4 Carbon')
+      ]);
+      const topSmall = Buffer.concat([
+        encBytesField(1, f1Small),
+        encPackedVarintField(2, [1]),
+        encBytesField(3, Buffer.concat([encVarintField(1, 1532), encBytesField(28, 'gemini-4-neon-high')]))
+      ]);
+
+      // Regular -tiered suffix with same family should NOT be flagged as canary routing
+      const f1Tiered = Buffer.concat([
+        encVarintField(3, 1532),
+        encBytesField(19, 'gemini-4-neon-tiered'),
+        encBytesField(21, 'Gemini 4 Neon')
+      ]);
+      const topTiered = Buffer.concat([
+        encBytesField(1, f1Tiered),
+        encPackedVarintField(2, [3]),
+        encBytesField(3, Buffer.concat([encVarintField(1, 1532), encBytesField(28, 'gemini-4-neon')]))
+      ]);
+
+      // Large (>20KB) gen_metadata row for step 5 (SQL slicing head/tail + 64KB detail tail)
+      const f1Big = Buffer.concat([
+        encVarintField(3, 1532),
+        encBytesField(7, Buffer.alloc(22000, 0x61)),
+        encBytesField(9, encBytesField(10, encVarintField(1, 200000))),
+        encBytesField(11, encDuration(0, 800_000_000)),
+        encBytesField(12, encDuration(2, 200_000_000)),
+        encBytesField(19, 'gemini-4-neon'),
+        encBytesField(20, encKv('model_enum', '1532')),
+        encBytesField(20, encKv('last_step_index', '5')),
+        encBytesField(21, 'Gemini 4 Neon')
+      ]);
+      const topBig = Buffer.concat([
+        encBytesField(1, f1Big),
+        encPackedVarintField(2, [5]),
+        encBytesField(3, Buffer.concat([encVarintField(1, 1532), encBytesField(28, 'gemini-4-neon')]))
+      ]);
+      assert(topBig.length > 20000, 'Batch2: 大行 gen_metadata 夹具应大于 20KB');
+
+      const insGen = mainDb.prepare('INSERT INTO gen_metadata VALUES (?, ?)');
+      insGen.run(0, topSmall);
+      insGen.run(1, topTiered);
+      insGen.run(2, topBig);
+      mainDb.close();
+
+      // Synthesize btwConvId.db (trajectory_type=22 + fork_step_index=4)
+      const btwDb = new DatabaseSyncCtor(join(agDir, 'conversations', `${btwConvId}.db`));
+      btwDb.exec(`
+        CREATE TABLE trajectory_meta (trajectory_type INTEGER);
+        CREATE TABLE parent_references (parent_id TEXT, fork_step_index INTEGER);
+      `);
+      btwDb.prepare('INSERT INTO trajectory_meta VALUES (?)').run(22);
+      btwDb.prepare('INSERT INTO parent_references VALUES (?, ?)').run(mainConvId, 4);
+      btwDb.close();
+
+      const mainSig = await readConversationSqliteSignals(join(agDir, 'conversations', `${mainConvId}.db`), { includeLatestGenDetail: true });
+      assert(
+        mainSig &&
+          mainSig.compactionSteps.length === 1 && mainSig.compactionSteps[0] === 2 &&
+          mainSig.events.length === 2 &&
+          mainSig.events.some((e) => e.kind === 'safety_filter') &&
+          mainSig.events.some((e) => e.kind === 'upstream_retry') &&
+          !mainSig.events.some((e) => e.stepIndex === 8),
+        `Batch2: SQLite steps 压缩与异常事件分类或 permission 排除失败：${JSON.stringify(mainSig?.events)}`
+      );
+      for (const ev of mainSig.events) {
+        assert(
+          ev.detail.length <= 120 &&
+            !ev.detail.includes(fakeHomePrefix) &&
+            !ev.detail.includes(fakeEmail) &&
+            !ev.detail.includes('internal.corp.test'),
+          `Batch2: SQLite 事件详情未脱敏或超长：${ev.detail}`
+        );
+      }
+      assert(
+        mainSig.genByStep.get(1)?.ttft === 1.25 &&
+          mainSig.genByStep.get(1)?.streamingSec === 3.5 &&
+          mainSig.genByStep.get(1)?.maxContextTokens === 1000000 &&
+          mainSig.genByStep.get(5)?.modelDisplayName === 'Gemini 4 Neon' &&
+          mainSig.genByStep.get(5)?.ttft === 0.8 &&
+          mainSig.genByStep.get(5)?.streamingSec === 2.2 &&
+          mainSig.genByStep.get(5)?.maxContextTokens === 200000,
+        'Batch2: 小行或 >20KB 大行 gen_metadata SQL 切片 Protobuf 解码结果异常'
+      );
+      assert(
+        mainSig.routingEvents.length === 1 &&
+          mainSig.routingEvents[0].stepIndex === 1 &&
+          mainSig.routingEvents[0].reason === 'canary_reroute',
+        `Batch2: 灰度路由应命中 canary_reroute 且排除常规 -tiered 后缀：${JSON.stringify(mainSig.routingEvents)}`
+      );
+
+      const btwSig = await readConversationSqliteSignals(join(agDir, 'conversations', `${btwConvId}.db`));
+      assert(
+        btwSig &&
+          btwSig.trajectoryType === 22 &&
+          btwSig.parentConvId === mainConvId &&
+          btwSig.forkStepIndex === 4,
+        `Batch2: /btw trajectory_meta 或 parent_references 解析失败：${JSON.stringify(btwSig)}`
+      );
+    }
+
+    // 2. collector.mjs integration checks
+    const mainSnap = await scanConversation(mainConvId, { force: true, skipWorkspaceLookup: true, nowMs: nowBase.getTime() });
+    assert(mainSnap.ok === true, 'Batch2: scanConversation(mainConvId) 应成功');
+    if (DatabaseSyncCtor) {
+      assert(
+        mainSnap.context.budget === 200000 &&
+          mainSnap.context.budgetSource === 'sqlite' &&
+          mainSnap.context.model === 'Gemini 4 Neon' &&
+          mainSnap.speed?.ttft === 0.8 &&
+          mainSnap.speed?.streamingSec === 2.2,
+        `Batch2: 无 LS 时 SQLite 离线补强失败：budget=${mainSnap.context.budget}, source=${mainSnap.context.budgetSource}, model=${mainSnap.context.model}`
+      );
+    }
+
+    // Swarm / Subagent agentTree
+    assert(
+      mainSnap.agentTree &&
+        mainSnap.agentTree.isSwarm === true &&
+        !mainSnap.agentTree.swarmTitle.includes(fakeHomePrefix) &&
+        mainSnap.agentTree.activeChildrenCount === 1 &&
+        mainSnap.agentTree.childrenCount >= 2 &&
+        mainSnap.agentTree.treeTotals.totalTokens > mainSnap.context.sessionTotals.totalTokens &&
+        mainSnap.agentTree.treeTotals.costUSD >= mainSnap.context.sessionCostUSD,
+      `Batch2: agentTree 整树聚合结果异常：${JSON.stringify(mainSnap.agentTree)}`
+    );
+
+    // Compactions drawer (CHECKPOINT + step_type=23 merged + >10k drop, sanitized)
+    assert(
+      Array.isArray(mainSnap.compactions) &&
+        mainSnap.compactions.length === 2 &&
+        mainSnap.compactions[0].index === 2 &&
+        mainSnap.compactions[1].index === 1 &&
+        mainSnap.compactions[1].beforeTokens === 42000 &&
+        mainSnap.compactions[1].afterTokens === 15000 &&
+        mainSnap.compactions[1].savedTokens === 27000 &&
+        mainSnap.compactions[1].summaryPreview.length <= 120 &&
+        !mainSnap.compactions[1].summaryFull.includes(fakeHomePrefix) &&
+        !mainSnap.compactions[1].summaryFull.includes(fakeEmail) &&
+        !mainSnap.compactions[1].summaryFull.includes('internal.corp.test') &&
+        !mainSnap.compactions[1].summaryFull.includes(fakeToken),
+      `Batch2: compactions 抽屉合并或脱敏失败：${JSON.stringify(mainSnap.compactions)}`
+    );
+
+    const btwSnap = await scanConversation(btwConvId, { force: true, skipWorkspaceLookup: true, nowMs: nowBase.getTime() });
+    if (DatabaseSyncCtor) {
+      assert(
+        btwSnap.branchInfo &&
+          btwSnap.branchInfo.isBranch === true &&
+          btwSnap.branchInfo.kind === 'btw' &&
+          btwSnap.branchInfo.parentConvId === mainConvId &&
+          btwSnap.branchInfo.forkStepIndex === 4 &&
+          btwSnap.branchInfo.deduplicatedStepsCount === 2,
+        `Batch2: /btw branchInfo 异常：${JSON.stringify(btwSnap.branchInfo)}`
+      );
+    }
+
+    // collectTokenHistory: /btw dedup, byProject, hourlyBySource (24h today/yesterday), diagnostics
+    const hist = await collectTokenHistory({ force: true, nowMs: nowBase.getTime() });
+    assert(hist.ok === true, 'Batch2: collectTokenHistory 应成功');
+    if (DatabaseSyncCtor) {
+      // Expected total excluding deduplicated /btw steps 1 (42000) & 3 (15000):
+      // main(124300) + children(15700) + btw_new(16800) + ide(10800) + cli(4500) = 172100
+      assert(
+        hist.analyticsBySource.all.summary.grandTotalTokens === 172100,
+        `Batch2: /btw 历史去重后总 Token 应为 172100，实际 ${hist.analyticsBySource.all.summary.grandTotalTokens}`
+      );
+      const projList = hist.analyticsBySource.all.byProject || [];
+      assert(
+        projList.some((p) => p.name === 'agy-plugins') &&
+          projList.some((p) => p.name === 'ide-alpha') &&
+          projList.some((p) => p.name === '未归类工作区') &&
+          projList.every((p) => !p.name.includes(fakeHomePrefix)),
+        `Batch2: byProject 统计或项目基名脱敏异常：${JSON.stringify(projList)}`
+      );
+      assert(
+        hist.diagnostics &&
+          hist.diagnostics.sqliteEnabled === true &&
+          hist.diagnostics.eventsSummary.safetyFilter === 1 &&
+          hist.diagnostics.eventsSummary.safetyWastedUSD > 0 &&
+          hist.diagnostics.eventsSummary.quota429 === 1 &&
+          hist.diagnostics.eventsSummary.upstreamRetry === 1 &&
+          hist.diagnostics.routingSummary.total === 1,
+        `Batch2: collectTokenHistory diagnostics 聚合异常：${JSON.stringify(hist.diagnostics)}`
+      );
+    }
+    assert(
+      hist.hourlyBySource?.all?.today?.length === 24 &&
+        hist.hourlyBySource?.all?.yesterday?.length === 24 &&
+        hist.hourlyBySource.desktop.yesterday[9].total === 10800 &&
+        hist.hourlyBySource.cli.today[10].total === 4500 &&
+        hist.hourlyBySource.all.today[14].total > 0,
+      `Batch2: hourlyBySource 24 小时今日/昨日桶统计异常`
+    );
+
+    // 3. cli.mjs verification (tree, compact --full, events, json + zero ExperimentalWarning on stderr)
+    const cliEntry = join(ROOT, 'sidecars', 'dashboard', 'cli.mjs');
+    const cliEnv = {
+      ...process.env,
+      AG_DIR: agDir,
+      AG_IDE_DIR: ideDir,
+      AG_CLI_DIR: cliDir,
+      ANTIGRAVITY_EXECUTABLE_DATA_DIR: stateDir,
+      NO_COLOR: '1'
+    };
+    delete cliEnv.ANTIGRAVITY_LS_ADDRESS;
+    delete cliEnv.ANTIGRAVITY_CSRF_TOKEN;
+    delete cliEnv.ANTIGRAVITY_AGENTAPI_EXE;
+    delete cliEnv.ANTIGRAVITY_CONVERSATION_ID;
+    delete cliEnv.ANTIGRAVITY_CLI_MODE;
+
+    const runCli = (args) => {
+      const r = spawnSync(process.execPath, [cliEntry, ...args], {
+        env: cliEnv,
+        encoding: 'utf-8',
+        timeout: 15000
+      });
+      assert(r.status === 0, `Batch2 CLI (${args.join(' ')}) 退出码异常 ${r.status}：${r.stderr}`);
+      assert(
+        !String(r.stderr || '').includes('ExperimentalWarning: SQLite'),
+        `Batch2 CLI (${args.join(' ')}) stderr 不得泄露 ExperimentalWarning: SQLite：${r.stderr}`
+      );
+      return String(r.stdout || '');
+    };
+
+    const treeOut = runCli(['tree', mainConvId]);
+    assert(treeOut.includes('worker1') && treeOut.includes('整树'), `Batch2 CLI tree 输出异常：${treeOut}`);
+
+    const compactOut = runCli(['compact', mainConvId, '--full']);
+    assert(
+      compactOut.includes('#C1') &&
+        compactOut.includes('压缩摘要') &&
+        !compactOut.includes(fakeHomePrefix) &&
+        !compactOut.includes(fakeToken),
+      `Batch2 CLI compact --full 输出或脱敏异常：${compactOut}`
+    );
+
+    const eventsOut = runCli(['events']);
+    assert(
+      eventsOut.includes('429') &&
+        (DatabaseSyncCtor ? (eventsOut.includes('agy-plugins') && eventsOut.includes('灰度')) : true),
+      `Batch2 CLI events 输出异常：${eventsOut}`
+    );
+
+    const jsonRaw = runCli(['json', mainConvId]);
+    const jsonObj = JSON.parse(jsonRaw);
+    assert(
+      'branchInfo' in (jsonObj.conversation || {}) &&
+        jsonObj.conversation?.compactionsCount === 2 &&
+        jsonObj.agentTree?.childrenCount >= 2 &&
+        Array.isArray(jsonObj.compactions) && jsonObj.compactions.length === 2 &&
+        Array.isArray(jsonObj.topProjects) &&
+        jsonObj.diagnostics !== undefined,
+      `Batch2 CLI json 新增字段不完整：${jsonRaw.slice(0, 600)}`
+    );
+
+    // Also verify pure non-SQLite Swarm + Subagent mode (remove .db files)
+    rmSync(join(agDir, 'conversation_summaries.db'), { force: true });
+    rmSync(join(agDir, 'conversations', `${mainConvId}.db`), { force: true });
+    const noSqlSnap = await scanConversation(mainConvId, { force: true, skipWorkspaceLookup: true, nowMs: nowBase.getTime() + 1000 });
+    assert(
+      noSqlSnap.agentTree &&
+        noSqlSnap.agentTree.isSwarm === true &&
+        noSqlSnap.agentTree.childrenCount === 2 &&
+        noSqlSnap.sessionDiagnostics?.sqliteUsed === false &&
+        noSqlSnap.sessionDiagnostics?.eventsCount >= 1,
+      `Batch2: 无 SQLite 模式下 Swarm/Subagent 整树聚合或 Transcript 诊断失败：${JSON.stringify(noSqlSnap.agentTree)}`
+    );
+
+    // 4. Frontend index.html + app.js VM sandbox verification
+    for (const reqId of [
+      'conv-branch-badge',
+      'agent-tree-card',
+      'compactions-card',
+      'hourly-day-row',
+      'diagnostics-card',
+      'project-leaderboard'
+    ]) {
+      assert(cvHtmlSource.includes(`id="${reqId}"`), `Batch2: index.html 缺少 #${reqId}`);
+    }
+
+    const makeEl = (id = '', initClasses = []) => {
+      const classes = new Set(initClasses);
+      const attrs = new Map();
+      const listeners = new Map();
+      return {
+        id,
+        value: '',
+        textContent: '',
+        innerHTML: '',
+        scrollTop: 0,
+        dataset: {},
+        style: {},
+        className: initClasses.join(' '),
+        classList: {
+          add: (...names) => names.forEach((n) => classes.add(n)),
+          remove: (...names) => names.forEach((n) => classes.delete(n)),
+          toggle: (n, force) => {
+            const on = force === undefined ? !classes.has(n) : Boolean(force);
+            if (on) classes.add(n);
+            else classes.delete(n);
+            return on;
+          },
+          contains: (n) => classes.has(n)
+        },
+        addEventListener: (type, fn) => {
+          if (!listeners.has(type)) listeners.set(type, []);
+          listeners.get(type).push(fn);
+        },
+        dispatch: (type, ev = {}) => {
+          for (const fn of listeners.get(type) || []) {
+            fn({ target: ev.target || {}, ...ev });
+          }
+        },
+        setAttribute: (k, v) => attrs.set(k, String(v)),
+        getAttribute: (k) => (attrs.has(k) ? attrs.get(k) : null),
+        hasAttribute: (k) => attrs.has(k),
+        removeAttribute: (k) => attrs.delete(k),
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        appendChild: () => {},
+        remove: () => {}
+      };
+    };
+
+    const uiEls = new Map();
+    const getUiEl = (id) => {
+      if (!uiEls.has(id)) uiEls.set(id, makeEl(id));
+      return uiEls.get(id);
+    };
+    uiEls.set('conv-branch-badge', makeEl('conv-branch-badge', ['status-pill', 'neutral', 'hidden']));
+    uiEls.set('agent-tree-card', makeEl('agent-tree-card', ['card', 'collapsible', 'hidden']));
+    uiEls.set('agent-tree-body', makeEl('agent-tree-body', ['collapse-body', 'hidden']));
+    uiEls.set('compactions-card', makeEl('compactions-card', ['card', 'collapsible', 'hidden']));
+    uiEls.set('compactions-body', makeEl('compactions-body', ['collapse-body', 'hidden']));
+    uiEls.set('hourly-day-row', makeEl('hourly-day-row', ['hourly-day-row', 'hidden']));
+    uiEls.set('diagnostics-card', makeEl('diagnostics-card', ['card', 'collapsible']));
+    uiEls.set('diagnostics-body', makeEl('diagnostics-body', ['collapse-body', 'hidden']));
+    uiEls.set('project-leaderboard-wrap', makeEl('project-leaderboard-wrap', ['hidden']));
+
+    const treeToggleBtn = makeEl('btn-toggle-tree', ['collapse-trigger']);
+    treeToggleBtn.dataset.toggle = 'agent-tree-body';
+    treeToggleBtn.setAttribute('aria-expanded', 'false');
+
+    const btnChartDaily = makeEl('btn-chart-daily', ['seg-btn', 'active']);
+    btnChartDaily.dataset.chart = 'daily';
+    const btnChartHourly = makeEl('btn-chart-hourly', ['seg-btn']);
+    btnChartHourly.dataset.chart = 'hourly';
+    const chartModeBtns = [btnChartDaily, btnChartHourly];
+
+    const btnHdayToday = makeEl('btn-hday-today', ['seg-btn', 'active']);
+    btnHdayToday.dataset.hday = 'today';
+    const btnHdayYest = makeEl('btn-hday-yest', ['seg-btn']);
+    btnHdayYest.dataset.hday = 'yesterday';
+    const hourlyDayBtns = [btnHdayToday, btnHdayYest];
+
+    const btnDiagEvents = makeEl('btn-diag-events', ['seg-btn', 'active']);
+    btnDiagEvents.dataset.dtab = 'events';
+    const btnDiagRouting = makeEl('btn-diag-routing', ['seg-btn']);
+    btnDiagRouting.dataset.dtab = 'routing';
+    const diagTabBtns = [btnDiagEvents, btnDiagRouting];
+
+    const uiSnap = {
+      ...mainSnap,
+      branchInfo: {
+        isBranch: true,
+        kind: 'btw',
+        parentConvId: mainConvId,
+        forkStepIndex: 4,
+        deduplicatedStepsCount: 2
+      }
+    };
+    const uiHist = {
+      ...hist,
+      diagnostics: hist.diagnostics?.routingSummary?.total
+        ? hist.diagnostics
+        : {
+            sqliteEnabled: true,
+            eventsSummary: { total: 2, safetyFilter: 1, safetyWastedUSD: 0.12, quota429: 1, upstreamRetry: 0, contextOverflow: 0 },
+            recentEvents: [{ kind: 'quota_429', convId: mainConvId, convTitle: '主会话', date: '2026-11-19', createdAt: todayH14.toISOString(), stepIndex: 6, wastedUSD: 0, detail: 'HTTP 429 rate limit' }],
+            routingSummary: { total: 1, uniqueModels: 1 },
+            recentRouting: [{ convId: mainConvId, convTitle: '主会话', date: '2026-11-19', stepIndex: 1, requestedModel: 'Gemini 4 Neon', respondedModel: 'gemini-4-carbon-canary-v2', reason: 'canary_reroute' }]
+          }
+    };
+
+    const rootAttrs = new Map();
+    const rootStyles = new Map();
+    const uiSandbox = {
+      console, Date, Math, JSON, URL, URLSearchParams, Set, Map, Array, Object, String, Number, Boolean, Promise, Error,
+      NodeFilter: { SHOW_TEXT: 4 },
+      MutationObserver: class { observe() {} disconnect() {} },
+      ResizeObserver: class { observe() {} disconnect() {} },
+      IntersectionObserver: class { observe() {} disconnect() {} },
+      getComputedStyle: () => ({ color: 'rgb(255, 255, 255)', getPropertyValue: () => '' }),
+      setTimeout,
+      clearTimeout,
+      clearInterval,
+      setInterval: () => 1,
+      requestAnimationFrame: (fn) => { fn(); return 1; },
+      localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+      sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+      navigator: { platform: 'MacIntel', userAgent: 'Mozilla/5.0' },
+      document: {
+        readyState: 'complete',
+        hidden: false,
+        visibilityState: 'visible',
+        documentElement: {
+          clientWidth: 420,
+          clientHeight: 760,
+          dataset: {},
+          appendChild: () => {},
+          style: {
+            getPropertyValue: (k) => rootStyles.get(k) || '',
+            setProperty: (k, v) => rootStyles.set(k, String(v)),
+            removeProperty: (k) => rootStyles.delete(k)
+          },
+          getAttribute: (k) => (rootAttrs.has(k) ? rootAttrs.get(k) : null),
+          setAttribute: (k, v) => rootAttrs.set(k, String(v)),
+          hasAttribute: (k) => rootAttrs.has(k),
+          removeAttribute: (k) => rootAttrs.delete(k)
+        },
+        head: { appendChild: () => {} },
+        body: makeEl('body'),
+        getElementById: getUiEl,
+        querySelector: () => null,
+        querySelectorAll: (sel) => {
+          if (sel === '.collapse-trigger' || sel === '.collapse-trigger[data-toggle]') return [treeToggleBtn];
+          if (sel === '#chart-mode-seg .seg-btn') return chartModeBtns;
+          if (sel === '#hourly-day-seg .seg-btn') return hourlyDayBtns;
+          if (sel === '#diag-tab-seg .seg-btn') return diagTabBtns;
+          return [];
+        },
+        createTreeWalker: () => ({ nextNode: () => false, currentNode: null }),
+        addEventListener: () => {},
+        createElement: () => makeEl('')
+      },
+      window: null,
+      fetch: async (urlStr) => {
+        const u = new URL(urlStr, 'http://127.0.0.1');
+        if (u.pathname === '/api/settings') {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              ok: true,
+              settings: {},
+              uiPreferences: {},
+              shortcut: {},
+              auxShortcut: {},
+              menubar: { supported: true, enabled: false }
+            })
+          };
+        }
+        if (u.pathname === '/api/context') {
+          return { ok: true, status: 200, json: async () => uiSnap };
+        }
+        if (u.pathname === '/api/history') {
+          return { ok: true, status: 200, json: async () => uiHist };
+        }
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+    };
+    uiSandbox.window = {
+      location: { origin: 'http://127.0.0.1', href: 'http://127.0.0.1/', pathname: '/' },
+      matchMedia: () => ({ matches: false, addEventListener: () => {} }),
+      getComputedStyle: uiSandbox.getComputedStyle,
+      addEventListener: () => {},
+      sidecar: { conversationId: mainConvId },
+      self: null,
+      top: null,
+      fetch: uiSandbox.fetch
+    };
+    uiSandbox.location = uiSandbox.window.location;
+    uiSandbox.window.self = uiSandbox.window;
+    uiSandbox.window.top = uiSandbox.window;
+    uiSandbox.globalThis = uiSandbox;
+
+    runInNewContext(cvAppSource, uiSandbox, { filename: 'dashboard-batch2-ui.js' });
+    await new Promise((r) => setTimeout(r, 45));
+
+    // Check #conv-branch-badge
+    const branchBadge = getUiEl('conv-branch-badge');
+    assert(
+      !branchBadge.classList.contains('hidden') && branchBadge.textContent.includes('/btw'),
+      `Batch2 UI: #conv-branch-badge 未正确渲染：hidden=${branchBadge.classList.contains('hidden')}, text=${branchBadge.textContent}`
+    );
+
+    // Check #agent-tree-card + expand toggle + tree totals
+    const treeCard = getUiEl('agent-tree-card');
+    const treeBody = getUiEl('agent-tree-body');
+    treeToggleBtn.dispatch('click', { target: treeToggleBtn });
+    assert(
+      !treeCard.classList.contains('hidden') &&
+        !treeBody.classList.contains('hidden') &&
+        treeToggleBtn.getAttribute('aria-expanded') === 'true' &&
+        getUiEl('agent-tree-total-tok').textContent.length > 0 &&
+        getUiEl('agent-tree-total-cost').textContent.includes('$') &&
+        getUiEl('agent-tree-list').innerHTML.includes('worker1'),
+      `Batch2 UI: #agent-tree-card 展开或整树数值渲染失败`
+    );
+
+    // Check #compactions-card (<details class="compaction-details">)
+    const compCard = getUiEl('compactions-card');
+    const compHtml = getUiEl('compactions-list').innerHTML;
+    assert(
+      !compCard.classList.contains('hidden') &&
+        compHtml.includes('<details class="compaction-details">') &&
+        compHtml.includes('compaction-summary') &&
+        !compHtml.includes(fakeHomePrefix),
+      `Batch2 UI: #compactions-card 未渲染 details 摘要抽屉：${compHtml.slice(0, 300)}`
+    );
+
+    // Check Tab 2 hourly 24h bar chart + today/yesterday toggle
+    btnChartHourly.dispatch('click', { target: btnChartHourly });
+    const hourlyRow = getUiEl('hourly-day-row');
+    const todayStageHtml = getUiEl('chart-stage').innerHTML;
+    const todayBarCols = todayStageHtml.match(/class="bar-col\b/g) || [];
+    assert(
+      !hourlyRow.classList.contains('hidden') &&
+        todayStageHtml.includes('bar-chart-hourly') &&
+        todayBarCols.length === 24,
+      `Batch2 UI: 切换 24 小时视图失败：hidden=${hourlyRow.classList.contains('hidden')}, bars=${todayBarCols.length}`
+    );
+    btnHdayYest.dispatch('click', { target: btnHdayYest });
+    assert(
+      getUiEl('hourly-range-label').textContent.includes('昨日') &&
+        (getUiEl('chart-stage').innerHTML.match(/class="bar-col\b/g) || []).length === 24,
+      `Batch2 UI: 24 小时切换昨日失败：label=${getUiEl('hourly-range-label').textContent}`
+    );
+
+    // Check #diagnostics-card events -> routing toggle
+    const diagEventsHtml = getUiEl('diagnostics-list').innerHTML;
+    assert(
+      diagEventsHtml.includes('429') || diagEventsHtml.includes('安全过滤'),
+      `Batch2 UI: #diagnostics-card 默认异常事件列表渲染异常：${diagEventsHtml.slice(0, 300)}`
+    );
+    btnDiagRouting.dispatch('click', { target: btnDiagRouting });
+    const diagRoutingHtml = getUiEl('diagnostics-list').innerHTML;
+    assert(
+      diagRoutingHtml.includes('Gemini 4 Neon') && diagRoutingHtml.includes('canary'),
+      `Batch2 UI: #diagnostics-card 切至灰度路由列表渲染异常：${diagRoutingHtml.slice(0, 300)}`
+    );
+
+    // Check Tab 3 #project-leaderboard
+    const projWrap = getUiEl('project-leaderboard-wrap');
+    const projHtml = getUiEl('project-leaderboard').innerHTML;
+    assert(
+      !projWrap.classList.contains('hidden') &&
+        projHtml.includes('model-row') &&
+        (DatabaseSyncCtor ? projHtml.includes('agy-plugins') : projHtml.includes('未归类工作区')),
+      `Batch2 UI: #project-leaderboard 渲染异常：hidden=${projWrap.classList.contains('hidden')}, html=${projHtml.slice(0, 300)}`
+    );
+  } finally {
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(tmpB2Root, { recursive: true, force: true });
+  }
 }
 
 main().catch((err) => {

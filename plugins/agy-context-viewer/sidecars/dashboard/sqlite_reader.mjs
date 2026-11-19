@@ -1,0 +1,1008 @@
+/**
+ * Optional Read-Only SQLite Signal Reader for Antigravity Context & Token Viewer.
+ *
+ * Strict compliance guarantees:
+ * 1. Zero external dependencies; compatible with Node.js >= 18 via dynamic `import('node:sqlite')`.
+ * 2. Strictly read-only (`{ readOnly: true, timeout: 1500 }`), always closed in `finally`.
+ * 3. OOM-safe SQL slicing on large `gen_metadata` BLOBs (`substr(data, 1, 8192)` + `substr(data, -4096)`).
+ * 4. All user-facing strings (titles, project names, event details) are sanitized to prevent
+ *    leaking absolute home paths, raw emails, bearer/API tokens, or internal URLs.
+ */
+
+import { existsSync, statSync } from 'node:fs';
+import { basename, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import {
+  formatModelDisplayName,
+  normalizeModelId,
+  sanitizeDiagnosticText
+} from './pricing.mjs';
+
+const CACHE_MAX_ENTRIES = 256;
+const UUID_RE = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+const CANARY_RESPONSE_RE = /canary|experiment|exp-|abtest|shadow/i;
+const ORCHESTRATOR_OR_PLAN_RE = /\b(?:plan|planner|orchestrator)\b/i;
+
+const EVENT_PATTERNS = [
+  {
+    kind: 'safety_filter',
+    re: /safety|blocked|recitation|prohibited_content|HARM_CATEGORY/i,
+    excludeRe: /permission check failed|sandbox|not permitted/i
+  },
+  {
+    kind: 'context_overflow',
+    re: /context[^\r\n]{0,30}length|token[^\r\n]{0,30}limit|maximum context|too long/i,
+    excludeRe: /deadline exceeded|idle timeout/i
+  },
+  {
+    kind: 'quota_429',
+    re: /\b429\b|rate.?limit|too many requests|RESOURCE_EXHAUSTED/i
+  },
+  {
+    kind: 'upstream_retry',
+    re: /\b503\b|\b502\b|\b504\b|unavailable|overloaded|retry|idle timeout|ECONNRESET/i,
+    excludeRe: /permission check failed|not permitted|sandbox|user rejected|cancelled|canceled|denied/i
+  }
+];
+
+let sqliteLoadPromise = null;
+let cachedDatabaseSync = null;
+let sqliteProbed = false;
+
+const summaryIndexCache = new Map(); // dbPath -> { sig, value }
+const convSignalsCache = new Map();  // `${dbPath}|${detailFlag}` -> { sig, value }
+
+function setBoundedCache(map, key, entry) {
+  if (map.has(key)) {
+    map.delete(key);
+  } else if (map.size >= CACHE_MAX_ENTRIES) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
+  map.set(key, entry);
+}
+
+function getFileCacheSig(dbPath) {
+  try {
+    const st = statSync(dbPath);
+    let sig = `${st.size}:${st.mtimeMs}`;
+    const walPath = `${dbPath}-wal`;
+    try {
+      if (existsSync(walPath)) {
+        const wst = statSync(walPath);
+        sig += `|${wst.size}:${wst.mtimeMs}`;
+      }
+    } catch {}
+    return sig;
+  } catch {
+    return null;
+  }
+}
+
+export async function isSqliteAvailable() {
+  if (sqliteProbed) return Boolean(cachedDatabaseSync);
+  if (!sqliteLoadPromise) {
+    sqliteLoadPromise = (async () => {
+      const origEmitWarning = process.emitWarning;
+      process.emitWarning = function filteredSqliteWarning(warning, ...rest) {
+        const msg = typeof warning === 'string' ? warning : String(warning?.message || '');
+        const type = typeof rest[0] === 'string' ? rest[0] : String(rest[0]?.type || warning?.name || '');
+        if (type === 'ExperimentalWarning' && /sqlite/i.test(msg)) return;
+        return origEmitWarning.call(process, warning, ...rest);
+      };
+      try {
+        const mod = await import('node:sqlite');
+        if (typeof mod?.DatabaseSync === 'function') {
+          cachedDatabaseSync = mod.DatabaseSync;
+        }
+      } catch {
+        cachedDatabaseSync = null;
+      } finally {
+        process.emitWarning = origEmitWarning;
+        sqliteProbed = true;
+      }
+      return Boolean(cachedDatabaseSync);
+    })();
+  }
+  return sqliteLoadPromise;
+}
+
+async function openReadOnlyDb(dbPath) {
+  if (!dbPath || typeof dbPath !== 'string') return null;
+  try {
+    if (!existsSync(dbPath)) return null;
+  } catch {
+    return null;
+  }
+  if (!(await isSqliteAvailable())) return null;
+  let db = null;
+  try {
+    db = new cachedDatabaseSync(dbPath, { readOnly: true, timeout: 1500 });
+    db.prepare('SELECT 1 FROM sqlite_master LIMIT 1').get();
+    return db;
+  } catch {
+    try { db?.close(); } catch {}
+    return null;
+  }
+}
+
+function getTableColumns(db, tableName) {
+  try {
+    const rows = db.prepare(`PRAGMA table_info(${tableName})`).all();
+    if (!Array.isArray(rows) || !rows.length) return new Set();
+    return new Set(rows.map((r) => String(r?.name || '').trim()).filter(Boolean));
+  } catch {
+    return new Set();
+  }
+}
+
+export function sanitizeSqliteText(raw, maxLen = 120) {
+  if (raw === null || raw === undefined) return '';
+  const cleaned = String(raw)
+    .replace(/file:\/\/\/[^\s"'<>]+/gi, '<FILE>')
+    .replace(/(?:\/Users\/|\/home\/|[A-Za-z]:\\Users\\)[^\s"'<>]+/g, '~')
+    .replace(/\b(?:Bearer\s+[A-Za-z0-9._~+/=-]{8,}|(?:sk|ghp|gho|glpat|xoxb|AIza|ya29)[-_A-Za-z0-9.]{12,})\b/gi, '<REDACTED>')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return sanitizeDiagnosticText(cleaned, maxLen);
+}
+
+function parseWorkspaceUriList(rawWorkspaceUris) {
+  if (!rawWorkspaceUris) return [];
+  if (Array.isArray(rawWorkspaceUris)) {
+    return rawWorkspaceUris.map((x) => String(x || '').trim()).filter(Boolean);
+  }
+  const str = String(rawWorkspaceUris).trim();
+  if (!str) return [];
+  if (str.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(str);
+      if (Array.isArray(parsed)) {
+        return parsed.map((x) => String(x || '').trim()).filter(Boolean);
+      }
+    } catch {}
+  }
+  return str
+    .split(/[\r\n,]+/)
+    .map((s) => s.trim().replace(/^["']|["']$/g, ''))
+    .filter(Boolean);
+}
+
+export function extractProjectNameFromUris(rawWorkspaceUris, rawProjectId = '') {
+  const uris = parseWorkspaceUriList(rawWorkspaceUris);
+  for (const uri of uris) {
+    let localPath = '';
+    if (/^file:\/\//i.test(uri)) {
+      try {
+        localPath = fileURLToPath(uri);
+      } catch {
+        try {
+          localPath = decodeURIComponent(uri.replace(/^file:\/\//i, ''));
+        } catch {
+          localPath = uri.replace(/^file:\/\//i, '');
+        }
+      }
+    } else if (!/^https?:\/\//i.test(uri)) {
+      localPath = uri;
+    }
+    const trimmed = localPath.replace(/[\\/]+$/, '');
+    if (!trimmed) continue;
+    const base = basename(trimmed).trim();
+    if (base && base !== '.' && base !== '..' && base !== '~' && base !== '/' && base !== '\\') {
+      return sanitizeSqliteText(base, 64);
+    }
+  }
+
+  const pid = String(rawProjectId || '').trim();
+  if (pid) {
+    let candidate = pid;
+    if (/^file:\/\//i.test(candidate)) {
+      try { candidate = fileURLToPath(candidate); } catch { candidate = candidate.replace(/^file:\/\//i, ''); }
+    }
+    candidate = candidate.replace(/[\\/]+$/, '');
+    if (candidate.includes('/') || candidate.includes('\\')) {
+      candidate = basename(candidate);
+    }
+    const safe = sanitizeSqliteText(candidate, 64);
+    if (safe && safe !== '~' && !safe.includes('<REDACTED>') && !safe.includes('<API>')) {
+      return safe;
+    }
+  }
+  return null;
+}
+
+export async function readConversationSummariesIndex(appDataDir) {
+  if (!appDataDir || typeof appDataDir !== 'string') return null;
+  const dbPath = join(appDataDir, 'conversation_summaries.db');
+  const sig = getFileCacheSig(dbPath);
+  if (!sig) return null;
+
+  const hit = summaryIndexCache.get(dbPath);
+  if (hit && hit.sig === sig) {
+    return hit.value;
+  }
+
+  const db = await openReadOnlyDb(dbPath);
+  if (!db) return null;
+
+  try {
+    const byId = new Map();
+    const childrenByParent = new Map();
+    const childSets = new Map();
+
+    const addChildEdge = (parentId, childId) => {
+      const p = String(parentId || '').trim();
+      const c = String(childId || '').trim();
+      if (!p || !c || p === c) return;
+      let set = childSets.get(p);
+      if (!set) {
+        set = new Set();
+        childSets.set(p, set);
+      }
+      set.add(c);
+    };
+
+    const sumCols = getTableColumns(db, 'conversation_summaries');
+    if (sumCols.has('conversation_id')) {
+      const wanted = [
+        'conversation_id',
+        'title',
+        'workspace_uris',
+        'project_id',
+        'agent_name',
+        'parent_conversation_id',
+        'nesting_depth',
+        'source',
+        'status'
+      ];
+      const selectCols = wanted.filter((c) => sumCols.has(c));
+      const rows = db.prepare(`SELECT ${selectCols.join(', ')} FROM conversation_summaries`).all();
+      for (const row of rows) {
+        const convId = String(row?.conversation_id || '').trim();
+        if (!convId) continue;
+        const uris = parseWorkspaceUriList(row.workspace_uris);
+        const firstUri = uris[0] || '';
+        const projectName = extractProjectNameFromUris(row.workspace_uris, row.project_id);
+        const parentConvId = row.parent_conversation_id ? String(row.parent_conversation_id).trim() : null;
+        const depthNum = Number(row.nesting_depth);
+        const entry = {
+          title: row.title ? sanitizeSqliteText(row.title, 80) : '',
+          workspaceUri: firstUri || null,
+          projectName: projectName || null,
+          agentName: row.agent_name ? sanitizeSqliteText(row.agent_name, 64) : '',
+          parentConvId,
+          nestingDepth: Number.isFinite(depthNum) ? depthNum : 0,
+          source: row.source ? String(row.source).trim() : '',
+          status: row.status ? String(row.status).trim() : ''
+        };
+        byId.set(convId, entry);
+        if (parentConvId) addChildEdge(parentConvId, convId);
+      }
+    }
+
+    const parentCols = getTableColumns(db, 'conversation_parents');
+    if (parentCols.has('conversation_id') && parentCols.has('parent_id')) {
+      const rows = db.prepare('SELECT conversation_id, parent_id FROM conversation_parents').all();
+      for (const row of rows) {
+        const convId = String(row?.conversation_id || '').trim();
+        const parentId = String(row?.parent_id || '').trim();
+        if (!convId || !parentId || convId === parentId) continue;
+        addChildEdge(parentId, convId);
+        const existing = byId.get(convId);
+        if (existing) {
+          if (!existing.parentConvId) existing.parentConvId = parentId;
+        } else {
+          byId.set(convId, {
+            title: '',
+            workspaceUri: null,
+            projectName: null,
+            agentName: '',
+            parentConvId: parentId,
+            nestingDepth: 1,
+            source: '',
+            status: ''
+          });
+        }
+      }
+    }
+
+    for (const [parentId, set] of childSets.entries()) {
+      childrenByParent.set(parentId, [...set]);
+    }
+
+    const result = { byId, childrenByParent };
+    setBoundedCache(summaryIndexCache, dbPath, { sig, value: result });
+    return result;
+  } catch {
+    return null;
+  } finally {
+    try { db.close(); } catch {}
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Minimal Protobuf Wire Decoder (zero dependencies, bounds-safe)
+// ---------------------------------------------------------------------------
+
+function toBuffer(val) {
+  if (!val) return null;
+  if (Buffer.isBuffer(val)) return val;
+  if (val instanceof Uint8Array) return Buffer.from(val.buffer, val.byteOffset, val.byteLength);
+  if (typeof val === 'string') return Buffer.from(val, 'utf-8');
+  return null;
+}
+
+function readVarint(buf, offset, end = buf.length) {
+  let result = 0n;
+  let shift = 0n;
+  let pos = offset;
+  while (pos < end && shift < 70n) {
+    const byte = buf[pos++];
+    result |= BigInt(byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) {
+      const num = result <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(result) : Number.MAX_SAFE_INTEGER;
+      return { value: num, big: result, next: pos };
+    }
+    shift += 7n;
+  }
+  return null;
+}
+
+function parseProtobufFields(buf, start = 0, end = buf.length, maxFields = 1024) {
+  const fields = [];
+  let pos = start;
+  let count = 0;
+  let truncated = false;
+  while (pos < end && count < maxFields) {
+    const tag = readVarint(buf, pos, end);
+    if (!tag || tag.big <= 0n) {
+      truncated = true;
+      break;
+    }
+    const fn = Number(tag.big >> 3n);
+    const wt = Number(tag.big & 7n);
+    if (!Number.isFinite(fn) || fn <= 0 || fn > 536870911) {
+      truncated = true;
+      break;
+    }
+    pos = tag.next;
+    if (wt === 0) {
+      const v = readVarint(buf, pos, end);
+      if (!v) { truncated = true; break; }
+      fields.push({ fn, wt, val: v.value, big: v.big, start: tag.next, end: v.next });
+      pos = v.next;
+    } else if (wt === 1) {
+      if (pos + 8 > end) { truncated = true; break; }
+      fields.push({ fn, wt, buf: buf.subarray(pos, pos + 8), start: pos, end: pos + 8 });
+      pos += 8;
+    } else if (wt === 2) {
+      const len = readVarint(buf, pos, end);
+      if (!len || len.value < 0) { truncated = true; break; }
+      const bodyStart = len.next;
+      const bodyEnd = bodyStart + len.value;
+      if (bodyEnd > end) {
+        fields.push({ fn, wt, truncated: true, declaredLen: len.value, bodyStart, buf: buf.subarray(bodyStart, end) });
+        truncated = true;
+        break;
+      }
+      fields.push({ fn, wt, buf: buf.subarray(bodyStart, bodyEnd), start: bodyStart, end: bodyEnd });
+      pos = bodyEnd;
+    } else if (wt === 5) {
+      if (pos + 4 > end) { truncated = true; break; }
+      fields.push({ fn, wt, buf: buf.subarray(pos, pos + 4), start: pos, end: pos + 4 });
+      pos += 4;
+    } else {
+      truncated = true;
+      break;
+    }
+    count++;
+  }
+  return { fields, pos, truncated };
+}
+
+function decodePackedVarints(buf) {
+  const out = [];
+  let pos = 0;
+  while (pos < buf.length && out.length < 512) {
+    const v = readVarint(buf, pos, buf.length);
+    if (!v) break;
+    out.push(v.value);
+    pos = v.next;
+  }
+  return out;
+}
+
+function decodeDuration(buf) {
+  if (!buf || buf.length === 0 || buf.length > 32) return null;
+  const { fields, truncated } = parseProtobufFields(buf, 0, buf.length, 8);
+  if (truncated || !fields.length) return null;
+  let sec = 0;
+  let nanos = 0;
+  let sawAny = false;
+  for (const f of fields) {
+    if (f.wt !== 0) return null;
+    if (f.fn === 1) { sec = f.val; sawAny = true; }
+    else if (f.fn === 2) { nanos = f.val; sawAny = true; }
+    else return null;
+  }
+  if (!sawAny || sec < 0 || sec > 86400 || nanos < 0 || nanos >= 1e9) return null;
+  return Number((sec + nanos / 1e9).toFixed(3));
+}
+
+function isPrintableAscii(buf, allowSpace = true) {
+  if (!buf || !buf.length) return false;
+  for (let i = 0; i < buf.length; i++) {
+    const b = buf[i];
+    if (b >= 0x21 && b <= 0x7e) continue;
+    if (allowSpace && b === 0x20) continue;
+    return false;
+  }
+  return true;
+}
+
+function isReasonableUtf8Text(buf) {
+  if (!buf || !buf.length) return false;
+  const s = buf.toString('utf-8');
+  if (!s.trim() || s.includes('\uFFFD')) return false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x20 && c !== 0x09 && c !== 0x0a && c !== 0x0d) return false;
+  }
+  return true;
+}
+
+function enumToPlaceholderModel(enumNum) {
+  const n = Number(enumNum);
+  if (!Number.isInteger(n) || n <= 1000 || n >= 100000) return '';
+  return `MODEL_PLACEHOLDER_M${n - 1000}`;
+}
+
+function extractMaxContextFromCtxWindow(buf) {
+  if (!buf || !buf.length) return null;
+  const { fields } = parseProtobufFields(buf, 0, buf.length, 64);
+  const candidates = [];
+  let fn1Val = null;
+  for (const f of fields) {
+    if (f.wt !== 0) continue;
+    if (f.val >= 8192 && f.val <= 10_000_000) {
+      if (f.fn === 1) fn1Val = f.val;
+      candidates.push({ fn: f.fn, val: f.val });
+    }
+  }
+  if (!candidates.length) return null;
+  const roundCandidates = candidates.filter((c) => c.val >= 16384 && (c.val % 1000 === 0 || c.val % 1024 === 0));
+  if (roundCandidates.length) {
+    return Math.max(...roundCandidates.map((c) => c.val));
+  }
+  if (fn1Val !== null) return fn1Val;
+  return Math.max(...candidates.map((c) => c.val));
+}
+
+function parseChatStartMetadata(buf, target) {
+  if (!buf || !buf.length) return;
+  const { fields } = parseProtobufFields(buf, 0, buf.length, 128);
+  for (const f of fields) {
+    if (f.fn === 1 && f.wt === 0 && f.val > 1000 && f.val < 100000) {
+      if (!target.requestedModelEnum) target.requestedModelEnum = f.val;
+    } else if (f.fn === 28 && f.wt === 2 && !f.truncated && f.buf.length > 0 && f.buf.length <= 128) {
+      if (isPrintableAscii(f.buf, true) && !target.requestedSlug) {
+        target.requestedSlug = f.buf.toString('utf-8').trim();
+      }
+    } else if (f.fn === 10 && f.wt === 2 && !f.truncated) {
+      const maxCtx = extractMaxContextFromCtxWindow(f.buf);
+      if (maxCtx && !target.maxContextTokens) target.maxContextTokens = maxCtx;
+    }
+  }
+}
+
+function parseKvEntry(buf) {
+  if (!buf || buf.length < 4 || buf.length > 512) return null;
+  const { fields, truncated } = parseProtobufFields(buf, 0, buf.length, 8);
+  if (truncated || fields.length < 2) return null;
+  let key = '';
+  let value = '';
+  for (const f of fields) {
+    if (f.wt !== 2 || f.truncated) return null;
+    if (f.fn === 1) {
+      if (!isPrintableAscii(f.buf, false)) return null;
+      key = f.buf.toString('utf-8');
+    } else if (f.fn === 2) {
+      if (!isReasonableUtf8Text(f.buf)) return null;
+      value = f.buf.toString('utf-8').trim();
+    }
+  }
+  if (!key || !value) return null;
+  return { key, value };
+}
+
+function applyF1Fields(fields, target) {
+  for (const f of fields) {
+    if (f.fn === 3 && f.wt === 0 && f.val > 1000 && f.val < 100000) {
+      if (!target.respondedModelEnum) target.respondedModelEnum = f.val;
+    } else if (f.fn === 9 && f.wt === 2 && !f.truncated) {
+      parseChatStartMetadata(f.buf, target);
+    } else if (f.fn === 11 && f.wt === 2 && !f.truncated) {
+      const sec = decodeDuration(f.buf);
+      if (sec !== null && target.ttft === null) target.ttft = sec;
+    } else if (f.fn === 12 && f.wt === 2 && !f.truncated) {
+      const sec = decodeDuration(f.buf);
+      if (sec !== null && target.streamingSec === null) target.streamingSec = sec;
+    } else if (f.fn === 19 && f.wt === 2 && !f.truncated && f.buf.length >= 2 && f.buf.length <= 128) {
+      if (isPrintableAscii(f.buf, false) && !target.responseModel) {
+        const s = f.buf.toString('utf-8').trim();
+        if (/[a-z]/i.test(s)) target.responseModel = s;
+      }
+    } else if (f.fn === 20 && f.wt === 2 && !f.truncated) {
+      const kv = parseKvEntry(f.buf);
+      if (kv) {
+        target.kvMap[kv.key] = kv.value;
+      }
+    } else if (f.fn === 21 && f.wt === 2 && !f.truncated && f.buf.length >= 2 && f.buf.length <= 128) {
+      if (isReasonableUtf8Text(f.buf) && !target.modelDisplayName) {
+        target.modelDisplayName = f.buf.toString('utf-8').trim();
+      }
+    }
+  }
+}
+
+function applyTopFields(fields, target) {
+  for (const f of fields) {
+    if (f.fn === 1 && f.wt === 2) {
+      const inner = parseProtobufFields(f.buf, 0, f.buf.length, 512);
+      applyF1Fields(inner.fields, target);
+    } else if (f.fn === 2) {
+      if (f.wt === 2 && !f.truncated) {
+        const nums = decodePackedVarints(f.buf);
+        for (const n of nums) {
+          if (n >= 0 && n < 1_000_000) target.stepIndices.add(n);
+        }
+      } else if (f.wt === 0 && f.val >= 0 && f.val < 1_000_000) {
+        target.stepIndices.add(f.val);
+      }
+    } else if (f.fn === 3 && f.wt === 2 && !f.truncated) {
+      parseChatStartMetadata(f.buf, target);
+    }
+  }
+}
+
+function scanLargeTailBuffer(tailBuf, target) {
+  if (!tailBuf || tailBuf.length < 4) return;
+  const len = tailBuf.length;
+
+  // 1. High-confidence anchors inside F1 tail:
+  //    - fn=20 map entries (tag bytes 0xa2 0x01)
+  //    - fn=19 responseModel (tag bytes 0x9a 0x01)
+  //    - fn=21 modelDisplayName (tag bytes 0xaa 0x01)
+  const f1Anchors = [];
+  for (let i = 0; i < len - 3; i++) {
+    const b0 = tailBuf[i];
+    const b1 = tailBuf[i + 1];
+    if (b1 === 0x01 && (b0 === 0xa2 || b0 === 0x9a || b0 === 0xaa)) {
+      const l = readVarint(tailBuf, i + 2, len);
+      if (!l || l.value < 2 || l.value > 256 || l.next + l.value > len) continue;
+      const body = tailBuf.subarray(l.next, l.next + l.value);
+      if (b0 === 0xa2) {
+        const kv = parseKvEntry(body);
+        if (kv) {
+          target.kvMap[kv.key] = kv.value;
+          f1Anchors.push(i);
+        }
+      } else if (b0 === 0x9a) {
+        if (isPrintableAscii(body, false)) {
+          const s = body.toString('utf-8').trim();
+          if (/[a-z]/i.test(s) && /[-_.:/0-9]/i.test(s)) {
+            if (!target.responseModel) target.responseModel = s;
+            f1Anchors.push(i);
+          }
+        }
+      } else if (b0 === 0xaa) {
+        if (isReasonableUtf8Text(body)) {
+          const s = body.toString('utf-8').trim();
+          if (s.length >= 3 && /[a-z]/i.test(s)) {
+            if (!target.modelDisplayName) target.modelDisplayName = s;
+            f1Anchors.push(i);
+          }
+        }
+      }
+    }
+  }
+
+  // From the earliest high-confidence F1 anchor, walk aligned protobuf fields forward.
+  // Once F1 fields finish (or hit TOP fn=2 / fn=3), inspect remaining bytes as TOP tail.
+  if (f1Anchors.length > 0) {
+    const startOff = f1Anchors[0];
+    const parsed = parseProtobufFields(tailBuf, startOff, len, 256);
+    const f1Only = [];
+    const topRest = [];
+    let switchedToTop = false;
+    for (const f of parsed.fields) {
+      if (!switchedToTop && f.fn <= 3 && (f.fn === 2 || f.fn === 3)) {
+        // Heuristic: fn=2 / fn=3 appearing after fn>=19 indicates we exited F1 into TOP
+        switchedToTop = true;
+      }
+      if (switchedToTop) topRest.push(f);
+      else f1Only.push(f);
+    }
+    applyF1Fields(f1Only, target);
+    applyTopFields(topRest, target);
+  }
+
+  // 2. Scan for Duration fields fn=11 (0x5a) and fn=12 (0x62) if still missing
+  if (target.ttft === null || target.streamingSec === null) {
+    for (let i = 0; i < len - 3; i++) {
+      const b = tailBuf[i];
+      if ((b === 0x5a && target.ttft === null) || (b === 0x62 && target.streamingSec === null)) {
+        const l = readVarint(tailBuf, i + 1, len);
+        if (!l || l.value < 2 || l.value > 24 || l.next + l.value > len) continue;
+        const sec = decodeDuration(tailBuf.subarray(l.next, l.next + l.value));
+        if (sec === null) continue;
+        // Require adjacent valid F1 field after duration to reduce false positives on random bytes
+        const afterPos = l.next + l.value;
+        if (afterPos < len) {
+          const nextTag = readVarint(tailBuf, afterPos, len);
+          if (!nextTag) continue;
+          const nextFn = Number(nextTag.big >> 3n);
+          const nextWt = Number(nextTag.big & 7n);
+          if (nextFn <= 0 || nextFn > 64 || nextWt > 5) continue;
+        }
+        if (b === 0x5a) target.ttft = sec;
+        else target.streamingSec = sec;
+      }
+    }
+  }
+
+  // 3. Scan for F1 fn=9 (0x4a) or TOP fn=3 (0x1a) carrying chatStartMetadata / maxContextTokens
+  if (!target.maxContextTokens || !target.requestedModelEnum || !target.requestedSlug) {
+    for (let i = 0; i < len - 4; i++) {
+      const b = tailBuf[i];
+      if (b !== 0x4a && b !== 0x1a) continue;
+      const l = readVarint(tailBuf, i + 1, len);
+      if (!l || l.value < 3 || l.value > 4096 || l.next + l.value > len) continue;
+      const body = tailBuf.subarray(l.next, l.next + l.value);
+      const { fields, truncated } = parseProtobufFields(body, 0, body.length, 64);
+      if (truncated || !fields.length) continue;
+      const hasKnownStartField = fields.some((f) =>
+        (f.fn === 1 && f.wt === 0 && f.val > 1000 && f.val < 100000) ||
+        (f.fn === 28 && f.wt === 2 && !f.truncated && f.buf.length >= 2 && f.buf.length <= 128 && isPrintableAscii(f.buf, true)) ||
+        (f.fn === 10 && f.wt === 2 && !f.truncated && Boolean(extractMaxContextFromCtxWindow(f.buf)))
+      );
+      if (!hasKnownStartField) continue;
+      parseChatStartMetadata(body, target);
+    }
+  }
+}
+
+function decodeGenMetadataRow(headRaw, tailRaw, extraTailRaw = null) {
+  const headBuf = toBuffer(headRaw);
+  const tailBuf = toBuffer(tailRaw);
+  const extraTailBuf = toBuffer(extraTailRaw);
+  const target = {
+    stepIndices: new Set(),
+    requestedModelEnum: 0,
+    requestedSlug: '',
+    respondedModelEnum: 0,
+    responseModel: '',
+    modelDisplayName: '',
+    ttft: null,
+    streamingSec: null,
+    maxContextTokens: null,
+    kvMap: {}
+  };
+
+  if (headBuf && headBuf.length > 0) {
+    const topParsed = parseProtobufFields(headBuf, 0, headBuf.length, 512);
+    applyTopFields(topParsed.fields, target);
+  }
+  if (extraTailBuf && extraTailBuf.length > 0) {
+    scanLargeTailBuffer(extraTailBuf, target);
+  }
+  if (tailBuf && tailBuf.length > 0) {
+    scanLargeTailBuffer(tailBuf, target);
+  }
+
+  // Reconcile KV map values (`model_enum`, `last_step_index`)
+  if (!target.respondedModelEnum && target.kvMap.model_enum) {
+    const rawEnum = String(target.kvMap.model_enum).trim();
+    if (/^\d+$/.test(rawEnum)) {
+      const n = Number(rawEnum);
+      if (n > 1000 && n < 100000) target.respondedModelEnum = n;
+    } else {
+      const m = rawEnum.match(/MODEL_PLACEHOLDER_M(\d+)/i);
+      if (m) target.respondedModelEnum = 1000 + Number(m[1]);
+    }
+  }
+  if (target.stepIndices.size === 0 && target.kvMap.last_step_index && /^\d+$/.test(target.kvMap.last_step_index)) {
+    target.stepIndices.add(Number(target.kvMap.last_step_index));
+  }
+
+  const requestedPlaceholder = enumToPlaceholderModel(target.requestedModelEnum);
+  const respondedPlaceholder = enumToPlaceholderModel(target.respondedModelEnum);
+  const requestedModel = requestedPlaceholder || target.requestedSlug || '';
+  const model = target.modelDisplayName
+    || target.responseModel
+    || respondedPlaceholder
+    || requestedModel
+    || '';
+
+  return {
+    stepIndices: [...target.stepIndices].sort((a, b) => a - b),
+    requestedModelEnum: target.requestedModelEnum,
+    respondedModelEnum: target.respondedModelEnum,
+    requestedModel,
+    requestedSlug: target.requestedSlug || '',
+    responseModel: target.responseModel || '',
+    modelDisplayName: target.modelDisplayName || '',
+    model,
+    ttft: target.ttft,
+    streamingSec: target.streamingSec,
+    maxContextTokens: target.maxContextTokens
+  };
+}
+
+export function classifyDiagnosticEventText(text) {
+  if (!text) return null;
+  const s = String(text);
+  for (const pat of EVENT_PATTERNS) {
+    if (pat.excludeRe && pat.excludeRe.test(s)) continue;
+    if (pat.re.test(s)) return pat.kind;
+  }
+  return null;
+}
+
+function extractReadableTextFromBlob(val, maxBytes = 4096) {
+  if (val === null || val === undefined) return '';
+  if (typeof val === 'string') return val.slice(0, maxBytes);
+  const buf = toBuffer(val);
+  if (!buf || !buf.length) return '';
+  const slice = buf.length > maxBytes ? buf.subarray(0, maxBytes) : buf;
+  const raw = slice.toString('utf-8');
+  // Keep readable UTF-8 segments and drop protobuf binary control noise
+  return raw
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\uFFFD]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export async function readConversationSqliteSignals(convDbPath, { includeLatestGenDetail = false } = {}) {
+  if (!convDbPath || typeof convDbPath !== 'string') return null;
+  const sig = getFileCacheSig(convDbPath);
+  if (!sig) return null;
+
+  const cacheKey = `${convDbPath}|${includeLatestGenDetail ? '1' : '0'}`;
+  const hit = convSignalsCache.get(cacheKey);
+  if (hit && hit.sig === sig) {
+    return hit.value;
+  }
+
+  const db = await openReadOnlyDb(convDbPath);
+  if (!db) return null;
+
+  try {
+    let trajectoryType = 0;
+    let parentConvId = null;
+    let forkStepIndex = 0;
+    const compactionSteps = [];
+    const events = [];
+    const genByStep = new Map();
+    const routingEvents = [];
+    let latestMaxContextTokens = null;
+
+    // 1. trajectory_meta
+    const metaCols = getTableColumns(db, 'trajectory_meta');
+    if (metaCols.has('trajectory_type')) {
+      try {
+        const row = db.prepare('SELECT trajectory_type FROM trajectory_meta LIMIT 1').get();
+        if (row && Number.isFinite(Number(row.trajectory_type))) {
+          trajectoryType = Number(row.trajectory_type);
+        }
+      } catch {}
+    }
+
+    // 2. parent_references
+    const parentRefCols = getTableColumns(db, 'parent_references');
+    if (parentRefCols.size > 0) {
+      try {
+        const rows = db.prepare('SELECT * FROM parent_references LIMIT 32').all();
+        for (const row of rows) {
+          for (const [colName, colVal] of Object.entries(row || {})) {
+            if (colVal === null || colVal === undefined) continue;
+            const lowerCol = colName.toLowerCase();
+            if (typeof colVal === 'number' && Number.isInteger(colVal) && colVal > 0 && colVal < 1_000_000) {
+              if (/step|fork|index|idx/.test(lowerCol) && colVal > forkStepIndex) {
+                forkStepIndex = colVal;
+              }
+              continue;
+            }
+            const asText = extractReadableTextFromBlob(colVal, 2048);
+            if (!parentConvId && asText) {
+              const m = asText.match(UUID_RE);
+              if (m) parentConvId = m[1];
+            }
+            const buf = toBuffer(colVal);
+            if (buf && buf.length > 0 && typeof colVal !== 'string') {
+              const { fields } = parseProtobufFields(buf, 0, Math.min(buf.length, 2048), 64);
+              for (const f of fields) {
+                if (f.wt === 0 && f.val > 0 && f.val < 1_000_000) {
+                  if (f.val > forkStepIndex) forkStepIndex = f.val;
+                } else if (f.wt === 2 && !f.truncated && !parentConvId) {
+                  const s = f.buf.toString('utf-8');
+                  const m = s.match(UUID_RE);
+                  if (m) parentConvId = m[1];
+                }
+              }
+            }
+          }
+        }
+      } catch {}
+    }
+
+    // 3. steps (compactions & error events)
+    const stepCols = getTableColumns(db, 'steps');
+    if (stepCols.size > 0) {
+      const idxCol = stepCols.has('step_index')
+        ? 'step_index'
+        : (stepCols.has('idx') ? 'idx' : (stepCols.has('id') ? 'id' : 'rowid'));
+      const hasStepType = stepCols.has('step_type');
+      const hasErrorDetails = stepCols.has('error_details');
+      const hasData = stepCols.has('data');
+
+      if (hasStepType) {
+        try {
+          const compRows = db
+            .prepare(`SELECT ${idxCol} AS sidx FROM steps WHERE step_type = 23 ORDER BY ${idxCol} ASC`)
+            .all();
+          const seenComp = new Set();
+          for (const r of compRows) {
+            const n = Number(r?.sidx);
+            if (Number.isFinite(n) && !seenComp.has(n)) {
+              seenComp.add(n);
+              compactionSteps.push(n);
+            }
+          }
+        } catch {}
+      }
+
+      if (hasStepType || hasErrorDetails) {
+        try {
+          const whereParts = [];
+          if (hasStepType) whereParts.push('step_type IN (17, 101)');
+          if (hasErrorDetails) whereParts.push('(error_details IS NOT NULL AND length(error_details) > 0)');
+          const selParts = [`${idxCol} AS sidx`];
+          if (hasStepType) selParts.push('step_type AS stype');
+          if (hasErrorDetails) selParts.push('substr(error_details, 1, 4096) AS err_raw');
+          if (hasData) selParts.push('substr(data, 1, 4096) AS data_raw');
+          const errRows = db
+            .prepare(`SELECT ${selParts.join(', ')} FROM steps WHERE ${whereParts.join(' OR ')} ORDER BY ${idxCol} ASC LIMIT 200`)
+            .all();
+          const seenEv = new Set();
+          for (const r of errRows) {
+            const stepIndex = Number(r?.sidx ?? 0);
+            const errText = extractReadableTextFromBlob(r?.err_raw, 4096);
+            const dataText = errText ? '' : extractReadableTextFromBlob(r?.data_raw, 4096);
+            const combined = errText || dataText;
+            const kind = classifyDiagnosticEventText(combined);
+            if (!kind) continue;
+            const dedupKey = `${kind}:${stepIndex}`;
+            if (seenEv.has(dedupKey)) continue;
+            seenEv.add(dedupKey);
+            events.push({
+              kind,
+              stepIndex,
+              detail: sanitizeSqliteText(combined, 120)
+            });
+          }
+        } catch {}
+      }
+    }
+
+    // 4. gen_metadata (OOM-safe SQL slicing)
+    const genCols = getTableColumns(db, 'gen_metadata');
+    if (genCols.has('idx') && genCols.has('data')) {
+      try {
+        const rows = db.prepare(`
+          SELECT idx, length(data) AS len,
+                 CASE WHEN length(data) <= 16384 THEN data ELSE substr(data, 1, 8192) END AS head,
+                 CASE WHEN length(data) <= 16384 THEN NULL ELSE substr(data, -4096) END AS tail
+          FROM gen_metadata
+          ORDER BY idx ASC
+        `).all();
+
+        let latestExtraTail = null;
+        const lastRow = rows.length ? rows[rows.length - 1] : null;
+        if (includeLatestGenDetail && lastRow && Number(lastRow.len) > 16384) {
+          try {
+            const extra = db
+              .prepare('SELECT substr(data, -65536) AS tail64 FROM gen_metadata WHERE idx = ?')
+              .get(lastRow.idx);
+            latestExtraTail = extra?.tail64 || null;
+          } catch {}
+        }
+
+        const seenRouting = new Set();
+        for (let i = 0; i < rows.length; i++) {
+          const row = rows[i];
+          const extraTail = (i === rows.length - 1) ? latestExtraTail : null;
+          const decoded = decodeGenMetadataRow(row.head, row.tail, extraTail);
+          if (decoded.maxContextTokens) {
+            latestMaxContextTokens = decoded.maxContextTokens;
+          }
+
+          const stepEntry = {
+            model: decoded.model,
+            modelDisplayName: decoded.modelDisplayName,
+            responseModel: decoded.responseModel,
+            requestedModel: decoded.requestedModel,
+            requestedSlug: decoded.requestedSlug,
+            ttft: decoded.ttft,
+            streamingSec: decoded.streamingSec,
+            maxContextTokens: decoded.maxContextTokens
+          };
+          for (const sIdx of decoded.stepIndices) {
+            genByStep.set(sIdx, stepEntry);
+          }
+
+          // Routing / canary detection
+          const primaryStepIdx = decoded.stepIndices.length ? decoded.stepIndices[0] : Number(row.idx || 0);
+          const reqEnum = decoded.requestedModelEnum;
+          const respEnum = decoded.respondedModelEnum;
+          const isCanary = Boolean(decoded.responseModel && CANARY_RESPONSE_RE.test(decoded.responseModel));
+          let isReroute = false;
+
+          if (reqEnum > 1000 && respEnum > 1000 && reqEnum !== respEnum) {
+            const reqPh = enumToPlaceholderModel(reqEnum);
+            const respPh = enumToPlaceholderModel(respEnum);
+            const reqFam = normalizeModelId(reqPh) || reqPh;
+            const respFam = normalizeModelId(respPh) || respPh;
+            const contextTag = `${decoded.requestedSlug} ${decoded.modelDisplayName} ${decoded.responseModel}`;
+            const isNormalPlanOrOrch = ORCHESTRATOR_OR_PLAN_RE.test(contextTag);
+            if (reqFam && respFam && reqFam !== respFam && !isNormalPlanOrOrch) {
+              isReroute = true;
+            }
+          }
+
+          if (isReroute || isCanary) {
+            const reqRaw = decoded.requestedModel || decoded.requestedSlug || '未记录模型';
+            const respRaw = decoded.modelDisplayName || decoded.responseModel || enumToPlaceholderModel(respEnum) || '未记录模型';
+            const reqDisp = formatModelDisplayName(reqRaw, normalizeModelId(reqRaw));
+            const respDisp = isCanary && decoded.responseModel
+              ? sanitizeSqliteText(decoded.responseModel, 80)
+              : formatModelDisplayName(respRaw, normalizeModelId(respRaw));
+            const reason = (isReroute && isCanary)
+              ? 'canary_reroute'
+              : (isCanary ? 'canary_experiment' : 'model_reroute');
+            const rKey = `${primaryStepIdx}:${reqDisp}:${respDisp}:${reason}`;
+            if (!seenRouting.has(rKey)) {
+              seenRouting.add(rKey);
+              routingEvents.push({
+                stepIndex: primaryStepIdx,
+                requestedModel: sanitizeSqliteText(reqDisp, 80),
+                respondedModel: sanitizeSqliteText(respDisp, 80),
+                reason
+              });
+            }
+          }
+        }
+      } catch {}
+    }
+
+    const result = {
+      trajectoryType,
+      isBtwBranch: trajectoryType === 22 || forkStepIndex > 0,
+      parentConvId,
+      forkStepIndex,
+      compactionSteps,
+      events,
+      genByStep,
+      routingEvents,
+      latestMaxContextTokens
+    };
+    setBoundedCache(convSignalsCache, cacheKey, { sig, value: result });
+    return result;
+  } catch {
+    return null;
+  } finally {
+    try { db.close(); } catch {}
+  }
+}

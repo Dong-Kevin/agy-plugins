@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy" content="frame-src 'none'; child-src 'none'">
   <title>上下文与 Token 看板</title>
   <script src="/preload.js"></script>
-  <link rel="stylesheet" href="/styles.css?v=1.7.11">
+  <link rel="stylesheet" href="/styles.css?v=1.8.0">
 </head>
 <body>
   <div class="app-shell">
@@ -187,7 +187,11 @@
           </div>
 
           <div class="conv-live-bar">
-            <span id="conv-live-title" class="conv-live-title">正在读取当前对话…</span>
+            <div class="conv-live-main">
+              <span id="conv-live-title" class="conv-live-title">正在读取当前对话…</span>
+              <span id="conv-repo-chip" class="meta-chip repo-chip hidden"></span>
+              <span id="conv-branch-badge" class="status-pill neutral hidden"></span>
+            </div>
             <span id="conv-live-steps" class="muted xs num">--</span>
           </div>
 
@@ -267,6 +271,7 @@
                 <div class="stat-tile">
                   <span class="m-label">累计缓存读取</span>
                   <span id="cum-cache-tok" class="m-val accent-text">--</span>
+                  <span id="cum-cache-saved" class="m-sub good-text hidden"></span>
                 </div>
                 <div class="stat-tile">
                   <span class="m-label">累计新增输入</span>
@@ -293,6 +298,38 @@
                 </div>
               </div>
             </div>
+          </div>
+        </article>
+
+        <!-- Card 1.5: Swarm / Subagent Tree Aggregation (Collapsible, Collapsed by Default) -->
+        <article id="agent-tree-card" class="card collapsible hidden">
+          <button type="button" class="collapse-trigger" data-toggle="agent-tree-body" aria-expanded="false">
+            <div class="title-group">
+              <span class="card-title">Swarm / 子代理整树</span>
+              <span id="agent-tree-title" class="meta-chip hidden"></span>
+              <span id="agent-tree-chip" class="meta-chip num">0 个子代理</span>
+            </div>
+            <span class="chevron">▾</span>
+          </button>
+          <div id="agent-tree-body" class="collapse-body hidden">
+            <div class="three-grid compact-tiles">
+              <div class="stat-tile">
+                <span class="m-label">整树总吞吐</span>
+                <span id="agent-tree-total-tok" class="m-val">--</span>
+                <span id="agent-tree-total-sub" class="m-sub">--</span>
+              </div>
+              <div class="stat-tile">
+                <span class="m-label">整树折算费用</span>
+                <span id="agent-tree-total-cost" class="m-val">--</span>
+                <span id="agent-tree-total-cny" class="m-sub">--</span>
+              </div>
+              <div class="stat-tile">
+                <span class="m-label">整树缓存已省</span>
+                <span id="agent-tree-cache-saved" class="m-val good-text">--</span>
+                <span id="agent-tree-cache-sub" class="m-sub">--</span>
+              </div>
+            </div>
+            <div id="agent-tree-list" class="agent-tree-list"></div>
           </div>
         </article>
 
@@ -335,7 +372,10 @@
           <!-- Turn-by-turn Context & Speed Sparkline -->
           <div id="spark-wrap" class="spark-wrap hidden">
             <div class="spark-head">
-              <span>本会话近轮上下文增长曲线</span>
+              <span class="spark-legend">
+                <span class="spark-leg-item"><i class="spark-dot total"></i>总上下文</span>
+                <span class="spark-leg-item"><i class="spark-dot cache"></i>缓存读取</span>
+              </span>
               <span id="spark-meta" class="muted num">--</span>
             </div>
             <svg id="spark-svg" class="spark-svg" viewBox="0 0 360 48" preserveAspectRatio="none"></svg>
@@ -348,19 +388,58 @@
             <div class="title-group">
               <span class="card-title">每轮消耗与工具调用明细</span>
               <span id="turns-count-chip" class="meta-chip num">0 轮</span>
+              <span id="turns-cold-badge" class="status-pill danger hidden" title="最近一轮用户输入触发了缓存冷启动">最近冷启动</span>
             </div>
             <span class="chevron">▾</span>
           </button>
           <div id="turns-body" class="collapse-body">
             <div class="turns-toolbar">
-              <span class="muted xs">倒序展示最近 40 轮上下文涨跌（Δ）、缓存率、单轮耗时与调用工具</span>
-              <div class="seg-group" id="turns-filter-seg">
-                <button type="button" class="seg-btn active" data-tfilter="all">全部</button>
-                <button type="button" class="seg-btn" data-tfilter="spike">激增 &gt;5K</button>
-                <button type="button" class="seg-btn" data-tfilter="tools">含工具</button>
+              <span id="turns-toolbar-desc" class="muted xs">倒序展示最近 40 轮上下文涨跌（Δ）、缓存率、单轮耗时与调用工具</span>
+              <div class="turns-toolbar-ctrls">
+                <div class="seg-group" id="turns-view-seg" role="group" aria-label="轮次分组视角">
+                  <button type="button" class="seg-btn active" data-tview="steps">按模型步</button>
+                  <button type="button" class="seg-btn" data-tview="prompts">按 Prompt 轮次</button>
+                </div>
+                <div class="seg-group" id="turns-filter-seg">
+                  <button type="button" class="seg-btn active" data-tfilter="all">全部</button>
+                  <button type="button" class="seg-btn" data-tfilter="spike">激增 &gt;5K</button>
+                  <button type="button" class="seg-btn" data-tfilter="tools">含工具</button>
+                </div>
+                <div class="seg-group hidden" id="prompt-filter-seg">
+                  <button type="button" class="seg-btn active" data-pfilter="all">全部</button>
+                  <button type="button" class="seg-btn" data-pfilter="cold">冷启动</button>
+                </div>
               </div>
             </div>
             <div id="turns-timeline" class="turns-timeline"></div>
+          </div>
+        </article>
+
+        <!-- Card 2.8: Top 10 Heavy Context Items (Collapsible, Collapsed by Default) -->
+        <article id="heavy-card" class="card collapsible hidden">
+          <button type="button" class="collapse-trigger" data-toggle="heavy-body" aria-expanded="false">
+            <div class="title-group">
+              <span class="card-title">重度消耗排行 Top 10</span>
+              <span id="heavy-count-chip" class="meta-chip num">0 项</span>
+            </div>
+            <span class="chevron">▾</span>
+          </button>
+          <div id="heavy-body" class="collapse-body hidden">
+            <div id="heavy-items-list" class="heavy-list"></div>
+          </div>
+        </article>
+
+        <!-- Card 2.9: Compaction History & Summary Drawer (Collapsible, Collapsed by Default) -->
+        <article id="compactions-card" class="card collapsible hidden">
+          <button type="button" class="collapse-trigger" data-toggle="compactions-body" aria-expanded="false">
+            <div class="title-group">
+              <span class="card-title">压缩历史与摘要</span>
+              <span id="compactions-count-chip" class="meta-chip num">0 次压缩</span>
+            </div>
+            <span class="chevron">▾</span>
+          </button>
+          <div id="compactions-body" class="collapse-body hidden">
+            <div id="compactions-list" class="compactions-list"></div>
           </div>
         </article>
 
@@ -448,6 +527,7 @@
               <span id="first-use-pill" class="meta-chip">首次记录：—</span>
             </div>
             <div class="seg-group" id="chart-mode-seg" role="tablist" aria-label="图表周期切换">
+              <button type="button" class="seg-btn" data-chart="hourly">24 小时</button>
               <button type="button" class="seg-btn active" data-chart="daily">每天</button>
               <button type="button" class="seg-btn" data-chart="weekly">每周</button>
               <button type="button" class="seg-btn" data-chart="monthly">每月</button>
@@ -460,6 +540,14 @@
             <button id="btn-heat-prev" type="button" class="ghost-btn xs" disabled>‹ 前一年</button>
             <span id="heat-range-label" class="muted xs num">—</span>
             <button id="btn-heat-next" type="button" class="ghost-btn xs" disabled>后一年 ›</button>
+          </div>
+
+          <div id="hourly-day-row" class="hourly-day-row hidden">
+            <div class="seg-group" id="hourly-day-seg" role="group" aria-label="24 小时日期切换">
+              <button type="button" class="seg-btn active" data-hday="today">今日</button>
+              <button type="button" class="seg-btn" data-hday="yesterday">昨日</button>
+            </div>
+            <span id="hourly-range-label" class="muted xs num">--</span>
           </div>
 
           <div id="chart-stage" class="chart-stage"></div>
@@ -489,6 +577,29 @@
               <button type="button" class="leg-box" data-leg-slot="4" title="点击修改第 5 档颜色"></button>
               <span class="xs muted">多</span>
             </div>
+          </div>
+        </article>
+
+        <!-- Card 2: Anomaly Events & Shadow Routing Diagnostics (Collapsible, Collapsed by Default) -->
+        <article id="diagnostics-card" class="card collapsible">
+          <button type="button" class="collapse-trigger" data-toggle="diagnostics-body" aria-expanded="false">
+            <div class="title-group">
+              <span class="card-title">异常事件与灰度路由取证</span>
+              <span id="diag-source-chip" class="meta-chip">Transcript 模式</span>
+              <span id="diag-count-chip" class="meta-chip num">0 条记录</span>
+            </div>
+            <span class="chevron">▾</span>
+          </button>
+          <div id="diag-summary-strip" class="diag-summary-strip"></div>
+          <div id="diagnostics-body" class="collapse-body hidden">
+            <div class="diag-toolbar">
+              <div class="seg-group" id="diag-tab-seg" role="tablist" aria-label="取证类别切换">
+                <button type="button" class="seg-btn active" data-dtab="events">异常事件</button>
+                <button type="button" class="seg-btn" data-dtab="routing">灰度路由</button>
+              </div>
+              <span id="diag-toolbar-meta" class="muted xs num">--</span>
+            </div>
+            <div id="diagnostics-list" class="diag-list"></div>
           </div>
         </article>
       </section>
@@ -658,6 +769,7 @@
               <span class="m-label">缓存读取（优惠）</span>
               <span id="cat-cache-cost" class="m-val accent-text">$0.00</span>
               <span id="cat-cache-tok" class="m-sub">0 tok</span>
+              <span id="cat-cache-saved" class="m-sub good-text hidden"></span>
             </div>
             <div class="stat-tile">
               <span class="m-label">输出 Token（含思考）</span>
@@ -670,6 +782,12 @@
           <div class="sub-heading">分模型消耗与折算分布</div>
           <div id="model-leaderboard" class="model-list"></div>
 
+          <!-- Project / Workspace Usage Leaderboard -->
+          <div id="project-leaderboard-wrap" class="hidden">
+            <div class="sub-heading">按项目 / 工作区消耗分布</div>
+            <div id="project-leaderboard" class="model-list"></div>
+          </div>
+
           <p class="fine-print">
             注：API 等值金额按 Google / Anthropic 公开标准单价估算（缓存读取按优惠费率计价，输出已含推理思考 Token），仅用于评估使用强度，包月订阅或赠送权益与按量零售并非同类计费，差额不代表实际现金退补。
           </p>
@@ -677,6 +795,6 @@
       </section>
     </main>
   </div>
-  <script src="/app.js?v=1.7.11"></script>
+  <script src="/app.js?v=1.8.0"></script>
 </body>
 </html>

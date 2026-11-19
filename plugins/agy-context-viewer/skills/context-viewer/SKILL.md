@@ -24,9 +24,10 @@ node "<skill-dir>/scripts/status.mjs" --json "<conversation-id>"
 脚本返回的 JSON 中已包含：
 - `entrypoints.sidecarAuxPane`：当前插件实际目录对应的 `sidecar://<dir>/dashboard/` 链接
 - `entrypoints.customizationSettings`：当前插件对应的 `customization://<dir>` 设置页链接
-- `conversation`：当前会话窗口水位、待发送预估 Token、缓存命中率、生成速度、四维累计吞吐与会话 API 等值金额
-- `recentTurns`：最近轮次的上下文水位、`±Delta` 与工具调用列表
-- `globalHistory` 与 `quotas`：桌面端 + `agy` CLI 多源累计 Token、本月折算费用与实时模型配额池余量
+- `conversation`：当前会话窗口水位、`repoInfo`、`branchInfo`（`/btw` 分支）、`latestPromptStartup`、待发送预估 Token、缓存命中率、生成速度、四维累计吞吐、会话 API 等值金额与 `sessionCacheSavingsUSD`
+- `recentTurns`、`promptTurns` 与 `heavyItems`：最近轮次水位 `±Delta`、按用户 Prompt 的冷/热启动诊断与上下文重度消耗 Top 排行
+- `agentTree` 与 `compactions`：Swarm / Subagent 多代理整树聚合统计与压缩历史摘要
+- `globalHistory`、`topProjects`、`diagnostics` 与 `quotas`：桌面端 / IDE + `agy` CLI 多源累计 Token、按项目消耗排行、异常与灰度路由取证汇总及实时模型配额池余量
 
 ## 2. 按宿主环境呈现结果
 
@@ -61,9 +62,14 @@ node "<skill-dir>/scripts/status.mjs" --json "<conversation-id>"
 1. 直接汇报终端统计摘要（注意：`agy` CLI 不加载桌面端 Sidecar，**不要**输出 `sidecar://` 或 `customization://` 链接；也可以运行不带 `--json` 的 `node "<skill-dir>/scripts/status.mjs"` 查看彩色终端进度条看板，或传 `turns` 查看逐轮消耗表）。
 2. 若返回 `historyStatus.state === "restricted"` 或 `quotaStatus.errorCode === "EPERM"`（常见于 `agy` CLI 沙箱环境），先如实汇报当前会话的已用 Token、缓存命中率、生成速度、最近轮次增量与参考费用，再提示用户在**外部终端标签页**运行以下命令查看完整跨会话热力图、实时配额与图形界面：
    ```bash
-   agy-context                   # 外部终端查看桌面端 + CLI 全量汇总与实时状态
-   agy-context statusline install # 为 agy CLI 开启底部原生实时状态栏（实时显示模型、水位%、速率、费用与 5h/Week 配额）
+   agy-context                   # 外部终端查看桌面端 + IDE + CLI 全量汇总与实时状态
+   agy-context statusline install # 为 agy CLI 开启底部原生实时状态栏（实时显示模型、水位%、冷启动预警、速率、费用与 5h/Week 配额）
    agy-context watch             # 终端实时盯盘面板（适配 tmux 分屏，随会话归档变化自动刷新）
+   agy-context turns --prompts   # 按用户输入分组诊断冷/热启动缓存命中与增量
+   agy-context heavy             # 查看当前会话上下文重度消耗 Top 10
+   agy-context tree              # 查看 Swarm / Subagent 多代理整树吞吐与折算费用
+   agy-context compact           # 查看上下文压缩历史与摘要（追加 --full 看原文）
+   agy-context events            # 查看跨会话 429 / 安全过滤浪费 / 灰度路由取证及按项目排行
    agy-context menubar on        # (macOS) 开启顶部菜单栏常驻图标，切换会话自动跟随
    agy-context float             # 弹出屏幕右侧独立置顶小窗（可配 agy-context shortcut --global 在终端前台用 ⌥⌘K 呼出）
    agy-context web               # 在 127.0.0.1:18970 启动完整 Web 热力图与双池配额看板并打开浏览器

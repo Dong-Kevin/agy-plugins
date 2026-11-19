@@ -30,7 +30,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/m
 irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.ps1 | iex
 ```
 
-- 也可直接从 [Releases](https://github.com/Dong-Kevin/agy-plugins/releases) 下载 `context-viewer-v1.7.11.zip` 解压后运行 `./install.sh`（或 `agy plugin install ./plugins/agy-context-viewer`）。
+- 也可直接从 [Releases](https://github.com/Dong-Kevin/agy-plugins/releases) 下载 `context-viewer-v1.8.0.zip` 解压后运行 `./install.sh`（或 `agy plugin install ./plugins/agy-context-viewer`）。
 - 仅通过 `agy plugin install` 安装时，CLI 入口为 `node ~/.gemini/config/plugins/context-viewer/sidecars/dashboard/cli.mjs`。
 
 </details>
@@ -51,13 +51,17 @@ irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-co
 <summary>常用 <code>agy-context</code> 终端命令速查</summary>
 
 ```bash
-agy-context                    # 终端 ANSI 看板（上下文占比、生成速度、近 5 轮涨跌、双池配额）
-agy-context statusline install # 为 agy CLI 开启底部原生实时状态栏（模型、水位%、tok/s、费用与双池配额）
-agy-context watch              # 终端实时盯盘面板（适配 tmux 分屏，自动跟随当前会话更新）
+agy-context                    # 终端 ANSI 看板（上下文占比、冷热启动、速度、重度 Top 3、Swarm 整树与双池配额）
+agy-context statusline install # 为 agy CLI 开启底部原生实时状态栏（模型、水位%、冷启动 ❄C 预警、tok/s、费用与双池配额）
+agy-context watch              # 终端实时盯盘面板（适配 tmux 分屏，自动跟随当前会话与整树更新）
 agy-context aux                # 唤醒 / 切至 Antigravity 右侧辅助栏看板
 agy-context float              # 显隐独立置顶小窗（close 关闭 / quit 退出守护进程）
 agy-context menubar quota      # 菜单栏切为配额剩余（可选 context / speed / quota / on / off / status）
-agy-context turns              # 查看近 20 轮上下文 Δ、缓存命中率与工具调用明细
+agy-context turns [--prompts]  # 查看近 40 轮上下文 Δ、工具调用，或按 Prompt 分组诊断冷/热启动缓存命中
+agy-context heavy              # 查看当前会话上下文重度消耗 Top 10 排行
+agy-context tree               # 查看当前会话 Swarm / Subagent 多代理整树聚合统计
+agy-context compact [--full]   # 查看当前会话上下文压缩历史与摘要原文
+agy-context events             # 查看跨会话 429 / 安全过滤浪费 / 灰度路由取证及按项目消耗 Top 10
 agy-context web                # 启动 127.0.0.1:18970 独立 Web 看板并打开浏览器
 agy-context json               # 输出结构化汇总 JSON（追加 --full 返回完整原始数据）
 ```
@@ -68,8 +72,8 @@ agy-context json               # 输出结构化汇总 JSON（追加 --full 返�
 
 ## 核心功能与界面预览
 
-- **当前会话诊断**：动态跟随宿主实时上下文窗口上限（如 `256K` / `512K` / `840K` / `1M`，服务端扩容或回退自动同步），拆分系统提示、工具定义与对话历史占比，并记录 TTFT、流式 `tok/s` 与每轮工具增幅。
-- **桌面端 + `agy` CLI 汇总**：合并统计两个来源的 **53 周热力图**、日/周/月/年分布及 **Gemini / 非 Gemini（Claude · GPT）** 双配额池 5h + 周额度余量与 API 等值参考。
+- **当前会话诊断**：动态跟随宿主实时上下文窗口上限（如 `256K` / `512K` / `840K` / `1M`，服务端扩容或回退自动同步；离线时优先复用只读 SQLite 缓存阈值），展示 `repo@branch`、`/btw` 分支去重、System / Tools / Messages 拆分、TTFT / 流式 `tok/s`、**总上下文 vs 缓存读取双折线**、**Prompt 冷/热启动诊断**、**重度消耗 Top 10**、**压缩历史与摘要抽屉**以及 **Swarm / Subagent 整树聚合**。
+- **多端汇总与取证洞察**：合并统计 Antigravity 桌面端、IDE 与 `agy` CLI 的 **53 周热力图（含单日分模型明细）**、**今日/昨日 24 小时柱图**、**按项目消耗排行**、**429 / 安全过滤浪费 / 灰度路由取证**，以及 **Gemini / 非 Gemini（Claude · GPT）** 双配额池 5h + 周额度余量与 **Prompt 缓存已省金额**。
 
 <p align="center">
   <strong>macOS 顶部菜单栏常驻与悬停详情：</strong><br/>
