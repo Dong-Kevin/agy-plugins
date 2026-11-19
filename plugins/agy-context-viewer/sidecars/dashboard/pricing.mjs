@@ -1,9 +1,14 @@
 /**
  * Pricing, Model Normalization, Subscription Presets, and Token Estimation Engine.
- * Zero external dependencies. Read-only computation module.
+ * Zero external dependencies. Read-only computation module (explicit manual sync only).
  */
 
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 export const PRICING_VERIFIED_DATE = '2026-11-19';
+export const OFFICIAL_PRICING_URL = 'https://aistudio.google.com/docs/pricing';
+export const PRICING_OVERRIDE_FILE = 'pricing_override_v1.json';
 
 // Official public API retail pricing (USD per 1M tokens)
 export const MODEL_PRICING_TABLE = {
@@ -854,8 +859,11 @@ export function calcImageTokens(w, h) {
 }
 
 // API Cost Calculation
-export function matchPricingRule(modelKey, reqDateStr = PRICING_VERIFIED_DATE, totalPromptTokens = 0) {
-  const rules = MODEL_PRICING_TABLE[modelKey];
+export function matchPricingRule(modelKey, reqDateStr = PRICING_VERIFIED_DATE, totalPromptTokens = 0, overrides = null) {
+  const overrideRules = overrides?.models?.[modelKey];
+  const rules = (Array.isArray(overrideRules) && overrideRules.length > 0)
+    ? overrideRules
+    : MODEL_PRICING_TABLE[modelKey];
   if (!rules || !rules.length) return null;
   const d = reqDateStr ? String(reqDateStr).slice(0, 10) : PRICING_VERIFIED_DATE;
   for (const r of rules) {
@@ -1367,5 +1375,383 @@ export function resolveEffectivePlanStatus(livePlan, customPlan = null) {
     validUntil: custom.validUntil || '',
     note: custom.note || '',
     isCustomized
+  };
+}
+
+// Official Gemini Pricing Markdown Parser & Local Override Snapshot
+const MONTH_NAME_TO_INDEX = {
+  january: 0, jan: 0,
+  february: 1, feb: 1,
+  march: 2, mar: 2,
+  april: 3, apr: 3,
+  may: 4,
+  june: 5, jun: 5,
+  july: 6, jul: 6,
+  august: 7, aug: 7,
+  september: 8, sep: 8, sept: 8,
+  october: 9, oct: 9,
+  november: 10, nov: 10,
+  december: 11, dec: 11
+};
+
+function parseStartingEffectiveDates(text) {
+  const m = String(text || '').match(/\bstarting\s+([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})\b/i);
+  if (!m) return null;
+  const monthIdx = MONTH_NAME_TO_INDEX[m[1].toLowerCase()];
+  const day = Number.parseInt(m[2], 10);
+  const year = Number.parseInt(m[3], 10);
+  if (!Number.isInteger(monthIdx) || !Number.isInteger(day) || !Number.isInteger(year)) return null;
+  const dt = new Date(Date.UTC(year, monthIdx, day));
+  if (
+    dt.getUTCFullYear() !== year
+    || dt.getUTCMonth() !== monthIdx
+    || dt.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  const effectiveFrom = dt.toISOString().slice(0, 10);
+  const effectiveTo = new Date(dt.getTime() - 86_400_000).toISOString().slice(0, 10);
+  return { effectiveFrom, effectiveTo };
+}
+
+function extractDollarValues(line) {
+  const values = [];
+  const re = /\$(\d+(?:\.\d+)?)/g;
+  let match;
+  while ((match = re.exec(line)) !== null) {
+    const num = Number.parseFloat(match[1]);
+    if (Number.isFinite(num) && num >= 0) {
+      values.push(num);
+    }
+  }
+  return values;
+}
+
+function isValidPricingRule(rule) {
+  if (!rule || typeof rule !== 'object' || Array.isArray(rule)) return false;
+  if (!Number.isFinite(rule.inputPerMillion) || rule.inputPerMillion < 0) return false;
+  if (!Number.isFinite(rule.outputPerMillion) || rule.outputPerMillion < 0) return false;
+  if (!Number.isFinite(rule.cacheReadPerMillion) || rule.cacheReadPerMillion < 0) return false;
+  if (rule.effectiveFrom !== undefined && typeof rule.effectiveFrom !== 'string') return false;
+  if (rule.effectiveTo !== undefined && typeof rule.effectiveTo !== 'string') return false;
+  return true;
+}
+
+export function parseOfficialGeminiPricingMarkdown(markdown, verifiedDate = new Date().toISOString().slice(0, 10)) {
+  if (typeof markdown !== 'string' || !markdown.trim()) return [];
+  const sections = markdown.split(/(?:^|\n)## /);
+  const results = [];
+  const seenKeys = new Set();
+
+  for (const section of sections) {
+    const idMatch = section.match(/id="(gemini-[^"]+)"/i);
+    if (!idMatch) continue;
+    const rawId = idMatch[1].trim().toLowerCase();
+    if (/(?:image|live|tts|embedding|robotics)/i.test(rawId)) continue;
+
+    const modelKey = normalizeModelId(rawId) || (/^gemini-[a-z0-9._-]+$/i.test(rawId) ? rawId : null);
+    if (!modelKey || seenKeys.has(modelKey)) continue;
+
+    const tabMatch = section.match(
+      /(?:<tab\s+title=["']Standard["'][^>]*>|\{%\s*tab\s+title=["']Standard["'][^%]*%\})([\s\S]*?)(?:<\/tab>|\{%\s*\/\s*tab\s*%\}|(?=<tab\b|\{%\s*tab\b)|$)/i
+    );
+    if (!tabMatch) continue;
+
+    // Collapse HTML <tr>...</tr> blocks onto single lines so both Markdown and HTML tables parse uniformly
+    const normalizedBlock = tabMatch[1].replace(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi, (m) => m.replace(/\r?\n+/g, ' '));
+    const lines = normalizedBlock.split(/\r?\n/);
+
+    const inputPrices = [];
+    const outputPrices = [];
+    const cachePrices = [];
+    let activeBucket = null;
+    let activeIndent = 0;
+
+    const pushToBucket = (bucket, line) => {
+      const vals = extractDollarValues(line);
+      if (!vals.length) return;
+      if (bucket === 'input') inputPrices.push(...vals);
+      else if (bucket === 'output') outputPrices.push(...vals);
+      else if (bucket === 'cache') cachePrices.push(...vals);
+    };
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      if (/^---+$/.test(trimmed) || /^#/.test(trimmed)) {
+        activeBucket = null;
+        continue;
+      }
+
+      const indent = line.length - line.trimStart().length;
+      const isTableRow = /^\s*\|/.test(line) || /<tr\b/i.test(line);
+      const isListItem = /^\s*(?:[-*]|\d+\.)\s+/.test(line);
+
+      if (/\bInput\s+price\b/i.test(line)) {
+        pushToBucket('input', line);
+        activeBucket = isTableRow ? null : 'input';
+        activeIndent = indent;
+      } else if (/\bOutput\s+price\b/i.test(line)) {
+        pushToBucket('output', line);
+        activeBucket = isTableRow ? null : 'output';
+        activeIndent = indent;
+      } else if (/\bContext\s+caching\s+price\b/i.test(line)) {
+        pushToBucket('cache', line);
+        activeBucket = isTableRow ? null : 'cache';
+        activeIndent = indent;
+      } else if (isTableRow || (isListItem && indent <= activeIndent)) {
+        activeBucket = null;
+      } else if (activeBucket) {
+        pushToBucket(activeBucket, line);
+      }
+    }
+
+    const futureDates = parseStartingEffectiveDates(normalizedBlock);
+    let rules = null;
+
+    if (futureDates && inputPrices.length === 2 && outputPrices.length === 2 && cachePrices.length === 2) {
+      rules = [
+        {
+          effectiveTo: futureDates.effectiveTo,
+          inputPerMillion: inputPrices[0],
+          outputPerMillion: outputPrices[0],
+          cacheReadPerMillion: cachePrices[0],
+          note: `官方 Standard 费率（至 ${futureDates.effectiveTo}）`
+        },
+        {
+          effectiveFrom: futureDates.effectiveFrom,
+          inputPerMillion: inputPrices[1],
+          outputPerMillion: outputPrices[1],
+          cacheReadPerMillion: cachePrices[1],
+          note: `官方 Standard 费率（${futureDates.effectiveFrom} 起）`
+        }
+      ];
+    } else if (!futureDates && inputPrices.length === 1 && outputPrices.length === 1 && cachePrices.length === 1) {
+      rules = [
+        {
+          inputPerMillion: inputPrices[0],
+          outputPerMillion: outputPrices[0],
+          cacheReadPerMillion: cachePrices[0],
+          note: '官方 Standard 费率'
+        }
+      ];
+    } else {
+      // Conservatively skip multi-tier (>200K), multimodal, or incomplete entries to avoid mis-billing
+      continue;
+    }
+
+    if (!rules.every(isValidPricingRule)) continue;
+    seenKeys.add(modelKey);
+    results.push({
+      modelKey,
+      rules,
+      source: OFFICIAL_PRICING_URL,
+      verifiedAt: verifiedDate
+    });
+  }
+
+  return results;
+}
+
+export function loadLocalPricingOverrides(cacheDir) {
+  if (!cacheDir || typeof cacheDir !== 'string') return null;
+  try {
+    const raw = readFileSync(join(cacheDir, PRICING_OVERRIDE_FILE), 'utf8');
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    if (parsed.version !== 1) return null;
+    if (!parsed.models || typeof parsed.models !== 'object' || Array.isArray(parsed.models)) return null;
+    for (const rules of Object.values(parsed.models)) {
+      if (!Array.isArray(rules) || rules.length === 0 || !rules.every(isValidPricingRule)) {
+        return null;
+      }
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function saveLocalPricingOverrides(cacheDir, payload) {
+  if (!cacheDir || typeof cacheDir !== 'string') {
+    throw new Error('保存定价快照失败：无效的 cacheDir');
+  }
+  mkdirSync(cacheDir, { recursive: true });
+  const targetPath = join(cacheDir, PRICING_OVERRIDE_FILE);
+  const tmpPath = join(cacheDir, `${PRICING_OVERRIDE_FILE}.tmp.${process.pid}.${Date.now()}`);
+  try {
+    writeFileSync(tmpPath, JSON.stringify(payload, null, 2), 'utf8');
+    renameSync(tmpPath, targetPath);
+  } catch (err) {
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // ignore cleanup error
+    }
+    throw err;
+  }
+  return targetPath;
+}
+
+export function clearLocalPricingOverrides(cacheDir) {
+  if (!cacheDir || typeof cacheDir !== 'string') return { removed: false };
+  const targetPath = join(cacheDir, PRICING_OVERRIDE_FILE);
+  try {
+    unlinkSync(targetPath);
+    return { removed: true };
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return { removed: false };
+    throw err;
+  }
+}
+
+function arePricingRulesEqual(aRules = [], bRules = []) {
+  if (!Array.isArray(aRules) || !Array.isArray(bRules) || aRules.length !== bRules.length) return false;
+  for (let i = 0; i < aRules.length; i++) {
+    const a = aRules[i];
+    const b = bRules[i];
+    if (
+      (a.effectiveFrom || '') !== (b.effectiveFrom || '')
+      || (a.effectiveTo || '') !== (b.effectiveTo || '')
+      || Number(a.inputPerMillion) !== Number(b.inputPerMillion)
+      || Number(a.outputPerMillion) !== Number(b.outputPerMillion)
+      || Number(a.cacheReadPerMillion) !== Number(b.cacheReadPerMillion)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export async function syncOfficialPricing({ cacheDir, fetcher = globalThis.fetch, timeoutMs = 10000 } = {}) {
+  if (typeof fetcher !== 'function') {
+    throw new Error('当前运行环境不支持 fetch，无法同步官方定价');
+  }
+  const response = await fetcher(OFFICIAL_PRICING_URL, {
+    headers: { Accept: 'text/markdown' },
+    signal: AbortSignal.timeout(timeoutMs)
+  });
+  if (!response || !response.ok) {
+    throw new Error(`拉取官方定价文档失败（HTTP ${response?.status ?? 'unknown'}）`);
+  }
+  const markdown = await response.text();
+  const syncedAt = new Date().toISOString();
+  const parsed = parseOfficialGeminiPricingMarkdown(markdown, syncedAt.slice(0, 10));
+  if (!parsed.length) {
+    throw new Error('未能从官方定价文档解析出有效 Gemini 模型费率，已保留本地既有快照');
+  }
+
+  const models = {};
+  const changes = [];
+  for (const entry of parsed) {
+    models[entry.modelKey] = entry.rules;
+    const builtinRules = MODEL_PRICING_TABLE[entry.modelKey] || null;
+    if (!builtinRules) {
+      changes.push({
+        modelKey: entry.modelKey,
+        type: 'added',
+        builtinRules: null,
+        syncedRules: entry.rules,
+        summary: `新增模型 ${entry.modelKey}`
+      });
+    } else if (!arePricingRulesEqual(builtinRules, entry.rules)) {
+      changes.push({
+        modelKey: entry.modelKey,
+        type: 'updated',
+        builtinRules,
+        syncedRules: entry.rules,
+        summary: `更新费率 ${entry.modelKey}`
+      });
+    }
+  }
+
+  const savedPath = cacheDir
+    ? saveLocalPricingOverrides(cacheDir, {
+      version: 1,
+      syncedAt,
+      source: OFFICIAL_PRICING_URL,
+      models
+    })
+    : null;
+
+  return {
+    syncedAt,
+    source: OFFICIAL_PRICING_URL,
+    count: parsed.length,
+    models,
+    changes,
+    savedPath
+  };
+}
+
+export function getEffectivePricingCatalog({ reqDateStr, cacheDir, overrides } = {}) {
+  const asOfDate = reqDateStr ? String(reqDateStr).slice(0, 10) : new Date().toISOString().slice(0, 10);
+  const effectiveOverrides = overrides ?? (cacheDir ? loadLocalPricingOverrides(cacheDir) : null);
+  const overrideModels = (
+    effectiveOverrides
+    && effectiveOverrides.models
+    && typeof effectiveOverrides.models === 'object'
+    && !Array.isArray(effectiveOverrides.models)
+  )
+    ? effectiveOverrides.models
+    : {};
+
+  const allKeys = new Set([
+    ...Object.keys(MODEL_PRICING_TABLE),
+    ...Object.keys(overrideModels)
+  ]);
+
+  const asOfMs = Date.parse(`${asOfDate}T00:00:00Z`);
+  const entries = [];
+
+  for (const modelKey of allKeys) {
+    const hasOverride = Array.isArray(overrideModels[modelKey]) && overrideModels[modelKey].length > 0;
+    const rules = hasOverride ? overrideModels[modelKey] : MODEL_PRICING_TABLE[modelKey];
+    if (!Array.isArray(rules) || !rules.length) continue;
+
+    const matched = matchPricingRule(modelKey, asOfDate, 0, effectiveOverrides);
+    const activeRule = matched
+      ? {
+        inputPerMillion: matched.inputPerMillion,
+        outputPerMillion: matched.outputPerMillion,
+        cacheReadPerMillion: matched.cacheReadPerMillion,
+        note: matched.note || '',
+        ...(matched.effectiveFrom ? { effectiveFrom: matched.effectiveFrom } : {}),
+        ...(matched.effectiveTo ? { effectiveTo: matched.effectiveTo } : {})
+      }
+      : null;
+
+    const futureRules = rules
+      .filter((r) => r && r.effectiveFrom && r.effectiveFrom > asOfDate)
+      .sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom));
+    const nextRule = futureRules[0] || null;
+    const nextMs = nextRule ? Date.parse(`${nextRule.effectiveFrom}T00:00:00Z`) : NaN;
+    const upcomingRule = nextRule
+      ? {
+        effectiveFrom: nextRule.effectiveFrom,
+        daysUntil: (Number.isFinite(asOfMs) && Number.isFinite(nextMs))
+          ? Math.round((nextMs - asOfMs) / 86_400_000)
+          : null,
+        inputPerMillion: nextRule.inputPerMillion,
+        outputPerMillion: nextRule.outputPerMillion,
+        cacheReadPerMillion: nextRule.cacheReadPerMillion,
+        note: nextRule.note || ''
+      }
+      : null;
+
+    entries.push({
+      modelKey,
+      displayName: MODEL_DISPLAY_NAMES[modelKey] || modelKey,
+      activeRule,
+      upcomingRule,
+      source: hasOverride ? 'synced' : 'builtin'
+    });
+  }
+
+  return {
+    verifiedDate: PRICING_VERIFIED_DATE,
+    syncedAt: effectiveOverrides?.syncedAt || null,
+    asOfDate,
+    entries
   };
 }

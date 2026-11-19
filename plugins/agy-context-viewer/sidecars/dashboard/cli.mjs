@@ -27,6 +27,7 @@ import {
   getAuxShortcutConfig,
   getCliStatusLineConfig,
   getMenubarMode,
+  getPluginStateDir,
   getShortcutConfig,
   getSidebarEntryStatus,
   isCliRuntimeEnv,
@@ -36,7 +37,12 @@ import {
   setSidebarEntrypoint,
   syncSidebarManifestFromSettings
 } from './collector.mjs';
-import { formatModelDisplayName } from './pricing.mjs';
+import {
+  clearLocalPricingOverrides,
+  formatModelDisplayName,
+  getEffectivePricingCatalog,
+  syncOfficialPricing
+} from './pricing.mjs';
 
 let floatWindowMod = null;
 async function loadFloatWindowMod() {
@@ -291,6 +297,7 @@ function printHelp() {
     '  agy-context tree [conversationId]               查看 Swarm / Subagent 多代理整树聚合与费用统计',
     '  agy-context compact [conversationId] [--full]   查看当前会话上下文压缩历史与摘要原文',
     '  agy-context events|diag|projects                查看跨会话异常事件、灰度路由取证及项目消耗 Top 10',
+    '  agy-context pricing [--sync|--reset|--json]     查看内置/已同步模型费率表与调价预告（--sync 手动联网同步）',
     '  agy-context json [conversationId]               输出结构化 JSON 摘要（加 --full 输出完整原始快照）',
     '  agy-context web [--port 18970]                  启动独立本地 Web 看板并自动在浏览器打开（适合纯 CLI 用户）',
     '  agy-context --help                              查看帮助说明'
@@ -629,6 +636,7 @@ function buildCompactSummary(ctx = {}, hist = {}) {
       budgetTokens: cx.budget ?? null,
       budgetSource: cx.budgetSource || (cx.budget ? 'server' : 'unknown'),
       pendingTokens: cx.pendingTokens ?? 0,
+      skillsTokens: cx.skillsTokens ?? 0,
       usagePercent: cx.percent ?? null,
       usedFormatted: `${fmtTok(cx.used)} / ${cx.budget ? fmtTok(cx.budget) : '未知'} (${cx.percent != null ? `${cx.percent}%` : '容量未知'})`,
       cacheHitPercent: cx.cacheHitPercent ?? null,
@@ -636,6 +644,7 @@ function buildCompactSummary(ctx = {}, hist = {}) {
       speed: {
         latestTps: sp.tps ?? null,
         streamingTps: sp.streamingTps ?? null,
+        effectiveTps: sp.effectiveTps ?? null,
         avgTps: sp.avgTps ?? null,
         peakTps: sp.peakTps ?? null,
         ttftSec: sp.ttft ?? null,
@@ -646,6 +655,7 @@ function buildCompactSummary(ctx = {}, hist = {}) {
         freshInputTokens: st.inputTokens ?? 0,
         outputTokens: st.outputTokens ?? 0,
         thinkingTokens: st.thinkingTokens ?? 0,
+        responseTokens: st.responseTokens ?? 0,
         grossTokens: st.totalTokens ?? 0,
         cacheHitPercent: st.cacheHitPercent ?? null,
         turnsCount: activeConvMeta?.turnsCount || turns.length || 0
@@ -681,7 +691,18 @@ function buildCompactSummary(ctx = {}, hist = {}) {
       ? {
           sqliteEnabled: Boolean(rawDiag.sqliteEnabled),
           eventsSummary: rawDiag.eventsSummary || null,
-          routingSummary: rawDiag.routingSummary || null
+          routingSummary: rawDiag.routingSummary || null,
+          recentEvents: Array.isArray(rawDiag.recentEvents)
+            ? rawDiag.recentEvents.slice(0, 10).map((ev) => ({
+                kind: ev?.kind || 'unknown',
+                createdAt: ev?.createdAt ?? null,
+                convId: ev?.convId ?? null,
+                convTitle: ev?.convTitle ?? '',
+                retries: Number(ev?.retries || 0),
+                requestId: ev?.requestId || null,
+                detail: ev?.detail || ''
+              }))
+            : []
         }
       : null,
     recentTurns: turns.slice(0, 8).map((t) => ({
@@ -689,7 +710,10 @@ function buildCompactSummary(ctx = {}, hist = {}) {
       contextTokens: t.totalTokens,
       deltaTokens: t.deltaTokens,
       outputTokens: t.outputTokens,
+      thinkingTokens: t.thinkingTokens ?? 0,
+      responseTokens: t.responseTokens ?? 0,
       tps: t.tps,
+      effectiveTps: t.effectiveTps ?? null,
       costUSD: t.costUSD,
       tools: t.tools || []
     })),
@@ -780,14 +804,23 @@ function printPrettyStatus(ctx, hist) {
     const lsBlockedNote = !cv.budgetTokens && (s.quotaStatus?.errorCode === 'EPERM' || s.quotaStatus?.errorCode === 'EACCES')
       ? ' · 沙箱限制暂不可查询语言服务'
       : '';
-    out.push(`窗口水位  ${renderBar(cv.usagePercent)} ${c.bold}${pctText}${c.reset}  (${fmtTok(cv.usedTokens)} / ${budgetText}${cv.pendingTokens > 0 ? `，含待发送 +${fmtTok(cv.pendingTokens)}` : ''}${lsBlockedNote})`);
+    const skillsNote = Number(cv.skillsTokens || 0) > 0 ? `，含 Skills ${fmtTok(cv.skillsTokens)}` : '';
+    out.push(`窗口水位  ${renderBar(cv.usagePercent)} ${c.bold}${pctText}${c.reset}  (${fmtTok(cv.usedTokens)} / ${budgetText}${cv.pendingTokens > 0 ? `，含待发送 +${fmtTok(cv.pendingTokens)}` : ''}${skillsNote}${lsBlockedNote})`);
     const startupBadge = formatStartupBadge(cv.latestPromptStartup);
     const startupPct = cv.latestPromptStartup?.cacheHitPercent != null
       ? ` ${Math.round(Number(cv.latestPromptStartup.cacheHitPercent))}%`
       : '';
     const startupPart = startupBadge ? ` · 本 Prompt 首跳${startupBadge}${startupPct}` : '';
-    out.push(`缓存速度  单轮缓存命中 ${c.bold}${cv.cacheHitPercent != null ? `${cv.cacheHitPercent}%` : '--'}${c.reset}${startupPart}  ·  最新 ${c.cyan}${cv.speed.latestTps ? `${cv.speed.latestTps} tok/s` : '--'}${c.reset} (均值 ${cv.speed.avgTps ?? '--'} / 峰值 ${cv.speed.peakTps ?? '--'} tok/s, TTFT ${cv.speed.ttftSec ?? '--'}s)`);
-    out.push(`会话吞吐  共 ${cv.sessionTotals.turnsCount} 轮  ·  累计总吞吐 ${c.bold}${fmtTok(cv.sessionTotals.grossTokens)}${c.reset} (缓存 ${fmtTok(cv.sessionTotals.cacheReadTokens)} · 新增输入 ${fmtTok(cv.sessionTotals.freshInputTokens)} · 输出 ${fmtTok(cv.sessionTotals.outputTokens)})`);
+    const effTps = Number(cv.speed.effectiveTps || 0);
+    const streamTps = Number(cv.speed.latestTps || 0);
+    const effTpsPart = (effTps > 0 && (!streamTps || Math.abs(effTps - streamTps) / streamTps >= 0.2))
+      ? ` · 整请求 ${effTps} t/s`
+      : '';
+    out.push(`缓存速度  单轮缓存命中 ${c.bold}${cv.cacheHitPercent != null ? `${cv.cacheHitPercent}%` : '--'}${c.reset}${startupPart}  ·  最新 ${c.cyan}${cv.speed.latestTps ? `${cv.speed.latestTps} tok/s` : '--'}${c.reset} (均值 ${cv.speed.avgTps ?? '--'} / 峰值 ${cv.speed.peakTps ?? '--'} tok/s, TTFT ${cv.speed.ttftSec ?? '--'}s${effTpsPart})`);
+    const thinkTok = Number(cv.sessionTotals.thinkingTokens || 0);
+    const respTok = Number(cv.sessionTotals.responseTokens || 0) || Math.max(0, Number(cv.sessionTotals.outputTokens || 0) - thinkTok);
+    const thinkSplitPart = thinkTok > 0 ? ` (含思考 ${fmtTok(thinkTok)} / 正文 ${fmtTok(respTok)})` : '';
+    out.push(`会话吞吐  共 ${cv.sessionTotals.turnsCount} 轮  ·  累计总吞吐 ${c.bold}${fmtTok(cv.sessionTotals.grossTokens)}${c.reset} (缓存 ${fmtTok(cv.sessionTotals.cacheReadTokens)} · 新增输入 ${fmtTok(cv.sessionTotals.freshInputTokens)} · 输出 ${fmtTok(cv.sessionTotals.outputTokens)}${thinkSplitPart})`);
     const sessionSavingsStr = cv.sessionCacheSavingsUSD > 0
       ? (cv.sessionCacheSavingsUSD < 0.01 ? fmtUsd(cv.sessionCacheSavingsUSD, 4) : fmtUsd(cv.sessionCacheSavingsUSD, 2))
       : '';
@@ -912,9 +945,17 @@ function printTurnsTable(ctx) {
     for (const t of turns.slice(0, 20)) {
       const d = Number(t.deltaTokens || 0);
       const dStr = d > 0 ? `+${fmtTok(d)}` : fmtTok(d);
+      const tOut = Number(t.outputTokens || 0);
+      const tThink = Number(t.thinkingTokens || 0);
+      const thinkPart = (tThink > 0 && tOut > 0) ? ` (思 ${Math.round((tThink / tOut) * 100)}%)` : '';
+      const tEff = Number(t.effectiveTps || 0);
+      const tStream = Number(t.tps || 0);
+      const effPart = (tEff > 0 && (!tStream || Math.abs(tEff - tStream) / tStream >= 0.2))
+        ? ` (整请求 ${tEff} t/s)`
+        : '';
       const tools = (t.tools || []).length ? ` | 工具：${t.tools.join(', ')}` : '';
       out.push(
-        `#${String(t.turnIndex).padEnd(3)} | 上下文 ${fmtTok(t.totalTokens).padStart(7)} (${dStr.padStart(7)}) | 输出 ${fmtTok(t.outputTokens).padStart(6)} | ${fmtUsd(t.costUSD, 4)} | ${t.tps ? `${t.tps} tok/s` : '--'}${tools}`
+        `#${String(t.turnIndex).padEnd(3)} | 上下文 ${fmtTok(t.totalTokens).padStart(7)} (${dStr.padStart(7)}) | 输出 ${fmtTok(t.outputTokens).padStart(6)}${thinkPart} | ${fmtUsd(t.costUSD, 4)} | ${t.tps ? `${t.tps} tok/s` : '--'}${effPart}${tools}`
       );
     }
   }
@@ -1147,16 +1188,19 @@ function printDiagnosticsReport(hist, width) {
       const timeStr = ev?.createdAt ? formatShortTime(ev.createdAt) : (ev?.date || '--');
       const convName = truncateByWidth(ev?.convTitle || (ev?.convId ? String(ev.convId).slice(0, 8) : '--'), narrow ? 16 : 18);
       const wastedPart = Number(ev?.wastedUSD || 0) > 0 ? ` ${c.red}浪费 ${formatCostAdaptive(ev.wastedUSD)}${c.reset}` : '';
+      const retryPart = Number(ev?.retries || 0) > 0 ? ` ${c.yellow}重试 ${ev.retries} 次${c.reset}` : '';
+      const reqIdStr = ev?.requestId ? String(ev.requestId).slice(0, 12) : '';
+      const reqPart = reqIdStr ? ` ${c.dim}req:${reqIdStr}${c.reset}` : '';
       const detailRaw = cleanOneLine(ev?.detail || '');
       if (narrow) {
-        out.push(`  ${kindTag} ${c.dim}${timeStr}${c.reset} ${convName}${wastedPart}`);
+        out.push(`  ${kindTag} ${c.dim}${timeStr}${c.reset} ${convName}${wastedPart}${retryPart}${reqPart}`);
         if (detailRaw) {
           out.push(`    ${c.dim}${truncateByWidth(detailRaw, Math.max(16, cols - 4))}${c.reset}`);
         }
       } else {
         const detailMax = Math.max(14, cols - 48);
         const detailPart = detailRaw ? ` | ${c.dim}${truncateByWidth(detailRaw, detailMax)}${c.reset}` : '';
-        out.push(`  ${kindTag} ${c.dim}${timeStr}${c.reset} | ${convName}${wastedPart}${detailPart}`);
+        out.push(`  ${kindTag} ${c.dim}${timeStr}${c.reset} | ${convName}${wastedPart}${retryPart}${reqPart}${detailPart}`);
       }
     }
   }
@@ -1705,6 +1749,99 @@ async function runWatchCommand(rawArgs) {
   await new Promise(() => {});
 }
 
+function formatPriceCell(value) {
+  if (!Number.isFinite(value)) return '--';
+  if (value === 0) return '$0.00';
+  return value < 0.1 ? `$${value.toFixed(3)}` : `$${value.toFixed(2)}`;
+}
+
+function printPricingCatalogTable(catalog) {
+  const entries = Array.isArray(catalog?.entries) ? catalog.entries : [];
+  const syncNote = catalog?.syncedAt ? ` · 已同步 ${String(catalog.syncedAt).slice(0, 10)}` : '';
+  const out = [];
+  out.push(`${c.bold}${c.magenta}◈ 模型 API 费率与分段调价预告${c.reset} ${c.dim}(基准 ${catalog?.asOfDate || '--'} · 内置校验 ${catalog?.verifiedDate || '--'}${syncNote})${c.reset}`);
+  out.push(`${c.dim}${'─'.repeat(84)}${c.reset}`);
+  out.push(`  ${padEndByWidth('模型', 24)} ${padEndByWidth('输入/1M', 10)} ${padEndByWidth('缓存读/1M', 11)} ${padEndByWidth('输出/1M', 10)} ${padEndByWidth('来源', 8)} 调价预告`);
+  out.push(`${c.dim}${'─'.repeat(84)}${c.reset}`);
+
+  for (const entry of entries) {
+    const ar = entry?.activeRule || {};
+    const nameStr = truncateByWidth(entry?.displayName || entry?.modelKey || '--', 23);
+    const inStr = formatPriceCell(ar.inputPerMillion);
+    const cacheStr = formatPriceCell(ar.cacheReadPerMillion);
+    const outStr = formatPriceCell(ar.outputPerMillion);
+    const srcStr = entry?.source === 'synced' ? `${c.cyan}已同步${c.reset}` : `${c.dim}内置${c.reset}`;
+    const srcPad = entry?.source === 'synced' ? '  ' : '    ';
+    let upcomingStr = `${c.dim}--${c.reset}`;
+    if (entry?.upcomingRule) {
+      const ur = entry.upcomingRule;
+      const daysText = Number.isFinite(ur.daysUntil) ? ` (${ur.daysUntil} 天后)` : '';
+      upcomingStr = `${c.yellow}${ur.effectiveFrom}${daysText} → ${formatPriceCell(ur.inputPerMillion)}/${formatPriceCell(ur.outputPerMillion)}${c.reset}`;
+    }
+    out.push(`  ${padEndByWidth(nameStr, 24)} ${inStr.padEnd(10)} ${cacheStr.padEnd(11)} ${outStr.padEnd(10)} ${srcStr}${srcPad} ${upcomingStr}`);
+  }
+
+  out.push(`${c.dim}${'─'.repeat(84)}${c.reset}`);
+  out.push(`${c.dim}提示：默认纯离线读取；运行 agy-context pricing --sync 手动拉取官方最新费率，--reset 恢复内置表。${c.reset}`);
+  console.log(out.map(formatZh).join('\n'));
+}
+
+async function runPricingCommand(rawArgs) {
+  const cacheDir = getPluginStateDir();
+  const wantJson = rawArgs.includes('--json');
+  const wantSync = rawArgs.includes('--sync');
+  const wantReset = rawArgs.includes('--reset');
+
+  if (wantReset) {
+    const resetRes = clearLocalPricingOverrides(cacheDir);
+    const catalog = getEffectivePricingCatalog({ cacheDir });
+    if (wantJson) {
+      console.log(JSON.stringify({ action: 'reset', ...resetRes, catalog }, null, 2));
+      return;
+    }
+    console.log(formatZh(
+      resetRes.removed
+        ? `${c.green}已清除本地官方定价同步快照，恢复使用内置费率表。${c.reset}`
+        : `${c.dim}本地暂无同步快照，当前已使用内置费率表。${c.reset}`
+    ));
+    printPricingCatalogTable(catalog);
+    return;
+  }
+
+  if (wantSync) {
+    try {
+      const syncRes = await syncOfficialPricing({ cacheDir });
+      const catalog = getEffectivePricingCatalog({ cacheDir });
+      if (wantJson) {
+        console.log(JSON.stringify({ action: 'sync', ok: true, ...syncRes, catalog }, null, 2));
+        return;
+      }
+      console.log(formatZh(`${c.green}已从官方定价文档同步 ${syncRes.count} 个 Gemini 模型费率${c.reset} ${c.dim}(${syncRes.syncedAt})${c.reset}`));
+      if (!syncRes.changes.length) {
+        console.log(formatZh(`${c.dim}对比内置费率表：无费率变更。${c.reset}`));
+      } else {
+        console.log(formatZh(`${c.yellow}变更摘要（${syncRes.changes.length} 项）：${syncRes.changes.map((item) => item.summary).join('；')}${c.reset}`));
+      }
+      printPricingCatalogTable(catalog);
+    } catch (err) {
+      if (wantJson) {
+        console.log(JSON.stringify({ action: 'sync', ok: false, error: err?.message || String(err) }, null, 2));
+      } else {
+        console.error(formatZh(`${c.red}同步官方定价失败：${err?.message || String(err)}${c.reset}`));
+      }
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  const catalog = getEffectivePricingCatalog({ cacheDir });
+  if (wantJson) {
+    console.log(JSON.stringify({ action: 'list', ...catalog }, null, 2));
+    return;
+  }
+  printPricingCatalogTable(catalog);
+}
+
 async function main() {
   const rawArgs = process.argv.slice(2);
   if (rawArgs.includes('--sync-manifest')) {
@@ -1722,8 +1859,13 @@ async function main() {
   }
 
   const firstPositional = rawArgs.find((a) => !a.startsWith('-')) || 'status';
-  const knownCmds = new Set(['status', 'statusline', 'watch', 'turns', 'heavy', 'tree', 'compact', 'events', 'diag', 'projects', 'json', 'web', 'serve', 'open', 'float', 'pin', 'aux', 'menubar', 'sidebar', 'shortcut', 'hotkey', 'aux-shortcut', 'aux-hotkey']);
+  const knownCmds = new Set(['status', 'statusline', 'watch', 'turns', 'heavy', 'tree', 'compact', 'events', 'diag', 'projects', 'pricing', 'json', 'web', 'serve', 'open', 'float', 'pin', 'aux', 'menubar', 'sidebar', 'shortcut', 'hotkey', 'aux-shortcut', 'aux-hotkey']);
   const cmd = knownCmds.has(firstPositional.toLowerCase()) ? firstPositional.toLowerCase() : 'status';
+
+  if (cmd === 'pricing') {
+    await runPricingCommand(rawArgs);
+    return;
+  }
 
   if (cmd === 'statusline') {
     await runStatuslineCommand(rawArgs);

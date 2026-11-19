@@ -961,6 +961,7 @@
 
   function renderSegmentedBreakdown(ctx, audit) {
     let sysTok = 0;
+    let skillsTok = 0;
     let toolsTok = 0;
     let msgsTok = 0;
     let isExact = false;
@@ -968,7 +969,8 @@
     if (ctx.breakdown?.groups?.length) {
       isExact = true;
       for (const g of ctx.breakdown.groups) {
-        if (g.name === 'System Prompt') sysTok += g.tokens || 0;
+        if (g.key === 'skills' || g.name === 'Skills') skillsTok += g.tokens || 0;
+        else if (g.name === 'System Prompt') sysTok += g.tokens || 0;
         else if (g.name === 'Tools') toolsTok += g.tokens || 0;
         else msgsTok += g.tokens || 0;
       }
@@ -980,8 +982,10 @@
       msgsTok = mid(g.user) + mid(g.assistant) + mid(g.thinking) + mid(g.summaries) + mid(audit.attachmentTotal);
     }
 
-    const sum = sysTok + toolsTok + msgsTok;
-    const pSys = sum > 0 ? (sysTok / sum) * 100 : 0;
+    const sum = sysTok + skillsTok + toolsTok + msgsTok;
+    const pSys = sum > 0 ? ((sysTok + skillsTok) / sum) * 100 : 0;
+    const pSysOnly = sum > 0 ? (sysTok / sum) * 100 : 0;
+    const pSkills = sum > 0 ? (skillsTok / sum) * 100 : 0;
     const pTools = sum > 0 ? (toolsTok / sum) * 100 : 0;
     const pMsgs = sum > 0 ? Math.max(0, 100 - pSys - pTools) : 0;
 
@@ -995,7 +999,8 @@
         leg.innerHTML = `<span class="muted">${escZh('暂无上下文构成明细')}</span>`;
       } else {
         const items = [
-          { label: '系统提示词', tok: sysTok, pct: pSys, col: 'var(--seg-sys-col)' },
+          { label: '系统提示词', tok: sysTok, pct: pSysOnly, col: 'var(--seg-sys-col)' },
+          ...(skillsTok > 0 ? [{ label: 'Skills 技能指令', tok: skillsTok, pct: pSkills, col: 'var(--cv-seg-skills-col)' }] : []),
           { label: '工具定义与调用', tok: toolsTok, pct: pTools, col: 'var(--seg-tools-col)' },
           { label: '对话与思考历史', tok: msgsTok, pct: pMsgs, col: 'var(--seg-msgs-col)' }
         ];
@@ -1036,7 +1041,11 @@
     }
 
     setText('sp-tps', spd?.tps != null ? `${spd.tps} tok/s` : '--');
-    setText('sp-stream-tps', spd?.streamingTps != null ? `流式峰值 ${spd.streamingTps} tok/s` : '流式峰值 --');
+    const hasEffTpsGap = Boolean(spd?.effectiveTps > 0 && (!(spd.tps > 0) || Math.abs(spd.effectiveTps - spd.tps) / spd.tps >= 0.2));
+    const streamTpsText = spd?.streamingTps != null
+      ? (hasEffTpsGap ? `流式峰值 ${spd.streamingTps} · 整请求 ${spd.effectiveTps} tok/s` : `流式峰值 ${spd.streamingTps} tok/s`)
+      : (hasEffTpsGap ? `整请求有效 ${spd.effectiveTps} tok/s` : '流式峰值 --');
+    setText('sp-stream-tps', streamTpsText);
     setText('sp-dur', spd?.duration != null ? fmtSec(spd.duration) : '--');
     setText('sp-stream-sec', spd?.streamingSec != null ? `流传输 ${fmtSec(spd.streamingSec)}` : '流传输 --');
     setText('sp-ttft', spd?.ttft != null ? fmtSec(spd.ttft) : '--');
@@ -1311,15 +1320,20 @@
       const deltaStr = `${sign}${fmtTokens(Math.abs(delta), 1)}`;
       const timeStr = fmtLocalTime(t.createdAt);
       const stepLabel = t.stepIndex != null ? ` · Step ${t.stepIndex}` : '';
-      const thinkSub = t.thinkingTokens > 0 ? `（思 ${fmtTokens(t.thinkingTokens, 1)}）` : '';
+      const thinkPct = t.thinkingTokens > 0 && t.outputTokens > 0
+        ? ` · ${Math.round((t.thinkingTokens / t.outputTokens) * 100)}%`
+        : '';
+      const thinkSub = t.thinkingTokens > 0 ? `（思 ${fmtTokens(t.thinkingTokens, 1)}${thinkPct}）` : '';
 
       const costChip = t.isPriced && t.costUSD > 0
         ? `<span class="turn-chip cost" title="单轮 API 等值参考">${esc(fmtUSD(t.costUSD))}</span>`
         : '';
       const ttftSub = t.ttft != null ? ` · 首字 ${t.ttft}s` : (t.duration != null ? ` · ${t.duration}s` : '');
+      const hasTurnEffGap = Boolean(t.effectiveTps > 0 && (!(t.tps > 0) || Math.abs(t.effectiveTps - t.tps) / t.tps >= 0.2));
+      const effSub = hasTurnEffGap ? ` · 整请求 ${t.effectiveTps}` : '';
       const speedChip = t.tps != null
-        ? `<span class="turn-chip speed">${esc(`${t.tps} tok/s${ttftSub}`)}</span>`
-        : '';
+        ? `<span class="turn-chip speed">${esc(`${t.tps} tok/s${ttftSub}${effSub}`)}</span>`
+        : (hasTurnEffGap ? `<span class="turn-chip speed">${esc(`整请求 ${t.effectiveTps} tok/s${ttftSub}`)}</span>` : '');
       const toolsHtml = (t.tools || []).map((toolName) =>
         `<span class="turn-chip tool">${esc(toolName)}</span>`
       ).join('');
@@ -1416,13 +1430,18 @@
     card.classList.remove('hidden');
     const nameMap = {
       'System Prompt': 'System Prompt（系统提示词与规则）',
+      'Skills': 'Skills 技能指令',
       'Tools': 'Tools（MCP 与内置工具定义）',
       'Chat Messages': 'Chat Messages（对话消息、思考与工具结果）'
     };
     const total = Math.max(1, bd.totalTokens || bd.groups.reduce((a, g) => a + (g.tokens || 0), 0));
+    const calibNote = bd.calibrated
+      ? `<div class="bd-calib-note">${escZh(`按实测输入比例校准（原始估算 ${fmtInt(bd.reportedTotalTokens || total)} → 实测 ${fmtInt(total)} tok）`)}</div>`
+      : '';
 
-    list.innerHTML = bd.groups.map((g) => {
+    list.innerHTML = calibNote + bd.groups.map((g) => {
       const pct = (((g.tokens || 0) / total) * 100).toFixed(1);
+      const isSkills = g.key === 'skills' || g.name === 'Skills';
       const rawChildren = g.children || g.topChildren || [];
       const children = rawChildren.slice(0, 18).map((c) =>
         `<span class="bd-chip">${esc(c.name)} · ${fmtInt(c.tokens)}</span>`
@@ -1431,8 +1450,8 @@
       const moreCount = Math.max(0, totalChildCount - 18);
       const moreChip = moreCount > 0 ? `<span class="bd-chip muted">+${moreCount} 项</span>` : '';
       return (
-        `<div class="bd-group">` +
-        `<div class="bd-head"><span>${escZh(nameMap[g.name] || g.name)}</span>` +
+        `<div class="bd-group${isSkills ? ' is-skills' : ''}">` +
+        `<div class="bd-head"><span>${escZh(nameMap[g.name] || g.label || g.name)}</span>` +
         `<span class="num">${escZh(`${fmtInt(g.tokens)} tok (${pct}%)`)}</span></div>` +
         (children ? `<div class="bd-children">${children}${moreChip}</div>` : '') +
         `</div>`
@@ -2518,6 +2537,12 @@
       const wastedHtml = Number(ev.wastedUSD || 0) > 0
         ? `<span class="turn-chip cost">${escZh(`浪费 ${fmtUSD(ev.wastedUSD)}`)}</span>`
         : '';
+      const retriesHtml = Number(ev.retries || 0) > 0
+        ? `<span class="diag-meta-badge warn">${escZh(`重试 ${Number(ev.retries)} 次`)}</span>`
+        : '';
+      const reqIdHtml = ev.requestId
+        ? `<span class="diag-meta-badge">${esc(`req:${String(ev.requestId).slice(0, 12)}`)}</span>`
+        : '';
       const detailHtml = ev.detail ? `<div class="diag-detail">${esc(ev.detail)}</div>` : '';
       return (
         `<div class="diag-item">` +
@@ -2525,6 +2550,8 @@
         `<span class="diag-item-left">` +
         `<span class="status-pill ${km.cls}">${escZh(km.text)}</span>` +
         `<span class="diag-item-title" title="${esc(title)}">${esc(title)}</span>` +
+        retriesHtml +
+        reqIdHtml +
         wastedHtml +
         `</span>` +
         `<span class="muted xs num">${esc(timeStr)}${stepPart ? ` · ${esc(stepPart)}` : ''}</span>` +

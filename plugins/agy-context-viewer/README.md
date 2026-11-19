@@ -57,11 +57,12 @@ agy-context watch              # 终端实时盯盘面板（适配 tmux 分屏�
 agy-context aux                # 唤醒 / 切至 Antigravity 右侧辅助栏看板
 agy-context float              # 显隐独立置顶小窗（close 关闭 / quit 退出守护进程）
 agy-context menubar quota      # 菜单栏切为配额剩余（可选 context / speed / quota / on / off / status）
-agy-context turns [--prompts]  # 查看近 40 轮上下文 Δ、工具调用，或按 Prompt 分组诊断冷/热启动缓存命中
+agy-context turns [--prompts]  # 查看近 40 轮上下文 Δ、思考占比、整请求吞吐与工具调用，或按 Prompt 诊断冷/热启动
 agy-context heavy              # 查看当前会话上下文重度消耗 Top 10 排行
 agy-context tree               # 查看当前会话 Swarm / Subagent 多代理整树聚合统计
 agy-context compact [--full]   # 查看当前会话上下文压缩历史与摘要原文
-agy-context events             # 查看跨会话 429 / 安全过滤浪费 / 灰度路由取证及按项目消耗 Top 10
+agy-context events             # 查看跨会话 429 / 安全过滤浪费 / 重试与 requestId / 灰度路由取证及按项目消耗 Top 10
+agy-context pricing [--sync|--reset] # 离线查看模型费率与调价预告（--sync 手动同步官方定价，--reset 恢复内置）
 agy-context web                # 启动 127.0.0.1:18970 独立 Web 看板并打开浏览器
 agy-context json               # 输出结构化汇总 JSON（追加 --full 返回完整原始数据）
 ```

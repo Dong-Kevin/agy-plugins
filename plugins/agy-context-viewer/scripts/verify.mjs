@@ -5282,6 +5282,7 @@ async function main() {
     await verifyBatch1Features(cvHtmlSource, cvAppSource);
     await verifyBatch2Features(cvHtmlSource, cvAppSource);
     await verifyStatuslineFastPath();
+    await verifyPowertoolsP1P2Features(cvHtmlSource, cvAppSource);
 
     // macOS Swift native host typecheck
     if (process.platform === 'darwin' && existsSync('/usr/bin/swiftc')) {
@@ -5999,6 +6000,8 @@ async function verifyContextAuxBridgeBehavior(appSource) {
         setItem: (k, v) => sessionMap.set(k, String(v))
       },
       navigator: { platform: 'MacIntel', userAgent: 'Mozilla/5.0' },
+      addEventListener: () => {},
+      removeEventListener: () => {},
       document: {
         readyState: 'complete',
         hidden: false,
@@ -6825,6 +6828,8 @@ async function verifyBatch1Features(cvHtmlSource, cvAppSource) {
       localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
       sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
       navigator: { platform: 'MacIntel', userAgent: 'Mozilla/5.0' },
+      addEventListener: () => {},
+      removeEventListener: () => {},
       document: {
         readyState: 'complete',
         hidden: false,
@@ -7620,6 +7625,8 @@ async function verifyBatch2Features(cvHtmlSource, cvAppSource) {
       localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
       sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
       navigator: { platform: 'MacIntel', userAgent: 'Mozilla/5.0' },
+      addEventListener: () => {},
+      removeEventListener: () => {},
       document: {
         readyState: 'complete',
         hidden: false,
@@ -8056,6 +8063,536 @@ async function verifyStatuslineFastPath() {
       else process.env[k] = v;
     }
     rmSync(tmpSlRoot, { recursive: true, force: true });
+  }
+}
+
+async function verifyPowertoolsP1P2Features(cvHtmlSource, cvAppSource) {
+  let DatabaseSyncCtor = null;
+  try {
+    const mod = await import('node:sqlite');
+    if (typeof mod?.DatabaseSync === 'function') DatabaseSyncCtor = mod.DatabaseSync;
+  } catch {}
+
+  const tmpP1Root = mkdtempSync(join(tmpdir(), 'agy-cv-p1p2-'));
+  const agDir = join(tmpP1Root, 'ag');
+  const cliDir = join(tmpP1Root, 'cli');
+  const ideDir = join(tmpP1Root, 'ide');
+  const stateDir = join(tmpP1Root, 'state');
+  mkdirSync(join(agDir, 'conversations'), { recursive: true });
+  mkdirSync(cliDir, { recursive: true });
+  mkdirSync(ideDir, { recursive: true });
+  mkdirSync(stateDir, { recursive: true });
+
+  const savedEnv = {
+    AG_DIR: process.env.AG_DIR,
+    AG_CLI_DIR: process.env.AG_CLI_DIR,
+    AG_IDE_DIR: process.env.AG_IDE_DIR,
+    ANTIGRAVITY_APP_DATA_DIR: process.env.ANTIGRAVITY_APP_DATA_DIR,
+    ANTIGRAVITY_EXECUTABLE_DATA_DIR: process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR,
+    ANTIGRAVITY_CLI_DATA_DIR: process.env.ANTIGRAVITY_CLI_DATA_DIR,
+    ANTIGRAVITY_IDE_DATA_DIR: process.env.ANTIGRAVITY_IDE_DATA_DIR,
+    ANTIGRAVITY_LS_ADDRESS: process.env.ANTIGRAVITY_LS_ADDRESS,
+    ANTIGRAVITY_LS_ADDR: process.env.ANTIGRAVITY_LS_ADDR,
+    ANTIGRAVITY_CSRF_TOKEN: process.env.ANTIGRAVITY_CSRF_TOKEN
+  };
+
+  try {
+    const convId = 'beef-cafe-0001-0002';
+    const fakeHome = ['', 'Users', 'alice_p1test'].join('/');
+    const fakeLinuxHome = ['', 'home', 'bob_p1test'].join('/');
+    const fakeBearer = 'Bearer ' + 'sk-' + 'p1p2mocksecret1234567890';
+
+    // 1. sqlite_reader.mjs protobuf decoding + collector.mjs integration
+    let p1Snap = null;
+    let p1Hist = null;
+    if (DatabaseSyncCtor) {
+      const encVarint = (n) => {
+        const out = [];
+        let v = BigInt(n);
+        do {
+          let b = Number(v & 0x7fn);
+          v >>= 7n;
+          if (v > 0n) b |= 0x80;
+          out.push(b);
+        } while (v > 0n);
+        return Buffer.from(out);
+      };
+      const encTag = (fn, wt) => encVarint((fn << 3) | wt);
+      const encLd = (fn, buf) => Buffer.concat([encTag(fn, 2), encVarint(buf.length), buf]);
+      const encVi = (fn, val) => Buffer.concat([encTag(fn, 0), encVarint(val)]);
+      const encStr = (fn, s) => encLd(fn, Buffer.from(s, 'utf8'));
+
+      const childSkills = Buffer.concat([encStr(1, 'skills'), encVi(3, 1200)]);
+      const childRules = Buffer.concat([encStr(1, 'rules'), encVi(3, 800)]);
+      const grpSys = Buffer.concat([encStr(1, 'System Prompt'), encVi(4, 2500), encLd(5, childSkills), encLd(5, childRules)]);
+      const grpTools = Buffer.concat([encStr(1, 'Tools'), encVi(4, 1500)]);
+      const grpChat = Buffer.concat([encStr(1, 'Chat Messages'), encVi(4, 1000)]);
+      const bdMsg = Buffer.concat([encLd(1, grpSys), encLd(1, grpTools), encLd(1, grpChat)]);
+      const ctxWin = Buffer.concat([encVi(1, 5000), encVi(4, 1000000), encLd(3, bdMsg)]);
+      const chatStart = Buffer.concat([encVi(1, 1318), encStr(28, 'gemini-3-flash'), encLd(10, ctxWin)]);
+      const usageMsg = Buffer.concat([encVi(2, 3000), encVi(3, 500), encVi(5, 2500), encVi(9, 200), encVi(10, 300)]);
+      const dur1 = Buffer.concat([encVi(1, 1), encVi(2, 500_000_000)]);
+      const dur2 = Buffer.concat([encVi(1, 2), encVi(2, 500_000_000)]);
+      const retryErr1 = encStr(3, `HTTP 429 rate limit exceeded for ${fakeHome}/proj ${fakeBearer}`);
+      const retryErr2 = encStr(3, `HTTP 429 rate limit duplicate for ${fakeHome}/proj`);
+      const kvReqId = Buffer.concat([encStr(1, 'request_id'), encStr(2, 'req_p1p2_001')]);
+      const f1 = Buffer.concat([
+        encLd(4, usageMsg),
+        encLd(9, chatStart),
+        encLd(11, dur1),
+        encLd(12, dur2),
+        encVi(14, 2),
+        encLd(17, retryErr1),
+        encLd(17, retryErr2),
+        encLd(20, kvReqId)
+      ]);
+      const top = Buffer.concat([
+        encLd(1, f1),
+        encVi(2, 1),
+        encStr(5, `503 Service Unavailable upstream timeout at ${fakeLinuxHome}/key`)
+      ]);
+
+      const dbPath = join(agDir, 'conversations', `${convId}.db`);
+      const db = new DatabaseSyncCtor(dbPath);
+      try {
+        db.exec('CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)');
+        db.prepare('INSERT INTO gen_metadata (idx, data) VALUES (?, ?)').run(1, top);
+      } finally {
+        db.close();
+      }
+
+      const { readConversationSqliteSignals, readConversationLatestGenSignal } = await import(
+        `${pathToFileURL(join(ROOT, 'sidecars', 'dashboard', 'sqlite_reader.mjs')).href}?p1=${Date.now()}`
+      );
+      const sig = await readConversationSqliteSignals(dbPath, { includeLatestGenDetail: true });
+      const step1 = sig?.genByStep?.get(1);
+      assert(
+        step1 &&
+          step1.usage?.inputTokens === 3000 &&
+          step1.usage?.outputTokens === 500 &&
+          step1.usage?.cacheReadTokens === 2500 &&
+          step1.usage?.thinkingTokens === 200 &&
+          step1.usage?.responseTokens === 300 &&
+          step1.requestId === 'req_p1p2_001' &&
+          step1.retries === 2,
+        `P1 sqlite_reader usage/requestId/retries 解码失败：${JSON.stringify(step1)}`
+      );
+      assert(
+        sig?.latestContextWindowMetadata?.tokenBreakdown?.groups?.length === 3 &&
+          sig.latestContextWindowMetadata.tokenBreakdown.groups[0].children.some((c) => c.name === 'skills' && c.numTokens === 1200),
+        `P1 sqlite_reader tokenBreakdown 解码失败：${JSON.stringify(sig?.latestContextWindowMetadata)}`
+      );
+      const q429Events = (sig?.events || []).filter((e) => e.kind === 'quota_429');
+      const retryEv = (sig?.events || []).find((e) => e.kind === 'upstream_retry');
+      assert(
+        q429Events.length === 1 &&
+          q429Events[0].requestId === 'req_p1p2_001' &&
+          q429Events[0].retries === 2 &&
+          q429Events[0].source === 'gen_metadata' &&
+          !q429Events[0].detail.includes('alice_p1test') &&
+          !q429Events[0].detail.includes('p1p2mocksecret') &&
+          retryEv &&
+          !retryEv.detail.includes('bob_p1test'),
+        `P1 sqlite_reader events 去重或脱敏失败：${JSON.stringify(sig?.events)}`
+      );
+      const fastSig = await readConversationLatestGenSignal(dbPath, { timeoutMs: 200 });
+      assert(
+        fastSig && fastSig.maxContextTokens === 1000000 && fastSig.contextWindowMetadata === undefined,
+        `P1 readConversationLatestGenSignal 快速通道不应解析 breakdown：${JSON.stringify(fastSig)}`
+      );
+
+      // 2. collector.mjs integration
+      const logDir = join(agDir, 'brain', convId, '.system_generated', 'logs');
+      mkdirSync(logDir, { recursive: true });
+      const nowIso = new Date().toISOString();
+      writeFileSync(
+        join(logDir, 'transcript.jsonl'),
+        [
+          JSON.stringify({ step_index: 0, type: 'USER_INPUT', content: 'hello p1p2', created_at: nowIso }),
+          JSON.stringify({
+            step_index: 1,
+            type: 'PLANNER_RESPONSE',
+            model: 'gemini-3-flash',
+            usage: { inputTokens: 3000, cacheReadTokens: 2500, outputTokens: 500 },
+            created_at: nowIso
+          })
+        ].join('\n') + '\n'
+      );
+
+      process.env.AG_DIR = agDir;
+      process.env.AG_CLI_DIR = cliDir;
+      process.env.AG_IDE_DIR = ideDir;
+      process.env.ANTIGRAVITY_APP_DATA_DIR = agDir;
+      process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR = stateDir;
+      process.env.ANTIGRAVITY_CLI_DATA_DIR = cliDir;
+      process.env.ANTIGRAVITY_IDE_DATA_DIR = ideDir;
+      delete process.env.ANTIGRAVITY_LS_ADDRESS;
+      delete process.env.ANTIGRAVITY_LS_ADDR;
+      delete process.env.ANTIGRAVITY_CSRF_TOKEN;
+
+      const { scanConversation, collectTokenHistory } = await import(
+        `${pathToFileURL(join(ROOT, 'sidecars', 'dashboard', 'collector.mjs')).href}?p1=${Date.now()}`
+      );
+      p1Snap = await scanConversation(convId, { force: true, skipWorkspaceLookup: true });
+      p1Hist = await collectTokenHistory({ force: true });
+
+      const bd = p1Snap?.context?.breakdown;
+      const bdGroups = bd?.groups || [];
+      const sumCalib = bdGroups.reduce((s, g) => s + (g.tokens || 0), 0);
+      const skillsGroup = bdGroups.find((g) => g.key === 'skills' || g.name === 'Skills');
+      const sysGroup = bdGroups.find((g) => g.name === 'System Prompt');
+      assert(
+        bd &&
+          bd.calibrated === true &&
+          bd.reportedTotalTokens === 5000 &&
+          bd.totalTokens === 5500 &&
+          sumCalib === 5500 &&
+          skillsGroup &&
+          skillsGroup.reportedTokens === 1200 &&
+          sysGroup &&
+          sysGroup.reportedTokens === 1300 &&
+          p1Snap.context.skillsTokens === skillsGroup.tokens,
+        `P1 collector Skills 拆出或最大余数法校准失败：${JSON.stringify(bd)}`
+      );
+      assert(
+        p1Snap.turns?.[0]?.thinkingTokens === 200 &&
+          p1Snap.turns?.[0]?.responseTokens === 300 &&
+          p1Snap.turns?.[0]?.effectiveTps === 125 &&
+          p1Snap.speed?.effectiveTps === 125 &&
+          p1Snap.context?.sessionTotals?.responseTokens === 300,
+        `P1 collector thinking/response/effectiveTps 失败：turn=${JSON.stringify(p1Snap.turns?.[0])}, speed=${JSON.stringify(p1Snap.speed)}`
+      );
+      const sessQ429 = (p1Snap.sessionDiagnostics?.events || []).filter((e) => e.kind === 'quota_429');
+      const histQ429 = (p1Hist?.diagnostics?.recentEvents || []).filter((e) => e.kind === 'quota_429');
+      assert(
+        sessQ429.length === 1 &&
+          sessQ429[0].requestId === 'req_p1p2_001' &&
+          sessQ429[0].retries === 2 &&
+          histQ429.length === 1 &&
+          histQ429[0].requestId === 'req_p1p2_001' &&
+          histQ429[0].retries === 2,
+        `P1 collector requestId 去重或 retries 透传失败：sess=${JSON.stringify(sessQ429)}, hist=${JSON.stringify(histQ429)}`
+      );
+    }
+
+    // 3. pricing.mjs regression tests
+    const pricingMod = await import(
+      `${pathToFileURL(join(ROOT, 'sidecars', 'dashboard', 'pricing.mjs')).href}?p1=${Date.now()}`
+    );
+    const sampleMd = [
+      '## Gemini 3.1 Pro Preview <a id="gemini-3.1-pro-preview"></a>',
+      '{% tab title="Standard" %}',
+      '* Input price',
+      '  * $2.00',
+      '  * $4.00 (starting December 1, 2026)',
+      '---',
+      '* Output price',
+      '  * $12.00',
+      '  * $18.00 (starting December 1, 2026)',
+      '---',
+      '* Context caching price',
+      '  * $0.20',
+      '  * $0.40 (starting December 1, 2026)',
+      '---',
+      '{% /tab %}',
+      '## Gemini 3.8 Flash <a id="gemini-3.8-flash"></a>',
+      '<tab title="Standard">',
+      '| Input price | $0.50 |',
+      '| Output price | $3.00 |',
+      '| Context caching price | $0.05 |',
+      '</tab>',
+      '## Gemini 3 Pro Image <a id="gemini-3-pro-image"></a>',
+      '<tab title="Standard">',
+      '| Input price | $2.00 |',
+      '</tab>',
+      '## Gemini 2.5 Pro <a id="gemini-2.5-pro"></a>',
+      '{% tab title="Standard" %}',
+      '* Input price',
+      '  * $1.25, prompts <= 200k tokens',
+      '  * $2.50, prompts > 200k tokens',
+      '---',
+      '{% /tab %}'
+    ].join('\n');
+    const parsedEntries = pricingMod.parseOfficialGeminiPricingMarkdown(sampleMd, '2026-11-19');
+    const proEntry = parsedEntries.find((e) => e.modelKey === 'gemini-3.1-pro-preview');
+    const flashEntry = parsedEntries.find((e) => e.modelKey === 'gemini-3.8-flash');
+    assert(
+      parsedEntries.length === 2 &&
+        proEntry?.rules?.length === 2 &&
+        proEntry.rules[0].effectiveTo === '2026-11-30' &&
+        proEntry.rules[1].effectiveFrom === '2026-12-01' &&
+        proEntry.rules[1].inputPerMillion === 4.0 &&
+        flashEntry?.rules?.length === 1 &&
+        flashEntry.rules[0].inputPerMillion === 0.5,
+      `P1 pricing parseOfficialGeminiPricingMarkdown 解析失败：${JSON.stringify(parsedEntries)}`
+    );
+
+    const pricingCacheDir = join(tmpP1Root, 'pricing-cache');
+    mkdirSync(pricingCacheDir, { recursive: true });
+    const syncRes = await pricingMod.syncOfficialPricing({
+      cacheDir: pricingCacheDir,
+      fetcher: async () => ({ ok: true, status: 200, text: async () => sampleMd })
+    });
+    assert(syncRes.count === 2 && existsSync(syncRes.savedPath), `P1 syncOfficialPricing 落盘失败：${JSON.stringify(syncRes)}`);
+
+    let zeroThrown = false;
+    try {
+      await pricingMod.syncOfficialPricing({
+        cacheDir: pricingCacheDir,
+        fetcher: async () => ({ ok: true, status: 200, text: async () => 'empty' })
+      });
+    } catch {
+      zeroThrown = true;
+    }
+    const loadedOv = pricingMod.loadLocalPricingOverrides(pricingCacheDir);
+    assert(zeroThrown && loadedOv?.models?.['gemini-3.1-pro-preview'], 'P1 syncOfficialPricing 0 条失败保护异常');
+
+    const ruleBefore = pricingMod.matchPricingRule('gemini-3.1-pro-preview', '2026-11-19', 1000, loadedOv);
+    const ruleAfter = pricingMod.matchPricingRule('gemini-3.1-pro-preview', '2026-12-05', 1000, loadedOv);
+    const rule3Arg = pricingMod.matchPricingRule('gemini-3.8-flash', '2026-11-19', 1000);
+    assert(
+      ruleBefore?.inputPerMillion === 2.0 &&
+        ruleAfter?.inputPerMillion === 4.0 &&
+        rule3Arg?.inputPerMillion > 0,
+      `P1 matchPricingRule 3/4 参兼容失败`
+    );
+    const catalog = pricingMod.getEffectivePricingCatalog({ reqDateStr: '2026-11-19', cacheDir: pricingCacheDir });
+    const catPro = catalog.entries.find((e) => e.modelKey === 'gemini-3.1-pro-preview');
+    assert(catPro?.source === 'synced' && catPro?.upcomingRule?.effectiveFrom === '2026-12-01', 'P1 getEffectivePricingCatalog 失败');
+    const cleared = pricingMod.clearLocalPricingOverrides(pricingCacheDir);
+    assert(cleared.removed === true && pricingMod.loadLocalPricingOverrides(pricingCacheDir) === null, 'P1 clearLocalPricingOverrides 失败');
+
+    // 4. GUI VM regression for Skills breakdown, effectiveTps, and diagnostics retries/requestId badges
+    const makeEl = (id = '', initClasses = []) => {
+      const classes = new Set(initClasses);
+      const attrs = new Map();
+      return {
+        id,
+        value: '',
+        textContent: '',
+        innerHTML: '',
+        dataset: {},
+        style: {},
+        className: initClasses.join(' '),
+        classList: {
+          add: (...n) => n.forEach((x) => classes.add(x)),
+          remove: (...n) => n.forEach((x) => classes.delete(x)),
+          toggle: (n, f) => (f === undefined ? !classes.has(n) : Boolean(f)) ? (classes.add(n), true) : (classes.delete(n), false),
+          contains: (n) => classes.has(n)
+        },
+        addEventListener: () => {},
+        setAttribute: (k, v) => attrs.set(k, String(v)),
+        getAttribute: (k) => (attrs.has(k) ? attrs.get(k) : null),
+        hasAttribute: (k) => attrs.has(k),
+        removeAttribute: (k) => attrs.delete(k),
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        appendChild: () => {},
+        remove: () => {}
+      };
+    };
+    const uiEls = new Map();
+    const getUiEl = (id) => {
+      if (!uiEls.has(id)) uiEls.set(id, makeEl(id));
+      return uiEls.get(id);
+    };
+    const vmSnap = p1Snap
+      ? {
+          ...p1Snap,
+          speed: { ...p1Snap.speed, tps: 200, streamingTps: 220, effectiveTps: 125 }
+        }
+      : {
+      ok: true,
+      etag: 'vm-p1',
+      conversationId: convId,
+      conversationTitle: 'P1 VM Test',
+      quotas: [],
+      turns: [{ turnIndex: 1, stepIndex: 1, totalTokens: 6000, inputTokens: 3000, cacheTokens: 2500, outputTokens: 500, thinkingTokens: 200, responseTokens: 300, tps: 200, effectiveTps: 125 }],
+      context: {
+        model: 'Gemini 3 Flash',
+        used: 6000,
+        budget: 1000000,
+        skillsTokens: 1320,
+        thinkingTokens: 200,
+        responseTokens: 300,
+        sessionTotals: { inputTokens: 3000, cacheTokens: 2500, outputTokens: 500, thinkingTokens: 200, responseTokens: 300, totalTokens: 6000 },
+        breakdown: {
+          calibrated: true,
+          reportedTotalTokens: 5000,
+          totalTokens: 5500,
+          groups: [
+            { key: 'System Prompt', name: 'System Prompt', label: '系统提示与规则', tokens: 1430, reportedTokens: 1300, calibrated: true, children: [] },
+            { key: 'skills', name: 'Skills', label: 'Skills 技能指令', tokens: 1320, reportedTokens: 1200, calibrated: true, children: [{ name: 'skills', tokens: 1200 }] },
+            { key: 'Tools', name: 'Tools', label: '工具定义 Schema', tokens: 1650, reportedTokens: 1500, calibrated: true, children: [] },
+            { key: 'Chat Messages', name: 'Chat Messages', label: '对话与工具历史', tokens: 1100, reportedTokens: 1000, calibrated: true, children: [] }
+          ]
+        }
+      },
+      speed: { tps: 200, streamingTps: 220, effectiveTps: 125, duration: 4.0, ttft: 1.5, streamingSec: 2.5, outputTokens: 500, thinkingTokens: 200, responseTokens: 300, isServerExact: true },
+      audit: { totalSteps: 2, turnsCount: 1, groups: {} }
+    };
+    const vmHist = p1Hist || {
+      ok: true,
+      etag: 'vm-hist-p1',
+      diagnostics: {
+        sqliteEnabled: true,
+        eventsSummary: { total: 1, safetyFilter: 0, safetyWastedUSD: 0, quota429: 1, upstreamRetry: 0, contextOverflow: 0 },
+        recentEvents: [{ kind: 'quota_429', convId, convTitle: 'P1 VM Test', date: '2026-11-19', stepIndex: 1, retries: 2, requestId: 'req_p1p2_001', detail: 'HTTP 429 rate limit' }],
+        routingSummary: { total: 0, uniqueModels: 0 },
+        recentRouting: []
+      }
+    };
+    const rootAttrs = new Map();
+    const rootStyles = new Map();
+    const uiSandbox = {
+      console, Date, Math, JSON, URL, URLSearchParams, Set, Map, Array, Object, String, Number, Boolean, Promise, Error,
+      NodeFilter: { SHOW_TEXT: 4 },
+      MutationObserver: class { observe() {} disconnect() {} },
+      ResizeObserver: class { observe() {} disconnect() {} },
+      IntersectionObserver: class { observe() {} disconnect() {} },
+      getComputedStyle: () => ({ color: 'rgb(255, 255, 255)', getPropertyValue: () => '' }),
+      setTimeout, clearTimeout, clearInterval,
+      setInterval: () => 1,
+      requestAnimationFrame: (fn) => { fn(); return 1; },
+      localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+      sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+      navigator: { platform: 'MacIntel', userAgent: 'Mozilla/5.0' },
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      document: {
+        readyState: 'complete',
+        hidden: false,
+        visibilityState: 'visible',
+        documentElement: {
+          clientWidth: 420,
+          clientHeight: 760,
+          dataset: {},
+          appendChild: () => {},
+          style: {
+            getPropertyValue: (k) => rootStyles.get(k) || '',
+            setProperty: (k, v) => rootStyles.set(k, String(v)),
+            removeProperty: (k) => rootStyles.delete(k)
+          },
+          getAttribute: (k) => (rootAttrs.has(k) ? rootAttrs.get(k) : null),
+          setAttribute: (k, v) => rootAttrs.set(k, String(v)),
+          hasAttribute: (k) => rootAttrs.has(k),
+          removeAttribute: (k) => rootAttrs.delete(k)
+        },
+        body: makeEl('body'),
+        getElementById: getUiEl,
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        addEventListener: () => {},
+        createTreeWalker: () => ({ nextNode: () => null }),
+        createElement: (tag) => makeEl(tag)
+      },
+      window: null,
+      fetch: async (urlStr) => {
+        const u = new URL(urlStr, 'http://127.0.0.1');
+        if (u.pathname === '/api/settings') {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ ok: true, settings: {}, uiPreferences: {}, shortcut: {}, auxShortcut: {}, menubar: { supported: true, enabled: false } })
+          };
+        }
+        if (u.pathname === '/api/context') return { ok: true, status: 200, json: async () => vmSnap };
+        if (u.pathname === '/api/history') return { ok: true, status: 200, json: async () => vmHist };
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+    };
+    uiSandbox.window = {
+      location: { origin: 'http://127.0.0.1', href: 'http://127.0.0.1/', pathname: '/' },
+      matchMedia: () => ({ matches: false, addEventListener: () => {} }),
+      getComputedStyle: uiSandbox.getComputedStyle,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      sidecar: { conversationId: convId },
+      self: null,
+      top: null,
+      fetch: uiSandbox.fetch
+    };
+    uiSandbox.window.self = uiSandbox.window;
+    uiSandbox.window.top = uiSandbox.window;
+    uiSandbox.location = uiSandbox.window.location;
+    runInNewContext(cvAppSource, uiSandbox);
+    await new Promise((r) => setTimeout(r, 80));
+
+    const bdHtml = getUiEl('breakdown-groups').innerHTML;
+    const diagHtml = getUiEl('diagnostics-list').innerHTML;
+    const spStreamText = getUiEl('sp-stream-tps').textContent;
+    assert(
+      bdHtml.includes('Skills 技能指令') && bdHtml.includes('按实测输入比例校准'),
+      `P1 GUI VM breakdown-groups 渲染缺失 Skills 或校准提示：${bdHtml}`
+    );
+    assert(
+      diagHtml.includes('重试 2 次') && diagHtml.includes('req:req_p1p2_001'),
+      `P1 GUI VM diagnostics-list 渲染缺失重试或 requestId 徽章：${diagHtml}`
+    );
+    assert(
+      spStreamText.includes('整请求'),
+      `P1 GUI VM sp-stream-tps 应补充整请求有效吞吐：${spStreamText}`
+    );
+
+    // 5. CLI subprocess regression for pricing --json / pricing --reset / status / events
+    const cliEntry = join(ROOT, 'sidecars', 'dashboard', 'cli.mjs');
+    const p1CliEnv = {
+      ...process.env,
+      AG_DIR: agDir,
+      AG_IDE_DIR: ideDir,
+      AG_CLI_DIR: cliDir,
+      ANTIGRAVITY_APP_DATA_DIR: agDir,
+      ANTIGRAVITY_EXECUTABLE_DATA_DIR: stateDir,
+      ANTIGRAVITY_CLI_DATA_DIR: cliDir,
+      ANTIGRAVITY_IDE_DATA_DIR: ideDir,
+      NO_COLOR: '1'
+    };
+    delete p1CliEnv.ANTIGRAVITY_LS_ADDRESS;
+    delete p1CliEnv.ANTIGRAVITY_LS_ADDR;
+    delete p1CliEnv.ANTIGRAVITY_CSRF_TOKEN;
+    const runP1Cli = (args) => {
+      const r = spawnSync(process.execPath, [cliEntry, ...args], {
+        env: p1CliEnv,
+        encoding: 'utf-8',
+        timeout: 15000
+      });
+      assert(r.status === 0, `P1 CLI (${args.join(' ')}) 退出码异常 ${r.status}：${r.stderr}`);
+      assert(
+        !String(r.stderr || '').includes('ExperimentalWarning: SQLite'),
+        `P1 CLI (${args.join(' ')}) stderr 不得泄露 ExperimentalWarning: SQLite：${r.stderr}`
+      );
+      return String(r.stdout || '');
+    };
+    const pricingJsonOut = JSON.parse(runP1Cli(['pricing', '--json']));
+    assert(
+      Array.isArray(pricingJsonOut.entries) && pricingJsonOut.entries.length > 0,
+      `P1 CLI pricing --json 输出异常：${JSON.stringify(pricingJsonOut).slice(0, 300)}`
+    );
+    const pricingResetOut = JSON.parse(runP1Cli(['pricing', '--reset', '--json']));
+    assert(
+      pricingResetOut.action === 'reset' &&
+        typeof pricingResetOut.removed === 'boolean' &&
+        Array.isArray(pricingResetOut.catalog?.entries),
+      `P1 CLI pricing --reset --json 输出异常：${JSON.stringify(pricingResetOut)}`
+    );
+    if (DatabaseSyncCtor) {
+      const statusOut = runP1Cli(['status', convId]);
+      assert(
+        statusOut.includes('Skills') && statusOut.includes('含思考'),
+        `P1 CLI status 应展示 Skills 与思考/正文拆分：${statusOut}`
+      );
+      const eventsOut = runP1Cli(['events']);
+      assert(
+        eventsOut.includes('重试 2 次') && eventsOut.includes('req:req_p1p2_001'),
+        `P1 CLI events 应展示 retries 与 requestId：${eventsOut}`
+      );
+    }
+  } finally {
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(tmpP1Root, { recursive: true, force: true });
   }
 }
 

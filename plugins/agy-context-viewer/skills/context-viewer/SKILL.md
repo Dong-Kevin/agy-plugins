@@ -65,11 +65,12 @@ node "<skill-dir>/scripts/status.mjs" --json "<conversation-id>"
    agy-context                   # 外部终端查看桌面端 + IDE + CLI 全量汇总与实时状态
    agy-context statusline install # 为 agy CLI 开启底部原生实时状态栏（实时显示模型、水位%、冷启动预警、速率、费用与 5h/Week 配额）
    agy-context watch             # 终端实时盯盘面板（适配 tmux 分屏，随会话归档变化自动刷新）
-   agy-context turns --prompts   # 按用户输入分组诊断冷/热启动缓存命中与增量
-   agy-context heavy             # 查看当前会话上下文重度消耗 Top 10
+   agy-context turns --prompts   # 按用户输入分组诊断冷/热启动缓存命中与增量（含思考占比与整请求有效吞吐）
+   agy-context heavy             # 查看当前会话上下文重度消耗 Top 10（含独立 Skills 分组占比）
    agy-context tree              # 查看 Swarm / Subagent 多代理整树吞吐与折算费用
    agy-context compact           # 查看上下文压缩历史与摘要（追加 --full 看原文）
-   agy-context events            # 查看跨会话 429 / 安全过滤浪费 / 灰度路由取证及按项目排行
+   agy-context events            # 查看跨会话 429 / 安全过滤浪费 / 重试次数与 requestId / 灰度路由取证及按项目排行
+   agy-context pricing [--sync|--reset] # 离线查看内置/已同步模型费率与分段调价预告（--sync 手动同步官方定价）
    agy-context menubar on        # (macOS) 开启顶部菜单栏常驻图标，切换会话自动跟随
    agy-context float             # 弹出屏幕右侧独立置顶小窗（可配 agy-context shortcut --global 在终端前台用 ⌥⌘K 呼出）
    agy-context web               # 在 127.0.0.1:18970 启动完整 Web 热力图与双池配额看板并打开浏览器

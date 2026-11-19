@@ -3022,6 +3022,17 @@ function extractStepModel(step, gmEntry = null, fallbackRunningModel = '') {
   return String(gmModel || stepModel || fallbackRunningModel || '').trim();
 }
 
+function resolveThinkingAndResponse(rawThinking, rawResponse, output, sqlUsage) {
+  const thinking = rawThinking > 0 ? rawThinking : (sqlUsage?.thinkingTokens > 0 ? sqlUsage.thinkingTokens : 0);
+  let responseTokens = (rawThinking <= 0 && thinking > 0) || (rawResponse + thinking > output)
+    ? (sqlUsage?.responseTokens > 0 ? sqlUsage.responseTokens : Math.max(0, output - thinking))
+    : (rawResponse > 0 ? rawResponse : (sqlUsage?.responseTokens > 0 ? sqlUsage.responseTokens : 0));
+  if (responseTokens <= 0 && output > 0 && thinking >= 0) {
+    responseTokens = Math.max(0, output - thinking);
+  }
+  return { thinking, responseTokens };
+}
+
 function extractStepUsage(step) {
   if (step?.input_tokens != null || step?.output_tokens != null || step?.cache_read_tokens != null) {
     const input = Number(step.input_tokens || 0);
@@ -3912,25 +3923,49 @@ function saveActiveConvGenDiskEntry(convId, entry, targetPath = getActiveConvGen
   } catch {}
 }
 
-function extractContextBreakdown(contextWindowMetadata) {
+function extractContextBreakdown(contextWindowMetadata, actualInputTokens = null) {
   const groups = contextWindowMetadata?.tokenBreakdown?.groups;
   if (!Array.isArray(groups) || !groups.length) return null;
   const total = Number(contextWindowMetadata.totalTokens || contextWindowMetadata.estimatedTokensUsed || 0);
-  const parsedGroups = groups.map((g) => {
-    const numTokens = Number(g.numTokens || 0);
-    const children = Array.isArray(g.children)
+  const labelMap = {
+    'System Prompt': '系统提示与规则',
+    Skills: 'Skills 技能指令',
+    Tools: '工具定义 Schema',
+    'Chat Messages': '对话与工具历史'
+  };
+  const parsedGroups = [];
+  for (const g of groups) {
+    let numTokens = Number(g.numTokens || 0);
+    const allChildren = Array.isArray(g.children)
       ? g.children
           .map((c) => ({ name: String(c.name || ''), tokens: Number(c.numTokens || 0) }))
           .filter((c) => c.tokens > 0)
           .sort((a, b) => b.tokens - a.tokens)
       : [];
-    const labelMap = {
-      'System Prompt': '系统提示与规则',
-      Tools: '工具定义 Schema',
-      'Chat Messages': '对话与工具历史'
-    };
-    const slicedChildren = g.name === 'Chat Messages' ? children.slice(0, 8) : children.slice(0, 18);
-    return {
+    let groupChildren = allChildren;
+    let skillsSplitGroup = null;
+    if (g.name === 'System Prompt' && allChildren.length) {
+      const skillsChildren = allChildren.filter((c) => /^skills$/i.test(c.name.trim()) && c.tokens > 0);
+      if (skillsChildren.length) {
+        const skillsTokens = skillsChildren.reduce((sum, c) => sum + c.tokens, 0);
+        if (skillsTokens > 0) {
+          numTokens = Math.max(0, numTokens - skillsTokens);
+          groupChildren = allChildren.filter((c) => !(/^skills$/i.test(c.name.trim()) && c.tokens > 0));
+          skillsSplitGroup = {
+            key: 'skills',
+            name: 'Skills',
+            label: 'Skills 技能指令',
+            tokens: skillsTokens,
+            percent: total > 0 ? Number(((skillsTokens / total) * 100).toFixed(1)) : 0,
+            children: skillsChildren,
+            topChildren: skillsChildren,
+            childrenCount: skillsChildren.length
+          };
+        }
+      }
+    }
+    const slicedChildren = g.name === 'Chat Messages' ? groupChildren.slice(0, 8) : groupChildren.slice(0, 18);
+    parsedGroups.push({
       key: g.type || g.name || 'group',
       name: g.name || '未命名分组',
       label: labelMap[g.name] || g.name || '上下文分组',
@@ -3938,9 +3973,51 @@ function extractContextBreakdown(contextWindowMetadata) {
       percent: total > 0 ? Number(((numTokens / total) * 100).toFixed(1)) : 0,
       children: slicedChildren,
       topChildren: slicedChildren,
-      childrenCount: children.length
+      childrenCount: groupChildren.length
+    });
+    if (skillsSplitGroup) {
+      parsedGroups.push(skillsSplitGroup);
+    }
+  }
+
+  const targetTotal = Math.round(Number(actualInputTokens || 0));
+  const rawSum = parsedGroups.reduce((sum, g) => sum + (g.tokens > 0 ? g.tokens : 0), 0);
+  if (Number.isFinite(targetTotal) && targetTotal > 0 && rawSum > 0) {
+    const items = parsedGroups.map((g, idx) => {
+      const reported = g.tokens;
+      if (reported <= 0) {
+        return { idx, reported, floored: 0, remainder: -1 };
+      }
+      const exact = (reported / rawSum) * targetTotal;
+      const floored = Math.floor(exact);
+      return { idx, reported, floored, remainder: exact - floored };
+    });
+    const allocated = items.reduce((sum, it) => sum + it.floored, 0);
+    const deficit = targetTotal - allocated;
+    if (deficit > 0) {
+      const positiveItems = items
+        .filter((it) => it.reported > 0)
+        .sort((a, b) => (b.remainder - a.remainder) || (b.reported - a.reported) || (a.idx - b.idx));
+      for (let i = 0; i < deficit && i < positiveItems.length; i++) {
+        positiveItems[i].floored += 1;
+      }
+    }
+    for (const it of items) {
+      const g = parsedGroups[it.idx];
+      g.reportedTokens = it.reported;
+      g.calibrated = true;
+      g.tokens = it.floored;
+      g.percent = Number(((g.tokens / targetTotal) * 100).toFixed(1));
+    }
+    return {
+      totalTokens: targetTotal,
+      reportedTotalTokens: rawSum,
+      calibrated: true,
+      maxContextTokens: Number(contextWindowMetadata.maxContextTokens || 0) || null,
+      groups: parsedGroups
     };
-  });
+  }
+
   return {
     totalTokens: total,
     maxContextTokens: Number(contextWindowMetadata.maxContextTokens || 0) || null,
@@ -5140,12 +5217,14 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   let turnCandidateSeq = 0;
 
   const appendFallbackTurnFromTranscriptStep = (s, arrayIdx, fallbackModel) => {
-    const { input, cache, output, thinking, response: responseTokens } = extractStepUsage(s);
+    const { input, cache, output, thinking: rawThinking, response: rawResponseTokens } = extractStepUsage(s);
     const total = input + cache + output;
     if (total <= 0) return;
 
     const sIdx = Number(s.step_index ?? arrayIdx);
     const sqlGen = sqliteSignals?.genByStep?.get(sIdx) || null;
+    const sqlUsage = sqlGen?.usage || null;
+    const { thinking, responseTokens } = resolveThinkingAndResponse(rawThinking, rawResponseTokens, output, sqlUsage);
     const sqlModel = sqlGen
       ? String(sqlGen.modelDisplayName || sqlGen.responseModel || sqlGen.model || sqlGen.requestedModel || '').trim()
       : '';
@@ -5163,6 +5242,9 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     const streamTokBase = thinking > 0 && responseTokens > 0 ? responseTokens : output;
     const streamingTps = streamTokBase > 0 && sqlStreamingSec && sqlStreamingSec >= 0.4
       ? Number((streamTokBase / sqlStreamingSec).toFixed(1))
+      : null;
+    const effectiveTps = (output > 0 && sqlTtft !== null && sqlTtft >= 0 && sqlStreamingSec !== null && sqlStreamingSec >= 0 && (sqlTtft + sqlStreamingSec) > 0)
+      ? Number((output / (sqlTtft + sqlStreamingSec)).toFixed(1))
       : null;
     const rawModel = extractStepModel(s, null, sqlModel || fallbackModel);
     const modelKey = normalizeModelId(rawModel, host.dynamicModelMap);
@@ -5220,6 +5302,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       duration: duration !== null ? Number(duration.toFixed(2)) : null,
       tps,
       streamingTps,
+      effectiveTps,
       costUSD: costInfo.costUSD ?? 0,
       isPriced: costInfo.isPriced,
       error: s.status === 'ERROR' ? String(s.content || '请求报错') : '',
@@ -5262,12 +5345,21 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       const input = hasServerUsage ? srvInput : (hasLocalUsage ? localUsage.input : 0);
       const cache = hasServerUsage ? srvCache : (hasLocalUsage ? localUsage.cache : 0);
       const output = hasServerUsage ? srvOutput : (hasLocalUsage ? localUsage.output : 0);
-      const thinking = hasServerUsage
+      let sqlGen = null;
+      if (sqliteSignals?.genByStep) {
+        for (const n of numericGmSteps) {
+          const sg = sqliteSignals.genByStep.get(n);
+          if (sg) { sqlGen = sg; break; }
+        }
+      }
+      const sqlUsage = sqlGen?.usage || null;
+      const rawThinking = hasServerUsage
         ? Number(srvUsage?.thinkingOutputTokens || 0)
         : (hasLocalUsage ? localUsage.thinking : 0);
-      const responseTokens = hasServerUsage
-        ? Number(srvUsage?.responseOutputTokens ?? Math.max(0, output - thinking))
+      const rawResponseTokens = hasServerUsage
+        ? Number(srvUsage?.responseOutputTokens ?? 0)
         : (hasLocalUsage ? localUsage.response : 0);
+      const { thinking, responseTokens } = resolveThinkingAndResponse(rawThinking, rawResponseTokens, output, sqlUsage);
       const total = input + cache + output;
       const timingMeta = matchedLocalMeta || sMeta;
       const rawModel = extractStepModel(null, gm, timingMeta?.stepModel || timingMeta?.runningSettingModel || activeSettingModel);
@@ -5286,6 +5378,9 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       const streamTokBase = thinking > 0 && responseTokens > 0 ? responseTokens : output;
       const streamingTps = streamTokBase > 0 && streamingSec && streamingSec >= 0.4
         ? Number((streamTokBase / streamingSec).toFixed(1))
+        : null;
+      const effectiveTps = (output > 0 && ttft !== null && ttft >= 0 && streamingSec !== null && streamingSec >= 0 && (ttft + streamingSec) > 0)
+        ? Number((output / (ttft + streamingSec)).toFixed(1))
         : null;
 
       const costInfo = calculateRequestApiCost(
@@ -5343,6 +5438,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         duration: duration !== null ? Number(duration.toFixed(2)) : null,
         tps,
         streamingTps,
+        effectiveTps,
         costUSD: costInfo.costUSD ?? 0,
         isPriced: costInfo.isPriced,
         error: turnError,
@@ -5391,20 +5487,28 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       }
     }
     const latestTurnObj = turns.length ? turns[turns.length - 1] : null;
+    const latestValidTurnForCalib = [...turns].reverse().find((t) => t.totalTokens > 0 && !t.error) || latestTurnObj;
+    const actualInputForCalib = latestValidTurnForCalib
+      ? ((latestValidTurnForCalib.inputTokens || 0) + (latestValidTurnForCalib.cacheTokens || 0))
+      : 0;
     latestInFlight = (latestCandidate && latestCandidate.totalTokens <= 0 && !latestCandidate.error)
       ? latestCandidate
       : null;
-    const latestInFlightBreakdown = latestInFlight?._rawCtxMeta
-      ? extractContextBreakdown(latestInFlight._rawCtxMeta)
+    const hasInFlightBd = Boolean(latestInFlight?._rawCtxMeta?.tokenBreakdown?.groups?.length);
+    const hasTurnBd = Boolean(latestTurnObj?._rawCtxMeta?.tokenBreakdown?.groups?.length);
+    const hasSqliteBd = Boolean(!lightweight && sqliteSignals?.latestContextWindowMetadata?.tokenBreakdown?.groups?.length);
+    const rawCtxMetaForBd = hasInFlightBd
+      ? latestInFlight._rawCtxMeta
+      : (hasTurnBd
+          ? latestTurnObj._rawCtxMeta
+          : (hasSqliteBd ? sqliteSignals.latestContextWindowMetadata : null));
+    const canCalibrateBd = Boolean(rawCtxMetaForBd?.tokenBreakdown?.groups?.length >= 2 && actualInputForCalib > 0);
+    candidateContextBreakdown = rawCtxMetaForBd
+      ? extractContextBreakdown(rawCtxMetaForBd, canCalibrateBd ? actualInputForCalib : null)
       : null;
-    const latestTurnBreakdown = latestTurnObj?._rawCtxMeta
-      ? extractContextBreakdown(latestTurnObj._rawCtxMeta)
-      : null;
-    if (latestInFlightBreakdown) {
-      candidateContextBreakdown = latestInFlightBreakdown;
+    if (hasInFlightBd) {
       latestTurnSourceGm = latestInFlight?._sourceGm || null;
-    } else if (latestTurnBreakdown) {
-      candidateContextBreakdown = latestTurnBreakdown;
+    } else if (hasTurnBd) {
       latestTurnSourceGm = latestTurnObj?._sourceGm || null;
     } else {
       latestTurnSourceGm = latestInFlight?._sourceGm || latestTurnObj?._sourceGm || latestCandidate?._sourceGm || null;
@@ -5811,6 +5915,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     const speedPayload = latestValidTurn ? {
       tps: latestValidTurn.tps,
       streamingTps: latestValidTurn.streamingTps,
+      effectiveTps: latestValidTurn.effectiveTps ?? null,
       avgTps,
       peakTps,
       duration: latestValidTurn.duration,
@@ -5963,15 +6068,29 @@ export async function scanConversation(requestedConvId = '', options = {}) {
 
   // Per-session diagnostics (transcript errors + SQLite events & routing)
   const sessionEventMap = new Map();
+  const seenSessionEventReq = new Set();
   const pushSessionEvent = (ev) => {
     if (!ev || !ev.kind) return;
+    if (ev.requestId) {
+      const reqDedupKey = `${ev.kind}:${ev.requestId}`;
+      if (seenSessionEventReq.has(reqDedupKey)) return;
+      seenSessionEventReq.add(reqDedupKey);
+    }
     const key = `${ev.kind}:${ev.stepIndex ?? 0}`;
-    if (sessionEventMap.has(key)) return;
+    if (sessionEventMap.has(key)) {
+      const existing = sessionEventMap.get(key);
+      if (ev.requestId && !existing.requestId) existing.requestId = String(ev.requestId);
+      if (Number(ev.retries) > 0 && !existing.retries) existing.retries = Number(ev.retries);
+      return;
+    }
     sessionEventMap.set(key, {
       kind: ev.kind,
       stepIndex: Number(ev.stepIndex ?? 0),
       ...(ev.createdAt ? { createdAt: ev.createdAt } : {}),
-      detail: sanitizeSqliteText(ev.detail || '', 120)
+      ...(ev.requestId ? { requestId: String(ev.requestId) } : {}),
+      ...(Number(ev.retries) > 0 ? { retries: Number(ev.retries) } : {}),
+      ...(ev.source ? { source: String(ev.source) } : {}),
+      detail: sanitizeSqliteText(ev.detail || '', 220)
     });
   };
   for (const ev of (sqliteSignals?.events || [])) pushSessionEvent(ev);
@@ -6010,6 +6129,9 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   const promptUsed = latestValidTurn
     ? ((latestValidTurn.inputTokens || 0) + (latestValidTurn.cacheTokens || 0))
     : null;
+  const skillsTokens = (contextBreakdown?.groups?.length)
+    ? (contextBreakdown.groups.find((g) => g.key === 'skills' || g.name === 'Skills')?.tokens || 0)
+    : 0;
   const contextPayload = {
     model: currentModelDisplay,
     modelKey: currentModelKey,
@@ -6031,6 +6153,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     outputTokens: latestValidTurn?.outputTokens ?? null,
     thinkingTokens: latestValidTurn?.thinkingTokens ?? 0,
     responseTokens: latestValidTurn?.responseTokens ?? (latestValidTurn?.outputTokens ?? 0),
+    skillsTokens,
     cacheHitPercent,
     roundCostUSD: Number((latestValidTurn?.costUSD || 0).toFixed(5)),
     sessionCostUSD: Number(sessionCostUSD.toFixed(4)),
@@ -6045,6 +6168,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   const speedPayload = latestValidTurn ? {
     tps: latestValidTurn.tps,
     streamingTps: latestValidTurn.streamingTps,
+    effectiveTps: latestValidTurn.effectiveTps ?? null,
     avgTps,
     peakTps,
     duration: latestValidTurn.duration,
@@ -6963,6 +7087,11 @@ export async function collectTokenHistory(options = {}) {
       if (!ev || !ev.kind) return;
       const stepIdx = Number(ev.stepIndex ?? 0);
       if (isBtwBranch && forkStepIndex > 0 && stepIdx > 0 && stepIdx <= forkStepIndex) return;
+      if (ev.requestId) {
+        const reqKey = `${job.convId}:${ev.kind}:req:${ev.requestId}`;
+        if (diagEventDedup.has(reqKey)) return;
+        diagEventDedup.add(reqKey);
+      }
       const dKey = `${job.convId}:${ev.kind}:${stepIdx}`;
       if (diagEventDedup.has(dKey)) return;
       diagEventDedup.add(dKey);
@@ -6992,8 +7121,10 @@ export async function collectTokenHistory(options = {}) {
         date: evDate,
         createdAt: evCreatedAt,
         stepIndex: stepIdx,
+        ...(ev.requestId ? { requestId: String(ev.requestId) } : {}),
+        ...(Number(ev.retries) > 0 ? { retries: Number(ev.retries) } : {}),
         wastedUSD,
-        detail: sanitizeSqliteText(ev.detail || '', 120)
+        detail: sanitizeSqliteText(ev.detail || '', 220)
       });
     };
 

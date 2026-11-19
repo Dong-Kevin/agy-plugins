@@ -481,6 +481,70 @@ function extractMaxContextFromCtxWindow(buf) {
   return Math.max(...candidates.map((c) => c.val));
 }
 
+function extractContextWindowMetadata(buf, fallbackMaxCtx = null) {
+  if (!buf || !buf.length) return null;
+  const { fields } = parseProtobufFields(buf, 0, buf.length, 64);
+  let usedTokens = 0;
+  let maxTokens = 0;
+  const groups = [];
+
+  for (const f of fields) {
+    if (f.fn === 1 && f.wt === 0 && f.val >= 0 && f.val <= 50_000_000) {
+      usedTokens = f.val;
+    } else if (f.fn === 4 && f.wt === 0 && f.val >= 8192 && f.val <= 10_000_000) {
+      maxTokens = f.val;
+    } else if (f.fn === 3 && f.wt === 2 && !f.truncated) {
+      const bdParsed = parseProtobufFields(f.buf, 0, f.buf.length, 64);
+      for (const gf of bdParsed.fields) {
+        if (gf.fn !== 1 || gf.wt !== 2 || gf.truncated) continue;
+        const gParsed = parseProtobufFields(gf.buf, 0, gf.buf.length, 128);
+        let groupName = '';
+        let groupNumTokens = 0;
+        const children = [];
+        for (const cf of gParsed.fields) {
+          if (cf.fn === 1 && cf.wt === 2 && !cf.truncated && isReasonableUtf8Text(cf.buf)) {
+            groupName = sanitizeSqliteText(cf.buf.toString('utf-8'), 64);
+          } else if (cf.fn === 4 && cf.wt === 0 && cf.val >= 0 && cf.val <= 50_000_000) {
+            groupNumTokens = cf.val;
+          } else if (cf.fn === 5 && cf.wt === 2 && !cf.truncated) {
+            const cParsed = parseProtobufFields(cf.buf, 0, cf.buf.length, 32);
+            let childName = '';
+            let childTokens = 0;
+            for (const sub of cParsed.fields) {
+              if (sub.fn === 1 && sub.wt === 2 && !sub.truncated && isReasonableUtf8Text(sub.buf)) {
+                childName = sanitizeSqliteText(sub.buf.toString('utf-8'), 64);
+              } else if (sub.fn === 3 && sub.wt === 0 && sub.val >= 0 && sub.val <= 50_000_000) {
+                childTokens = sub.val;
+              }
+            }
+            if (childName || childTokens > 0) {
+              children.push({
+                name: childName || 'item',
+                numTokens: childTokens
+              });
+            }
+          }
+        }
+        if (groupName || groupNumTokens > 0 || children.length > 0) {
+          groups.push({
+            name: groupName || '未命名分组',
+            numTokens: groupNumTokens,
+            children
+          });
+        }
+      }
+    }
+  }
+
+  if (!groups.length) return null;
+  const groupSum = groups.reduce((acc, g) => acc + (g.numTokens > 0 ? g.numTokens : 0), 0);
+  return {
+    totalTokens: usedTokens > 0 ? usedTokens : groupSum,
+    maxContextTokens: maxTokens || fallbackMaxCtx || null,
+    tokenBreakdown: { groups }
+  };
+}
+
 function parseChatStartMetadata(buf, target) {
   if (!buf || !buf.length) return;
   const { fields } = parseProtobufFields(buf, 0, buf.length, 128);
@@ -494,6 +558,10 @@ function parseChatStartMetadata(buf, target) {
     } else if (f.fn === 10 && f.wt === 2 && !f.truncated) {
       const maxCtx = extractMaxContextFromCtxWindow(f.buf);
       if (maxCtx && !target.maxContextTokens) target.maxContextTokens = maxCtx;
+      if (target.parseBreakdown === true && !target.contextWindowMetadata) {
+        const ctxMeta = extractContextWindowMetadata(f.buf, target.maxContextTokens || maxCtx || null);
+        if (ctxMeta) target.contextWindowMetadata = ctxMeta;
+      }
     }
   }
 }
@@ -518,10 +586,35 @@ function parseKvEntry(buf) {
   return { key, value };
 }
 
+function parseUsageSubmessage(buf) {
+  if (!buf || !buf.length) return null;
+  const { fields } = parseProtobufFields(buf, 0, buf.length, 32);
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cacheReadTokens = 0;
+  let thinkingTokens = 0;
+  let responseTokens = 0;
+  let hasPositive = false;
+  for (const f of fields) {
+    if (f.wt !== 0 || f.val < 0 || f.val > 50_000_000) continue;
+    if (f.fn === 2) { inputTokens = f.val; if (f.val > 0) hasPositive = true; }
+    else if (f.fn === 3) { outputTokens = f.val; if (f.val > 0) hasPositive = true; }
+    else if (f.fn === 5) { cacheReadTokens = f.val; if (f.val > 0) hasPositive = true; }
+    else if (f.fn === 9) { thinkingTokens = f.val; if (f.val > 0) hasPositive = true; }
+    else if (f.fn === 10) { responseTokens = f.val; if (f.val > 0) hasPositive = true; }
+  }
+  return hasPositive
+    ? { inputTokens, outputTokens, cacheReadTokens, thinkingTokens, responseTokens }
+    : null;
+}
+
 function applyF1Fields(fields, target) {
   for (const f of fields) {
     if (f.fn === 3 && f.wt === 0 && f.val > 1000 && f.val < 100000) {
       if (!target.respondedModelEnum) target.respondedModelEnum = f.val;
+    } else if (f.fn === 4 && f.wt === 2 && !f.truncated) {
+      const usage = parseUsageSubmessage(f.buf);
+      if (usage && !target.usage) target.usage = usage;
     } else if (f.fn === 9 && f.wt === 2 && !f.truncated) {
       parseChatStartMetadata(f.buf, target);
     } else if (f.fn === 11 && f.wt === 2 && !f.truncated) {
@@ -530,6 +623,18 @@ function applyF1Fields(fields, target) {
     } else if (f.fn === 12 && f.wt === 2 && !f.truncated) {
       const sec = decodeDuration(f.buf);
       if (sec !== null && target.streamingSec === null) target.streamingSec = sec;
+    } else if (f.fn === 14 && f.wt === 0 && f.val >= 0 && f.val <= 100) {
+      if (f.val > target.retries) target.retries = f.val;
+    } else if (f.fn === 17 && f.wt === 2 && !f.truncated) {
+      const sub = parseProtobufFields(f.buf, 0, f.buf.length, 32);
+      for (const sf of sub.fields) {
+        if (sf.fn === 3 && sf.wt === 2 && !sf.truncated && isReasonableUtf8Text(sf.buf)) {
+          const errText = sanitizeSqliteText(sf.buf.toString('utf-8'), 220);
+          if (errText && !target.retryErrors.includes(errText) && target.retryErrors.length < 8) {
+            target.retryErrors.push(errText);
+          }
+        }
+      }
     } else if (f.fn === 19 && f.wt === 2 && !f.truncated && f.buf.length >= 2 && f.buf.length <= 128) {
       if (isPrintableAscii(f.buf, false) && !target.responseModel) {
         const s = f.buf.toString('utf-8').trim();
@@ -564,6 +669,9 @@ function applyTopFields(fields, target) {
       }
     } else if (f.fn === 3 && f.wt === 2 && !f.truncated) {
       parseChatStartMetadata(f.buf, target);
+    } else if (f.fn === 5 && f.wt === 2 && !f.truncated && isReasonableUtf8Text(f.buf)) {
+      const errText = sanitizeSqliteText(f.buf.toString('utf-8'), 220);
+      if (errText && !target.genError) target.genError = errText;
     }
   }
 }
@@ -655,7 +763,7 @@ function scanLargeTailBuffer(tailBuf, target) {
   }
 
   // 3. Scan for F1 fn=9 (0x4a) or TOP fn=3 (0x1a) carrying chatStartMetadata / maxContextTokens
-  if (!target.maxContextTokens || !target.requestedModelEnum || !target.requestedSlug) {
+  if (!target.maxContextTokens || !target.requestedModelEnum || !target.requestedSlug || (target.parseBreakdown && !target.contextWindowMetadata)) {
     for (let i = 0; i < len - 4; i++) {
       const b = tailBuf[i];
       if (b !== 0x4a && b !== 0x1a) continue;
@@ -675,7 +783,7 @@ function scanLargeTailBuffer(tailBuf, target) {
   }
 }
 
-function decodeGenMetadataRow(headRaw, tailRaw, extraTailRaw = null) {
+function decodeGenMetadataRow(headRaw, tailRaw, extraTailRaw = null, options = {}) {
   const headBuf = toBuffer(headRaw);
   const tailBuf = toBuffer(tailRaw);
   const extraTailBuf = toBuffer(extraTailRaw);
@@ -689,6 +797,12 @@ function decodeGenMetadataRow(headRaw, tailRaw, extraTailRaw = null) {
     ttft: null,
     streamingSec: null,
     maxContextTokens: null,
+    parseBreakdown: Boolean(options?.parseBreakdown),
+    contextWindowMetadata: null,
+    usage: null,
+    retries: 0,
+    retryErrors: [],
+    genError: '',
     kvMap: {}
   };
 
@@ -718,6 +832,9 @@ function decodeGenMetadataRow(headRaw, tailRaw, extraTailRaw = null) {
     target.stepIndices.add(Number(target.kvMap.last_step_index));
   }
 
+  const rawReqId = String(target.kvMap.request_id || '').trim();
+  const requestId = /^[A-Za-z0-9_.:-]{4,96}$/.test(rawReqId) ? rawReqId : null;
+
   const requestedPlaceholder = enumToPlaceholderModel(target.requestedModelEnum);
   const respondedPlaceholder = enumToPlaceholderModel(target.respondedModelEnum);
   const requestedModel = requestedPlaceholder || target.requestedSlug || '';
@@ -738,7 +855,13 @@ function decodeGenMetadataRow(headRaw, tailRaw, extraTailRaw = null) {
     model,
     ttft: target.ttft,
     streamingSec: target.streamingSec,
-    maxContextTokens: target.maxContextTokens
+    maxContextTokens: target.maxContextTokens,
+    contextWindowMetadata: target.contextWindowMetadata || null,
+    usage: target.usage || null,
+    requestId,
+    retries: target.retries,
+    retryErrors: target.retryErrors,
+    genError: target.genError || ''
   };
 }
 
@@ -787,8 +910,10 @@ export async function readConversationSqliteSignals(convDbPath, { includeLatestG
     const compactionSteps = [];
     const events = [];
     const genByStep = new Map();
+    const genUsageByStep = new Map();
     const routingEvents = [];
     let latestMaxContextTokens = null;
+    let latestContextWindowMetadata = null;
 
     // 1. trajectory_meta
     const metaCols = getTableColumns(db, 'trajectory_meta');
@@ -922,12 +1047,17 @@ export async function readConversationSqliteSignals(convDbPath, { includeLatestG
         }
 
         const seenRouting = new Set();
+        const seenGenEvByReq = new Set();
         for (let i = 0; i < rows.length; i++) {
           const row = rows[i];
           const extraTail = (i === rows.length - 1) ? latestExtraTail : null;
-          const decoded = decodeGenMetadataRow(row.head, row.tail, extraTail);
+          const parseBreakdown = Boolean(includeLatestGenDetail) && (i === rows.length - 1 || Number(row.len) <= 16384);
+          const decoded = decodeGenMetadataRow(row.head, row.tail, extraTail, { parseBreakdown });
           if (decoded.maxContextTokens) {
             latestMaxContextTokens = decoded.maxContextTokens;
+          }
+          if (includeLatestGenDetail && decoded.contextWindowMetadata) {
+            latestContextWindowMetadata = decoded.contextWindowMetadata;
           }
 
           const stepEntry = {
@@ -938,14 +1068,61 @@ export async function readConversationSqliteSignals(convDbPath, { includeLatestG
             requestedSlug: decoded.requestedSlug,
             ttft: decoded.ttft,
             streamingSec: decoded.streamingSec,
-            maxContextTokens: decoded.maxContextTokens
+            maxContextTokens: decoded.maxContextTokens,
+            usage: decoded.usage || null,
+            requestId: decoded.requestId || null,
+            retries: decoded.retries || 0,
+            retryErrors: decoded.retryErrors,
+            genError: decoded.genError || ''
+          };
+          const usageEntry = {
+            usage: decoded.usage || null,
+            requestId: decoded.requestId || null,
+            retries: decoded.retries || 0,
+            retryErrors: decoded.retryErrors,
+            genError: decoded.genError || ''
           };
           for (const sIdx of decoded.stepIndices) {
             genByStep.set(sIdx, stepEntry);
+            genUsageByStep.set(sIdx, usageEntry);
+          }
+
+          // Merge genError and retryErrors into events with requestId+kind dedup
+          const primaryStepIdx = decoded.stepIndices.length ? decoded.stepIndices[0] : Number(row.idx || 0);
+          const candidateErrTexts = [];
+          if (decoded.genError) candidateErrTexts.push(decoded.genError);
+          for (const rErr of decoded.retryErrors) {
+            if (rErr && !candidateErrTexts.includes(rErr)) candidateErrTexts.push(rErr);
+          }
+          for (const errText of candidateErrTexts) {
+            const evKind = classifyDiagnosticEventText(errText);
+            if (!evKind) continue;
+            const reqId = decoded.requestId || null;
+            if (reqId) {
+              const reqKey = `${reqId}:${evKind}`;
+              if (seenGenEvByReq.has(reqKey)) continue;
+              seenGenEvByReq.add(reqKey);
+            }
+            const stepMatch = events.find((e) =>
+              e.kind === evKind &&
+              (e.stepIndex === primaryStepIdx || decoded.stepIndices.includes(e.stepIndex))
+            );
+            if (stepMatch) {
+              if (reqId && !stepMatch.requestId) stepMatch.requestId = reqId;
+              if (decoded.retries > 0 && !stepMatch.retries) stepMatch.retries = decoded.retries;
+              continue;
+            }
+            events.push({
+              kind: evKind,
+              stepIndex: primaryStepIdx,
+              detail: sanitizeSqliteText(errText, 220),
+              ...(reqId ? { requestId: reqId } : {}),
+              ...(decoded.retries > 0 ? { retries: decoded.retries } : {}),
+              source: 'gen_metadata'
+            });
           }
 
           // Routing / canary detection
-          const primaryStepIdx = decoded.stepIndices.length ? decoded.stepIndices[0] : Number(row.idx || 0);
           const reqEnum = decoded.requestedModelEnum;
           const respEnum = decoded.respondedModelEnum;
           const isCanary = Boolean(decoded.responseModel && CANARY_RESPONSE_RE.test(decoded.responseModel));
@@ -996,8 +1173,10 @@ export async function readConversationSqliteSignals(convDbPath, { includeLatestG
       compactionSteps,
       events,
       genByStep,
+      genUsageByStep,
       routingEvents,
-      latestMaxContextTokens
+      latestMaxContextTokens,
+      latestContextWindowMetadata
     };
     setBoundedCache(convSignalsCache, cacheKey, { sig, value: result });
     return result;

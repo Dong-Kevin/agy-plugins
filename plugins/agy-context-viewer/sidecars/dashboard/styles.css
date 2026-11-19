@@ -25,6 +25,7 @@
 
   /* Context segment hues */
   --seg-sys-col: #6366f1;
+  --cv-seg-skills-col: #10b981;
   --seg-tools-col: #0ea5e9;
   --seg-msgs-col: #a855f7;
 
@@ -1840,4 +1841,30 @@ button:disabled { opacity: 0.42; cursor: not-allowed; }
   flex-direction: column;
   gap: 6px;
   margin-top: 6px;
+}
+
+.bd-group.is-skills {
+  border-left: 3px solid var(--cv-seg-skills-col);
+  padding-left: 8px;
+}
+.bd-calib-note {
+  font-size: 11px;
+  color: var(--cv-muted);
+  margin-bottom: 6px;
+}
+.diag-meta-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+  background: var(--cv-surface-2);
+  border: 1px solid var(--cv-border);
+  color: var(--cv-fg-2);
+}
+.diag-meta-badge.warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 36%, transparent);
+  background: color-mix(in srgb, var(--warn) 10%, var(--cv-surface));
 }

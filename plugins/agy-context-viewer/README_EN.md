@@ -57,11 +57,12 @@ agy-context watch              # Live terminal monitor panel (tmux-friendly, aut
 agy-context aux                # Reveal and switch Antigravity's Right Aux Pane straight to Context Dashboard
 agy-context float              # Toggle pinned floating window ('close' to hide, 'quit' to stop daemon)
 agy-context menubar quota      # Switch Menu Bar mode ('context' | 'speed' | 'quota' | 'on' | 'off' | 'status')
-agy-context turns [--prompts]  # Inspect per-turn context ±Delta & tool calls, or group by Prompt cold/hot startup
+agy-context turns [--prompts]  # Inspect per-turn context ±Delta, thinking share, effective tok/s & tools, or Prompt cold/hot startup
 agy-context heavy              # Show Top 10 heavyweight context consumers in the current session
 agy-context tree               # Show aggregated Swarm / Subagent tree throughput and API cost
 agy-context compact [--full]   # Inspect context compaction history and summary snapshots
-agy-context events             # Inspect cross-session 429 / safety filter waste / canary routing & Top 10 projects
+agy-context events             # Inspect cross-session 429 / safety filter waste / retries & requestId / canary routing & Top 10 projects
+agy-context pricing [--sync|--reset] # Offline model pricing & upcoming rate schedule (--sync fetches official docs, --reset restores built-in)
 agy-context web                # Launch standalone web dashboard on 127.0.0.1:18970
 agy-context json               # Output structured JSON summary (append --full for full telemetry)
 ```

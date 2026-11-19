@@ -1,16 +1,24 @@
 # agy-plugins ROADMAP
 
-更新时间：2026-11-19 16:48（Asia/Shanghai）。
+更新时间：2026-11-19 18:27（Asia/Shanghai）。
 
 ## 本次交付目标
 
-1. 完成 `context-viewer` `agy` CLI 底部状态栏（`statusline`）`signal: killed` 超时根因排查、P0 + P1 + P2 快速通道性能优化与本机 `./install.sh context-viewer` 热同步（已同步 `main`，保持 `v1.8.0`）。
-2. 完成 `context-viewer v1.8.0` **Batch 1 + Batch 2 竞品优势吸收全量升级与正式发布**（面向 `agy` CLI + `agy` GUI）：
-   - **Batch 1**：Prompt 轮次冷/热缓存启动诊断、顶部 `repo@branch` 标识、下轮最小底数预估、双折线趋势图（总上下文 vs 缓存读取）、单会话重度消耗排行 Top 10、热力图单日/区间分模型明细及 Prompt 缓存已省金额（`cacheSavingsUSD`）。
-   - **Batch 2**：可选只读 `node:sqlite` SQL 切片采集层（零外依、Node 18+ 优雅降级）、Swarm / Subagent 整树聚合、`/btw` 分支去重防重复计费、压缩历史与摘要原文抽屉、按项目/工作区消耗排行、今日/昨日 24 小时柱图、异常事件（`safety_filter` 浪费金额 / `429` / `upstream_retry` / `context_overflow`）与服务端灰度路由取证。
-2. 保留既有基线成果（`Gemini 4 Neon` / `Orchestrator (Neon)` 适配、`agy` CLI 适配与断连配额清理，以及 `agy-finder v0.2.8` / `context-viewer v1.7.10` `v2026.11.15.1` 发布基线）。
+1. 完成 `context-viewer` 竞品启发 **P1 + P2 合规整合**（基于 `WhiteBr1ck/agy-powertools` 调研审核，严守零外依、零 CDP、运行期零静默联网与 `statusline` 零退化）：
+   - **P1 精细遥测**：`sqlite_reader.mjs` 补全 `usage`（思考/正文）、`context_window_metadata.tokenBreakdown`、`retries` / `retryErrors` / `genError` / `requestId` 解码；`collector.mjs` 独立拆出 `Skills` 上下文分组并用最大余数法对齐实测输入、补齐端到端有效吞吐 `effectiveTps` 与按 `requestId` 去重；CLI (`status`/`turns`/`events`/`json`) 与 GUI 同步呈现。
+   - **P2 官方定价查看与显式手动同步**：`pricing.mjs` 新增 `Accept: text/markdown` 官方定价解析（兼容 `{% tab title="Standard" %}` 与 `<tab>` 及 `starting <Month Day, Year>` 分段）、本地原子覆盖快照 `pricing_override_v1.json` 与 `syncOfficialPricing()` / `getEffectivePricingCatalog()`；新增 `agy-context pricing [--sync|--reset|--json]`。
+2. 保留既有基线成果（`statusline` 快速通道、`context-viewer v1.8.0` Batch 1 + Batch 2、`Gemini 4 Neon` 适配与 `agy-finder v0.2.8`）。
+
+## 后置与挂起事项
+
+- **挂起：`agy-fork` / `agy-session`（`agy` CLI 无损会话分叉插件）**：调研确认底层依赖宿主 `ForkConversation` / `UpdateConversationAnnotations` RPC（需处理 `invoke_subagent` 前轮回退），但经 boss 确认当前非刚需且预计官方原生推出，暂挂起不立项。
 
 ## 当前阶段与状态
+
+- **已完成 `context-viewer` P1 + P2 整合实现、代码审查、全仓门禁、打包与本机 `./install.sh context-viewer` 热同步（同步 `main`）**：
+  - **官方定价解析与显式手动同步**（[pricing.mjs](./plugins/agy-context-viewer/sidecars/dashboard/pricing.mjs)、[cli.mjs](./plugins/agy-context-viewer/sidecars/dashboard/cli.mjs)）：核实内置表已具备 `2026-12-01`（Carbon / Argon）与 `2027-01-01`（Flash）分段规则；新增 `parseOfficialGeminiPricingMarkdown()`（兼容 `{% tab title="Standard" %}` 跨行列表块与 `<tab>` 表格，跳过多档 `>200K` / `image` / `embedding`）、本地原子快照 `pricing_override_v1.json` 存取、`syncOfficialPricing()`（0 条解析保护）与 `getEffectivePricingCatalog()`，`matchPricingRule()` 兼容可选第 4 参数 `overrides`；新增 `agy-context pricing [--sync|--reset|--json]`（默认纯离线展示费率与调价倒计时，仅 `--sync` 手动联网）。
+  - **精细 Protobuf 解码、Skills 拆出校准与端到端吞吐**（[sqlite_reader.mjs](./plugins/agy-context-viewer/sidecars/dashboard/sqlite_reader.mjs)、[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs)）：补全 `gen_metadata` 的 `usage`（`thinkingTokens`/`responseTokens`）、`context_window_metadata.tokenBreakdown`（仅 `includeLatestGenDetail: true` 或小行开启，`readConversationLatestGenSignal()` 零额外开销）、`retries`/`retryErrors`/`genError`/`requestId` 解码与脱敏；`extractContextBreakdown()` 独立拆出 `Skills` 分组并用最大余数法校准总和严格等于实测输入，无 LS 时自动回退 SQLite breakdown；新增 `resolveThinkingAndResponse()` 修复 SQLite 补齐思考 tokens 后 `responseTokens` 未扣减的边界问题，新增 `effectiveTps` 与按 `requestId` 去重；同步增强 CLI `status`/`turns`/`events`/`json`、GUI（[app.js](./plugins/agy-context-viewer/sidecars/dashboard/app.js)、[styles.css](./plugins/agy-context-viewer/sidecars/dashboard/styles.css)）与文档（[SKILL.md](./plugins/agy-context-viewer/skills/context-viewer/SKILL.md)、[plugins/agy-context-viewer/README.md](./plugins/agy-context-viewer/README.md)、[plugins/agy-context-viewer/README_EN.md](./plugins/agy-context-viewer/README_EN.md)）。
+  - **新增专项回归**（[context-viewer/scripts/verify.mjs](./plugins/agy-context-viewer/scripts/verify.mjs)）：新增 `verifyPowertoolsP1P2Features()` 全链路覆盖 `sqlite_reader`、`collector`、`pricing`、GUI VM 与 CLI 子进程回归。
 
 - **已完成 `context-viewer` `statusline` P0 + P1 + P2 快速通道优化、审查收口、全仓门禁、打包与本机 `./install.sh context-viewer` 热同步（已同步 `main`）**：
   - **根因确认**：`agy` CLI `statusline_runner.go:259` 的 `signal: killed (stderr: )` 系 Go `exec.CommandContext` 超时强杀（历史日志明确记录 `context deadline exceeded`）；原 `statusline` 每次冷进程均执行完整 Dashboard 级 `scanConversation()`（同步解析高达 32 MB `transcript_full.jsonl`、两段串行 4.5s LS RPC 且未传 `background: true`、3 份 `conversation_summaries.db` 与完整 `.db` 全表扫描、Swarm/子代理全树遍历及 `float_window.mjs` 顶层急加载）。
@@ -114,6 +122,8 @@
 - 已迁移插件：[plugins/agy-finder](./plugins/agy-finder) 、[plugins/agy-context-viewer](./plugins/agy-context-viewer)
 
 ## 最近验证
+
+- `context-viewer` P1 + P2 整合（精细 Protobuf 解码 / Skills 拆出校准 / 显式定价同步）验收：`node scripts/verify.mjs --strict-git-identity` 全仓门禁全部通过（exit 0；放行沙箱绑定本地回环端口后完整跑通 `context-viewer` 6/6 共 31 个源码文件含新增 `verifyPowertoolsP1P2Features` 与 `verifyStatuslineFastPath`、`agy-finder` 全部断言、隐私/PNG/Git 身份门禁与跨插件 8 进程锁压测）；`node scripts/package-all.mjs` 通过，产出 `dist/context-viewer-v1.8.0.zip`（`247.6 KB` / 21 个文件 / SHA-256 `5d9f76109a0482601c2a706a4dad375f47523cf2bcfe3120ba7af0b07c5cdf42`）与 `dist/agy-finder-v0.2.8.zip`（`95.4 KB` / 20 个文件）；`bash ./install.sh context-viewer` 完成本机热同步，`diff -q` 核对已安装 `pricing.mjs`、`sqlite_reader.mjs`、`collector.mjs`、`cli.mjs`、`app.js`、`styles.css` 6/6 与源码一致；已安装 `~/.local/bin/agy-context pricing`、`statusline --plain --width 120` 及 `cli.mjs status`、`events` 全部退出码 `0` 且输出正常（`pricing --sync` 实网拉取、Windows PowerShell、Linux 桌面端与 Node.js 18 未实测）。时间：`2026-11-19 18:27`（Asia/Shanghai）。
 
 - `context-viewer` `statusline` P0 + P1 + P2 快速通道优化验收：`node scripts/verify.mjs --strict-git-identity` 全仓门禁全部通过（沙箱内因拦截本地回环端口后放行沙箱完整跑通；覆盖 `context-viewer` 6/6 共 31 个源码文件含新增 `verifyStatuslineFastPath`、`agy-finder` 全部断言、隐私/PNG/Git 身份门禁与跨插件 8 进程锁压测）；`node scripts/package-all.mjs` 通过，产出 `dist/context-viewer-v1.8.0.zip`（`237.9 KB` / 21 个文件 / SHA-256 `f5642aca21ec6989eeb9dac639a268c31798399d421d15f0e49c5c3d4b426944`）与 `dist/agy-finder-v0.2.8.zip`（`95.4 KB` / 20 个文件）；实盘只读压测耗时由 15.4 MB 会话 `2383ms` 降至冷启动 `148ms` / 暖快照 `44.8ms`、53 MB DB 会话 `554ms` 降至冷启动 `162.9ms` / 暖快照 `51.6ms`；`bash ./install.sh context-viewer` 已完成本机热同步，`diff -q` 核对已安装 `collector.mjs`、`sqlite_reader.mjs`、`cli.mjs` 3/3 与源码一致，当前实盘会话调用已安装 `cli.mjs statusline --plain --width 120` 实测冷启动 `63.6ms` / 暖启动 `59.1ms`、退出码 `0` 且输出正常（Windows PowerShell、Linux 桌面端与 Node.js 18 未在本机实测）。时间：`2026-11-19 16:48`（Asia/Shanghai）。
 
