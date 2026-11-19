@@ -108,7 +108,7 @@ export async function isSqliteAvailable() {
   return sqliteLoadPromise;
 }
 
-async function openReadOnlyDb(dbPath) {
+async function openReadOnlyDb(dbPath, timeoutMs = 1500) {
   if (!dbPath || typeof dbPath !== 'string') return null;
   try {
     if (!existsSync(dbPath)) return null;
@@ -116,9 +116,10 @@ async function openReadOnlyDb(dbPath) {
     return null;
   }
   if (!(await isSqliteAvailable())) return null;
+  const safeTimeout = Math.max(50, Number(timeoutMs) || 1500);
   let db = null;
   try {
-    db = new cachedDatabaseSync(dbPath, { readOnly: true, timeout: 1500 });
+    db = new cachedDatabaseSync(dbPath, { readOnly: true, timeout: safeTimeout });
     db.prepare('SELECT 1 FROM sqlite_master LIMIT 1').get();
     return db;
   } catch {
@@ -997,6 +998,71 @@ export async function readConversationSqliteSignals(convDbPath, { includeLatestG
       genByStep,
       routingEvents,
       latestMaxContextTokens
+    };
+    setBoundedCache(convSignalsCache, cacheKey, { sig, value: result });
+    return result;
+  } catch {
+    return null;
+  } finally {
+    try { db.close(); } catch {}
+  }
+}
+
+/**
+ * Lightweight read-only query for only the latest `gen_metadata` row,
+ * avoiding full table/DB scans on statusline fast-path fallbacks.
+ */
+export async function readConversationLatestGenSignal(convDbPath, options = {}) {
+  if (!convDbPath || typeof convDbPath !== 'string') return null;
+  const sig = getFileCacheSig(convDbPath);
+  if (!sig) return null;
+
+  const cacheKey = `${convDbPath}|latestGen`;
+  const cached = convSignalsCache.get(cacheKey);
+  if (cached && cached.sig === sig) {
+    return cached.value;
+  }
+
+  const timeoutMs = Math.max(50, Number(options.timeoutMs) || 200);
+  const db = await openReadOnlyDb(convDbPath, timeoutMs);
+  if (!db) return null;
+
+  try {
+    const genCols = getTableColumns(db, 'gen_metadata');
+    if (!genCols.has('idx') || !genCols.has('data')) return null;
+
+    const row = db.prepare(`
+      SELECT idx, length(data) AS len,
+             CASE WHEN length(data) <= 16384 THEN data ELSE substr(data, 1, 8192) END AS head,
+             CASE WHEN length(data) <= 16384 THEN NULL ELSE substr(data, -4096) END AS tail
+      FROM gen_metadata
+      ORDER BY idx DESC
+      LIMIT 1
+    `).get();
+    if (!row) return null;
+
+    let decoded = decodeGenMetadataRow(row.head, row.tail, null);
+    if (Number(row.len) > 16384 && (!decoded.maxContextTokens || decoded.streamingSec === null)) {
+      try {
+        const extra = db
+          .prepare('SELECT substr(data, -65536) AS tail64 FROM gen_metadata WHERE idx = ?')
+          .get(row.idx);
+        if (extra?.tail64) {
+          decoded = decodeGenMetadataRow(row.head, row.tail, extra.tail64);
+        }
+      } catch {}
+    }
+
+    const result = {
+      idx: Number(row.idx ?? 0),
+      maxContextTokens: decoded.maxContextTokens || null,
+      ttft: decoded.ttft,
+      streamingSec: decoded.streamingSec,
+      model: decoded.model,
+      modelDisplayName: decoded.modelDisplayName,
+      responseModel: decoded.responseModel,
+      requestedModel: decoded.requestedModel,
+      stepIndices: decoded.stepIndices
     };
     setBoundedCache(convSignalsCache, cacheKey, { sig, value: result });
     return result;

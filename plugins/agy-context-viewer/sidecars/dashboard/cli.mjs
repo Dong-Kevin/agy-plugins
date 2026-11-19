@@ -36,8 +36,15 @@ import {
   setSidebarEntrypoint,
   syncSidebarManifestFromSettings
 } from './collector.mjs';
-import { controlFloatWindow, getFloatWindowStatus } from './float_window.mjs';
 import { formatModelDisplayName } from './pricing.mjs';
+
+let floatWindowMod = null;
+async function loadFloatWindowMod() {
+  if (!floatWindowMod) {
+    floatWindowMod = await import('./float_window.mjs');
+  }
+  return floatWindowMod;
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = resolve(__dirname, '..', '..');
@@ -292,6 +299,7 @@ function printHelp() {
 }
 
 async function runMenubarCommand(rawArgs) {
+  const { controlFloatWindow, getFloatWindowStatus } = await loadFloatWindowMod();
   const sub = (rawArgs.filter((a) => !a.startsWith('-'))[1] || 'toggle').toLowerCase();
   if (rawArgs.includes('--status') || sub === 'status') {
     const st = getFloatWindowStatus();
@@ -404,6 +412,7 @@ async function runFloatCommand(rawArgs) {
     action = 'status';
   }
   const pinned = !rawArgs.includes('--unpinned');
+  const { controlFloatWindow } = await loadFloatWindowMod();
   const res = await controlFloatWindow({ action, pinned });
   if (rawArgs.includes('--json')) {
     console.log(JSON.stringify(res, null, 2));
@@ -438,6 +447,7 @@ async function runAuxCommand(rawArgs) {
   const sub = (positionals[1] || 'toggle').toLowerCase();
   const action = sub === 'open' ? 'open-aux' : 'toggle-aux';
   const convId = process.env.ANTIGRAVITY_CONVERSATION_ID || '';
+  const { controlFloatWindow } = await loadFloatWindowMod();
   const res = await controlFloatWindow({ action, convId });
   if (rawArgs.includes('--json')) {
     console.log(JSON.stringify(res, null, 2));
@@ -468,6 +478,7 @@ async function runShortcutCommand(rawArgs, { isAux = false } = {}) {
     (!rawSub && !hasGlobalFlag && !hasAppFlag && !hasResetFlag && !hasOffFlag && !hasOnFlag);
 
   if (isPureStatus) {
+    const { getFloatWindowStatus } = await loadFloatWindowMod();
     const fw = getFloatWindowStatus();
     const sc = isAux ? (fw.auxShortcut || getAuxShortcutConfig()) : (fw.shortcut || getShortcutConfig());
     const active = isAux ? fw.auxShortcutActive : fw.shortcutActive;
@@ -507,6 +518,7 @@ async function runShortcutCommand(rawArgs, { isAux = false } = {}) {
     else if (hasAppFlag) patch.scope = 'app';
   }
 
+  const { controlFloatWindow } = await loadFloatWindowMod();
   const res = await controlFloatWindow(patch);
   if (rawArgs.includes('--json')) {
     console.log(JSON.stringify(res, null, 2));
@@ -601,7 +613,7 @@ function buildCompactSummary(ctx = {}, hist = {}) {
       sidebarTabEnabled: getSidebarEntryStatus().sidebarEnabled,
       customizationSettings: `customization://${PLUGIN_DIR_ID}`
     },
-    floatWindow: getFloatWindowStatus(),
+    floatWindow: floatWindowMod ? floatWindowMod.getFloatWindowStatus() : null,
     conversation: {
       id: safeCtx.conversationId || null,
       source: convSource,
@@ -1224,9 +1236,21 @@ async function readStdinBounded(timeoutMs = 150) {
       process.stdin.removeListener('end', onEnd);
       process.stdin.removeListener('error', onErr);
       try { process.stdin.pause(); } catch {}
+      try { process.stdin.unref?.(); } catch {}
       resolvePromise(Buffer.concat(chunks).toString('utf8'));
     };
-    const onData = (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const onData = (chunk) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      const trimmed = Buffer.concat(chunks).toString('utf8').trim();
+      if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            finish();
+          }
+        } catch {}
+      }
+    };
     const onEnd = () => finish();
     const onErr = () => finish();
     const timer = setTimeout(finish, timeoutMs);
@@ -1377,7 +1401,7 @@ function buildStatuslineText(ctx, stdinPayload = {}, { format = 'ansi', terminal
   }
 
   if (cacheHitPercent !== null && cacheHitPercent >= 0) {
-    const turnsCount = Number(ctx?.turns?.length || 0);
+    const turnsCount = Number(ctx?.turnsCount ?? ctx?.turns?.length ?? 0);
     const isColdFirstHop = cx.latestPromptStartup?.state === 'cold' && Number(cx.latestPromptStartup?.callsCount || 0) <= 1;
     const isColdRestart = turnsCount > 1 && (cacheHitPercent < 25 || isColdFirstHop);
     if (isColdRestart) {
@@ -1473,7 +1497,7 @@ async function runStatuslineCommand(rawArgs) {
     return;
   }
 
-  const stdinRaw = await readStdinBounded(150);
+  const stdinRaw = await readStdinBounded(50);
   let stdinPayload = {};
   let hasStdinJson = false;
   if (stdinRaw && stdinRaw.trim()) {
@@ -1501,6 +1525,10 @@ async function runStatuslineCommand(rawArgs) {
 
   const ctx = await scanConversation(convArg, {
     force: false,
+    lightweight: true,
+    background: true,
+    rpcTimeoutMs: 350,
+    sqliteTimeoutMs: 200,
     allowDiskCacheWithoutLs: true,
     skipRecentList: Boolean(convArg),
     noFallbackToRecent: hasStdinJson && !stdinConvId,
@@ -1684,6 +1712,7 @@ async function main() {
     return;
   }
   if (rawArgs.includes('--ensure-menubar')) {
+    const { controlFloatWindow } = await loadFloatWindowMod();
     await controlFloatWindow({ action: 'ensure-menubar' });
     return;
   }
@@ -1757,8 +1786,11 @@ async function main() {
   const wantJson = cmd === 'json' || rawArgs.includes('--json');
   const wantFull = rawArgs.includes('--full');
   const widthFlag = Number(getFlagValue(rawArgs, '--width') || 0) || undefined;
-
   const isEventsCmd = cmd === 'events' || cmd === 'diag' || cmd === 'projects';
+  if (wantJson || (cmd !== 'watch' && cmd !== 'turns' && cmd !== 'heavy' && cmd !== 'tree' && cmd !== 'compact' && !isEventsCmd)) {
+    await loadFloatWindowMod();
+  }
+
   const needContext = wantJson || !isEventsCmd;
   const needHistory = wantJson || isEventsCmd || (cmd !== 'turns' && cmd !== 'heavy' && cmd !== 'tree' && cmd !== 'compact');
   const [ctx, hist] = await Promise.all([

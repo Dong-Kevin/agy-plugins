@@ -5281,6 +5281,7 @@ async function main() {
     await verifyContextAuxBridgeBehavior(cvAppSource);
     await verifyBatch1Features(cvHtmlSource, cvAppSource);
     await verifyBatch2Features(cvHtmlSource, cvAppSource);
+    await verifyStatuslineFastPath();
 
     // macOS Swift native host typecheck
     if (process.platform === 'darwin' && existsSync('/usr/bin/swiftc')) {
@@ -7775,6 +7776,286 @@ async function verifyBatch2Features(cvHtmlSource, cvAppSource) {
       else process.env[k] = v;
     }
     rmSync(tmpB2Root, { recursive: true, force: true });
+  }
+}
+
+async function verifyStatuslineFastPath() {
+  const { spawn } = await import('node:child_process');
+  const { createHash } = await import('node:crypto');
+  const tmpSlRoot = mkdtempSync(join(tmpdir(), 'agy-cv-sl-fast-'));
+  const savedEnv = {
+    AG_DIR: process.env.AG_DIR,
+    AG_CLI_DIR: process.env.AG_CLI_DIR,
+    AG_IDE_DIR: process.env.AG_IDE_DIR,
+    ANTIGRAVITY_CLI_DATA_DIR: process.env.ANTIGRAVITY_CLI_DATA_DIR,
+    ANTIGRAVITY_APP_DATA_DIR: process.env.ANTIGRAVITY_APP_DATA_DIR,
+    ANTIGRAVITY_EXECUTABLE_DATA_DIR: process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR,
+    ANTIGRAVITY_IDE_DATA_DIR: process.env.ANTIGRAVITY_IDE_DATA_DIR,
+    ANTIGRAVITY_LS_ADDRESS: process.env.ANTIGRAVITY_LS_ADDRESS,
+    ANTIGRAVITY_CSRF_TOKEN: process.env.ANTIGRAVITY_CSRF_TOKEN,
+    ANTIGRAVITY_CONVERSATION_ID: process.env.ANTIGRAVITY_CONVERSATION_ID
+  };
+
+  let slowServer = null;
+  try {
+    const agDir = join(tmpSlRoot, 'ag');
+    const cliDir = join(tmpSlRoot, 'cli');
+    const ideDir = join(tmpSlRoot, 'ide');
+    const stateDir = join(tmpSlRoot, 'state');
+    mkdirSync(agDir, { recursive: true });
+    mkdirSync(cliDir, { recursive: true });
+    mkdirSync(ideDir, { recursive: true });
+    mkdirSync(stateDir, { recursive: true });
+
+    process.env.AG_DIR = agDir;
+    process.env.AG_CLI_DIR = cliDir;
+    process.env.AG_IDE_DIR = ideDir;
+    process.env.ANTIGRAVITY_CLI_DATA_DIR = cliDir;
+    process.env.ANTIGRAVITY_APP_DATA_DIR = cliDir;
+    process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR = stateDir;
+    process.env.ANTIGRAVITY_IDE_DATA_DIR = ideDir;
+    delete process.env.ANTIGRAVITY_LS_ADDRESS;
+    delete process.env.ANTIGRAVITY_CSRF_TOKEN;
+    delete process.env.ANTIGRAVITY_CONVERSATION_ID;
+
+    const convId = ['77777777', '8888', '4999', 'aaaa', 'bbbbbbbbbbbb'].join('-');
+    const logsDir = join(cliDir, 'brain', convId, '.system_generated', 'logs');
+    mkdirSync(logsDir, { recursive: true });
+    const compactPath = join(logsDir, 'transcript.jsonl');
+    const fullPath = join(logsDir, 'transcript_full.jsonl');
+
+    // 1. Prefer compact transcript.jsonl over transcript_full.jsonl & skip heavy fields
+    writeFileSync(
+      compactPath,
+      [
+        JSON.stringify({ step_index: 0, type: 'USER_INPUT', created_at: '2026-11-19T06:00:00Z', content: 'Fast path test' }),
+        JSON.stringify({
+          step_index: 1,
+          type: 'PLANNER_RESPONSE',
+          created_at: '2026-11-19T06:00:05Z',
+          model: 'claude-sonnet-4-6',
+          input_tokens: 2000,
+          cache_read_tokens: 8000,
+          output_tokens: 400,
+          content: 'Compact answer'
+        })
+      ].join('\n') + '\n'
+    );
+    writeFileSync(fullPath, '{"invalid_json_if_read": \n');
+
+    const collectorMod = await import(`${pathToFileURL(join(ROOT, 'sidecars', 'dashboard', 'collector.mjs')).href}?v=${Date.now()}`);
+    const snap1 = await collectorMod.scanConversation(convId, {
+      force: false,
+      lightweight: true,
+      allowDiskCacheWithoutLs: true,
+      skipRecentList: true,
+      skipWorkspaceLookup: true
+    });
+    assert(snap1.ok === true && snap1.context?.used === 10400, `lightweight 应优先读取 transcript.jsonl：${JSON.stringify(snap1.context)}`);
+    assert(
+      snap1.agentTree === undefined && snap1.heavyItems === undefined && snap1.compactions === undefined,
+      'lightweight 模式不应生成 agentTree / heavyItems / compactions'
+    );
+    assert(snap1.turnsCount === 1 && Array.isArray(snap1.turns) && snap1.turns.length === 0, 'lightweight 模式应返回 turnsCount 并省略 turns 数组');
+
+    // 2. statusline_snap_v1.json cache hit & invalidation on log mtime/size change
+    const snapCacheFile = join(stateDir, 'statusline_snap_v1.json');
+    assert(existsSync(snapCacheFile), 'lightweight 扫描后应写入 statusline_snap_v1.json');
+    const snap2 = await collectorMod.scanConversation(convId, {
+      force: false,
+      lightweight: true,
+      allowDiskCacheWithoutLs: true,
+      skipRecentList: true,
+      skipWorkspaceLookup: true
+    });
+    assert(snap2.fromStatuslineSnap === true && snap2.context?.used === 10400, '二次 lightweight 扫描应命中 statusline_snap_v1.json');
+
+    writeFileSync(
+      compactPath,
+      [
+        JSON.stringify({ step_index: 0, type: 'USER_INPUT', created_at: '2026-11-19T06:00:00Z', content: 'Fast path test' }),
+        JSON.stringify({
+          step_index: 1,
+          type: 'PLANNER_RESPONSE',
+          created_at: '2026-11-19T06:00:05Z',
+          model: 'claude-sonnet-4-6',
+          input_tokens: 2000,
+          cache_read_tokens: 8000,
+          output_tokens: 400,
+          content: 'Compact answer'
+        }),
+        JSON.stringify({
+          step_index: 2,
+          type: 'PLANNER_RESPONSE',
+          created_at: '2026-11-19T06:00:10Z',
+          model: 'claude-sonnet-4-6',
+          input_tokens: 1000,
+          cache_read_tokens: 12000,
+          output_tokens: 500,
+          content: 'Updated answer'
+        })
+      ].join('\n') + '\n'
+    );
+    const snap3 = await collectorMod.scanConversation(convId, {
+      force: false,
+      lightweight: true,
+      allowDiskCacheWithoutLs: true,
+      skipRecentList: true,
+      skipWorkspaceLookup: true
+    });
+    assert(!snap3.fromStatuslineSnap && snap3.context?.used === 13500, `日志变更后应失效快照并更新 used=13500，实际：${snap3.context?.used}`);
+
+    // 3. LS RPC short timeout + fallback to stale disk generatorList
+    let slowPort = 0;
+    slowServer = http.createServer((_req, res) => {
+      setTimeout(() => {
+        if (!res.writableEnded) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end('{}');
+        }
+      }, 900);
+    });
+    await new Promise((resolveListen) => slowServer.listen(0, '127.0.0.1', resolveListen));
+    slowPort = slowServer.address().port;
+    const lsAddr = `127.0.0.1:${slowPort}`;
+    const lsKeyHash = 'ls_' + createHash('sha256').update(lsAddr).digest('hex').slice(0, 16);
+    process.env.ANTIGRAVITY_LS_ADDRESS = lsAddr;
+    process.env.ANTIGRAVITY_CSRF_TOKEN = 'test-csrf-token';
+
+    writeFileSync(
+      join(stateDir, 'active_conv_gen_cache_v1.json'),
+      JSON.stringify({
+        version: 2,
+        convs: {
+          [convId]: {
+            lsKeyHash,
+            size: 12,
+            mtimeMs: 12345,
+            fetchedAt: Date.now() - 10_000,
+            settled: true,
+            empty: false,
+            generatorList: [
+              {
+                stepIndices: [1, 2],
+                chatModel: {
+                  model: 'claude-sonnet-4-6',
+                  timeToFirstToken: '0.5s',
+                  streamingDuration: '2.0s',
+                  usage: { inputTokens: 1000, cacheReadTokens: 12000, outputTokens: 500 },
+                  chatStartMetadata: { contextWindowMetadata: { maxContextTokens: 200000 } }
+                }
+              }
+            ]
+          }
+        }
+      })
+    );
+    // Invalidate statusline snap by writing slightly different mtime/content
+    writeFileSync(compactPath, readFileSync(compactPath, 'utf-8') + ' ');
+    const tRpc0 = Date.now();
+    const snapRpcFallback = await collectorMod.scanConversation(convId, {
+      force: false,
+      lightweight: true,
+      rpcTimeoutMs: 120,
+      allowDiskCacheWithoutLs: true,
+      skipRecentList: true,
+      skipWorkspaceLookup: true
+    });
+    const rpcElapsed = Date.now() - tRpc0;
+    assert(rpcElapsed < 650, `lightweight RPC 超时应快速返回 (<650ms)，实际 ${rpcElapsed}ms`);
+    assert(snapRpcFallback.context?.budget === 200000, `RPC 超时后应回退到旧磁盘 generatorList 获取 budget=200000，实际：${snapRpcFallback.context?.budget}`);
+
+    // 4. readConversationLatestGenSignal
+    let DatabaseSyncCtor = null;
+    try {
+      const modSqlite = await import('node:sqlite');
+      DatabaseSyncCtor = modSqlite.DatabaseSync;
+    } catch {}
+    if (DatabaseSyncCtor) {
+      const dbDir = join(cliDir, 'conversations');
+      mkdirSync(dbDir, { recursive: true });
+      const dbPath = join(dbDir, `${convId}.db`);
+      const db = new DatabaseSyncCtor(dbPath);
+      try {
+        const encVarint = (n) => {
+          let v = BigInt(n);
+          const out = [];
+          do {
+            let b = Number(v & 0x7fn);
+            v >>= 7n;
+            if (v > 0n) b |= 0x80;
+            out.push(b);
+          } while (v > 0n);
+          return Buffer.from(out);
+        };
+        const encFieldVar = (num, val) => Buffer.concat([encVarint((num << 3) | 0), encVarint(val)]);
+        const encFieldBytes = (num, payload) => {
+          const buf = Buffer.isBuffer(payload) ? payload : Buffer.from(String(payload), 'utf8');
+          return Buffer.concat([encVarint((num << 3) | 2), encVarint(buf.length), buf]);
+        };
+        const encDur = (sec, nanos = 0) => Buffer.concat([encFieldVar(1, sec), encFieldVar(2, nanos)]);
+        const mkGenRow = (stepIdx, maxCtx, ttftSec, streamSec, streamNanos) => Buffer.concat([
+          encFieldBytes(1, Buffer.concat([
+            encFieldVar(3, 1532),
+            encFieldBytes(9, encFieldBytes(10, encFieldVar(1, maxCtx))),
+            encFieldBytes(11, encDur(ttftSec, 0)),
+            encFieldBytes(12, encDur(streamSec, streamNanos)),
+            encFieldBytes(21, 'Gemini 4 Neon')
+          ])),
+          encFieldBytes(2, encVarint(stepIdx))
+        ]);
+        db.exec('CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)');
+        db.prepare('INSERT INTO gen_metadata (idx, data) VALUES (?, ?)').run(0, mkGenRow(1, 100000, 1, 1, 0));
+        db.prepare('INSERT INTO gen_metadata (idx, data) VALUES (?, ?)').run(1, mkGenRow(2, 200000, 0, 1, 500_000_000));
+      } finally {
+        db.close();
+      }
+      const { readConversationLatestGenSignal } = await import(`${pathToFileURL(join(ROOT, 'sidecars', 'dashboard', 'sqlite_reader.mjs')).href}?v=${Date.now()}`);
+      const latestGen = await readConversationLatestGenSignal(dbPath, { timeoutMs: 200 });
+      assert(
+        latestGen && latestGen.maxContextTokens === 200000 && latestGen.streamingSec === 1.5,
+        `readConversationLatestGenSignal 应提取最新一行 gen_metadata：${JSON.stringify(latestGen)}`
+      );
+    }
+
+    // 5. readStdinBounded early exit on complete JSON object without EOF
+    delete process.env.ANTIGRAVITY_LS_ADDRESS;
+    delete process.env.ANTIGRAVITY_CSRF_TOKEN;
+    const cliEntry = join(ROOT, 'sidecars', 'dashboard', 'cli.mjs');
+    const stdinResult = await new Promise((resolveChild, rejectChild) => {
+      const t0 = Date.now();
+      const child = spawn(process.execPath, [cliEntry, 'statusline', '--plain', '--width', '120'], {
+        env: { ...process.env },
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+      let out = '';
+      let err = '';
+      const killer = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch {}
+        rejectChild(new Error(`statusline 未在未关闭 stdin 时提前退出 (>3000ms)`));
+      }, 3000);
+      child.stdout.on('data', (d) => { out += d.toString('utf8'); });
+      child.stderr.on('data', (d) => { err += d.toString('utf8'); });
+      child.on('exit', (code) => {
+        clearTimeout(killer);
+        resolveChild({ code, out, err, elapsed: Date.now() - t0 });
+      });
+      // Write JSON without calling child.stdin.end()!
+      child.stdin.write(JSON.stringify({ conversation_id: convId }));
+    });
+    assert(
+      stdinResult.code === 0 && stdinResult.out.includes('13.5K') && stdinResult.elapsed < 2500,
+      `未关闭 stdin 发送完整 JSON 后 statusline 应立即退出并输出：code=${stdinResult.code}, elapsed=${stdinResult.elapsed}ms, out=${stdinResult.out}`
+    );
+  } finally {
+    if (slowServer) {
+      await new Promise((r) => slowServer.close(r));
+    }
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(tmpSlRoot, { recursive: true, force: true });
   }
 }
 

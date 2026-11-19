@@ -59,6 +59,7 @@ import {
   classifyDiagnosticEventText,
   extractProjectNameFromUris,
   isSqliteAvailable,
+  readConversationLatestGenSignal,
   readConversationSqliteSignals,
   readConversationSummariesIndex,
   sanitizeSqliteText
@@ -1106,10 +1107,12 @@ async function getHostUserStatus(force = false, options = {}) {
     return inFlightHostStatus.promise;
   }
 
+  const rpcTimeoutMs = Number(options.rpcTimeoutMs) > 0 ? Number(options.rpcTimeoutMs) : 4500;
+  const rpcOpts = options.unrefSocket ? { unrefSocket: true } : {};
   const runFetch = (async () => {
     const [statusResp, summaryResp] = await Promise.all([
-      callLanguageServerWithStatus('GetUserStatus', {}),
-      callLanguageServerWithStatus('RetrieveUserQuotaSummary', {})
+      callLanguageServerWithStatus('GetUserStatus', {}, rpcTimeoutMs, rpcOpts),
+      callLanguageServerWithStatus('RetrieveUserQuotaSummary', {}, rpcTimeoutMs, rpcOpts)
     ]);
     const res = statusResp.data;
     const quotaSummaryRes = summaryResp.data;
@@ -3311,7 +3314,7 @@ async function fetchGeneratorMetadataForConv(convId, force = false, options = {}
     Array.isArray(cached.generatorList) &&
     cached.generatorList.length > 0
   );
-  const resolveBaseList = () => {
+  const resolveBaseList = (allowStale = false) => {
     if (hasMemBase) return cached.generatorList;
     if (hasLogSig && lsDiskHash) {
       const diskCache = loadActiveConvGenDiskCache();
@@ -3321,6 +3324,18 @@ async function fetchGeneratorMetadataForConv(convId, force = false, options = {}
         diskEntry.lsKeyHash === lsDiskHash &&
         diskEntry.size === options.logSize &&
         diskEntry.mtimeMs === options.logMtimeMs &&
+        Array.isArray(diskEntry.generatorList) &&
+        diskEntry.generatorList.length > 0
+      ) {
+        return diskEntry.generatorList;
+      }
+    }
+    if (allowStale && options.allowStaleDiskFallback) {
+      const diskCache = loadActiveConvGenDiskCache();
+      const diskEntry = diskCache?.convs?.[convId];
+      if (
+        diskEntry &&
+        (!diskEntry.lsKeyHash || !lsDiskHash || diskEntry.lsKeyHash === lsDiskHash) &&
         Array.isArray(diskEntry.generatorList) &&
         diskEntry.generatorList.length > 0
       ) {
@@ -3351,7 +3366,7 @@ async function fetchGeneratorMetadataForConv(convId, force = false, options = {}
         unrefSocket: Boolean(options.unrefSocket)
       }
     );
-    const baseList = resolveBaseList();
+    const baseList = resolveBaseList(res === null);
     if (res === null) {
       if (baseList.length > 0) {
         return {
@@ -3413,6 +3428,41 @@ async function fetchGeneratorMetadataForConv(convId, force = false, options = {}
 
 function getActiveConvGenCachePath() {
   return join(getPluginStateDir(), 'active_conv_gen_cache_v1.json');
+}
+
+const STATUSLINE_SNAP_CACHE_VERSION = 1;
+const STATUSLINE_SNAP_CACHE_MAX_CONVS = 8;
+
+function getStatuslineSnapCachePath() {
+  return join(getPluginStateDir(), 'statusline_snap_v1.json');
+}
+
+function loadStatuslineSnapCache(targetPath = getStatuslineSnapCachePath()) {
+  const raw = readJsonSafe(targetPath, null);
+  const convs = {};
+  if (raw?.version === STATUSLINE_SNAP_CACHE_VERSION && raw.convs && typeof raw.convs === 'object') {
+    for (const [cid, v] of Object.entries(raw.convs)) {
+      if (CONV_ID_RE.test(cid) && v && typeof v === 'object') {
+        convs[cid] = v;
+      }
+    }
+  }
+  return { version: STATUSLINE_SNAP_CACHE_VERSION, convs };
+}
+
+function saveStatuslineSnapEntry(convId, entry, targetPath = getStatuslineSnapCachePath()) {
+  if (!convId || !CONV_ID_RE.test(convId) || !entry) return;
+  try {
+    const data = loadStatuslineSnapCache(targetPath);
+    const nextConvs = { ...data.convs, [convId]: entry };
+    const sorted = Object.entries(nextConvs)
+      .sort((a, b) => Number(b[1]?.savedAt || 0) - Number(a[1]?.savedAt || 0))
+      .slice(0, STATUSLINE_SNAP_CACHE_MAX_CONVS);
+    writeJsonAtomic(targetPath, {
+      version: STATUSLINE_SNAP_CACHE_VERSION,
+      convs: Object.fromEntries(sorted)
+    });
+  } catch {}
 }
 
 function slimGeneratorListForCache(generatorList = [], keepBreakdownEntry = undefined) {
@@ -4448,6 +4498,9 @@ function resolveProjectNameForConv(convId, summariesById = null) {
 
 export async function scanConversation(requestedConvId = '', options = {}) {
   const force = Boolean(options.force);
+  const lightweight = Boolean(options.lightweight);
+  const rpcTimeoutMs = Number(options.rpcTimeoutMs) > 0 ? Number(options.rpcTimeoutMs) : 4500;
+  const sqliteTimeoutMs = Number(options.sqliteTimeoutMs) > 0 ? Number(options.sqliteTimeoutMs) : 1500;
   const nowMs = Number(options.nowMs) || Date.now();
   const background = Boolean(options.background);
   const menubarMode = String(options.menubarMode || 'context');
@@ -4527,13 +4580,41 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     : (hasDesktopLogs ? join(agDir, 'brain', convId) : (hasIdeLogs ? join(ideDataDir, 'brain', convId) : join(cliDataDir, 'brain', convId)));
   const fullPath = join(brainBase, 'transcript_full.jsonl');
   const compactPath = join(brainBase, 'transcript.jsonl');
-  const targetLogPath = (existsSync(fullPath) && statSync(fullPath).size <= 32 * 1024 * 1024)
-    ? fullPath
-    : (existsSync(compactPath) ? compactPath : cliDirectLog);
+  let fullStatMtime = 0;
+  let fullStatSize = 0;
+  if (existsSync(fullPath)) {
+    try {
+      const fst = statSync(fullPath);
+      fullStatMtime = fst.mtimeMs;
+      fullStatSize = fst.size;
+    } catch {}
+  }
+  let compactStatMtime = 0;
+  let compactStatSize = 0;
+  if (existsSync(compactPath)) {
+    try {
+      const cst = statSync(compactPath);
+      compactStatMtime = cst.mtimeMs;
+      compactStatSize = cst.size;
+    } catch {}
+  }
+  const targetLogPath = lightweight
+    ? (compactStatSize > 0 || existsSync(compactPath)
+        ? compactPath
+        : ((fullStatMtime > 0 && fullStatSize <= 32 * 1024 * 1024) ? fullPath : cliDirectLog))
+    : ((fullStatMtime > 0 && fullStatSize <= 32 * 1024 * 1024)
+        ? fullPath
+        : (existsSync(compactPath) ? compactPath : cliDirectLog));
 
   let logStatMtime = 0;
   let logStatSize = 0;
-  if (existsSync(targetLogPath)) {
+  if (targetLogPath === fullPath && fullStatMtime > 0) {
+    logStatMtime = fullStatMtime;
+    logStatSize = fullStatSize;
+  } else if (targetLogPath === compactPath && compactStatMtime > 0) {
+    logStatMtime = compactStatMtime;
+    logStatSize = compactStatSize;
+  } else if (existsSync(targetLogPath)) {
     try {
       const st = statSync(targetLogPath);
       logStatMtime = st.mtimeMs;
@@ -4544,22 +4625,58 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     noteObservedTranscriptActivity(logStatMtime, nowMs);
   }
 
-  const host = await getHostUserStatus(force, {
+  const hostCacheMtimeMs = getFileMtimeSigSafe(getHostStatusCachePath());
+  if (lightweight && !force && convId) {
+    const snapCache = loadStatuslineSnapCache();
+    const snap = snapCache?.convs?.[convId];
+    if (snap) {
+      const age = Math.max(0, nowMs - Number(snap.savedAt || 0));
+      const ttl = snap.metaSettled ? 15_000 : 2_000;
+      const sigMatches = (
+        snap.targetLogPath === targetLogPath &&
+        snap.logSize === logStatSize &&
+        snap.logMtimeMs === logStatMtime &&
+        snap.fullSize === fullStatSize &&
+        snap.fullMtimeMs === fullStatMtime &&
+        snap.hostCacheMtimeMs === hostCacheMtimeMs &&
+        snap.lsKeyHash === lsDiskHash &&
+        age < ttl
+      );
+      if (sigMatches) {
+        return {
+          ok: true,
+          fromStatuslineSnap: true,
+          scannedAt: Number(snap.savedAt || nowMs),
+          conversationId: convId,
+          conversationSource,
+          quotas: snap.quotas || [],
+          context: snap.context || {},
+          speed: snap.speed || null,
+          turnsCount: Number(snap.turnsCount || 0),
+          turns: []
+        };
+      }
+    }
+  }
+
+  const hostPromise = getHostUserStatus(force, {
     background,
     menubarMode,
     nowMs,
     latestTranscriptMtimeMs: logStatMtime,
-    allowDiskCacheWithoutLs
+    allowDiskCacheWithoutLs,
+    ...(lightweight ? { rpcTimeoutMs, unrefSocket: true } : {})
   });
+  let host = lightweight ? null : await hostPromise;
 
   const convDbPath = resolveConvDbPath(convId, conversationSource, agDir, cliDataDir, ideDataDir);
-  const convDbSig = getFileMtimeSigSafe(convDbPath);
-  const swarmSig = getFileMtimeSigSafe(join(convBrainDir, '.system_generated', 'swarm', 'members.json'));
-  const subagentsSig = getFileMtimeSigSafe(join(convBrainDir, '.system_generated', 'subagents'));
-  const baseSnapKey = `${convId}|${logStatMtime}|${logStatSize}|${convDbSig}|${swarmSig}|${subagentsSig}|${host.sig}|${lsMemHash}|${agDir}|${stateDir}`;
-  const prevHit = scanSnapCache.get(convId);
-  const sameBaseKey = Boolean(prevHit && prevHit.baseKey === baseSnapKey);
-  if (!force && sameBaseKey) {
+  const convDbSig = lightweight ? '' : getFileMtimeSigSafe(convDbPath);
+  const swarmSig = lightweight ? '' : getFileMtimeSigSafe(join(convBrainDir, '.system_generated', 'swarm', 'members.json'));
+  const subagentsSig = lightweight ? '' : getFileMtimeSigSafe(join(convBrainDir, '.system_generated', 'subagents'));
+  const baseSnapKey = lightweight ? '' : `${convId}|${logStatMtime}|${logStatSize}|${convDbSig}|${swarmSig}|${subagentsSig}|${host.sig}|${lsMemHash}|${agDir}|${stateDir}`;
+  const prevHit = lightweight ? null : scanSnapCache.get(convId);
+  const sameBaseKey = Boolean(!lightweight && prevHit && prevHit.baseKey === baseSnapKey);
+  if (!lightweight && !force && sameBaseKey) {
     if (prevHit.metaSettled || !hasLsConfig || nowMs < (prevHit.nextMetaCheckAt || 0)) {
       return {
         ...prevHit.snap,
@@ -4667,7 +4784,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     if (type === 'USER_INPUT') {
       pendingToolLabels = [];
       userMessages++;
-      if (!conversationTitle && contentStr) {
+      if (!lightweight && !conversationTitle && contentStr) {
         conversationTitle = extractCleanUserTitle(contentStr);
       }
       const switchedModel = parseModelSettingFromText(contentStr);
@@ -4675,39 +4792,49 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         activeSettingModel = switchedModel;
         lastSettingStepIdx = sIdx;
       }
-      const { promptPreview, promptFull } = extractPromptPreview(contentStr);
-      userInputs.push({
-        arrayIdx: i,
-        stepIndex: sIdx,
-        createdAt: step.created_at || '',
-        promptPreview,
-        promptFull
-      });
-      const mUser = measureText(contentStr);
-      addMeasure(groups.user, mUser);
-      pushHeavyCandidate(sIdx, 'user', '用户消息', promptFull || contentStr, mUser);
+      if (lightweight) {
+        userInputs.push({
+          arrayIdx: i,
+          stepIndex: sIdx,
+          createdAt: step.created_at || ''
+        });
+      } else {
+        const { promptPreview, promptFull } = extractPromptPreview(contentStr);
+        userInputs.push({
+          arrayIdx: i,
+          stepIndex: sIdx,
+          createdAt: step.created_at || '',
+          promptPreview,
+          promptFull
+        });
+        const mUser = measureText(contentStr);
+        addMeasure(groups.user, mUser);
+        pushHeavyCandidate(sIdx, 'user', '用户消息', promptFull || contentStr, mUser);
+      }
     } else if (isModelTurnStep(step)) {
       assistantMessages++;
       requiredModelSteps.push(sIdx);
-      const mAsst = measureText(contentStr);
-      addMeasure(groups.assistant, mAsst);
-      pushHeavyCandidate(sIdx, 'assistant', '模型回复', contentStr, mAsst);
-      if (step.thinking) {
-        const mThink = measureText(step.thinking);
-        addMeasure(groups.thinking, mThink);
-        pushHeavyCandidate(sIdx, 'thinking', '模型思考', step.thinking, mThink);
-      }
-      const toolBadges = summarizeToolNames(step.tool_calls);
-      pendingToolLabels = Array.isArray(step.tool_calls)
-        ? step.tool_calls.map(formatToolCallLabel)
-        : [];
-      if (Array.isArray(step.tool_calls) && step.tool_calls.length) {
-        toolCallsCount += step.tool_calls.length;
-        const tcRaw = JSON.stringify(step.tool_calls);
-        const mTc = measureText(tcRaw);
-        addMeasure(groups.tools, mTc);
-        const tcLabel = toolBadges.length ? `调用 ${toolBadges.slice(0, 2).join(', ')}` : '工具调用';
-        pushHeavyCandidate(sIdx, 'tool', tcLabel, tcRaw, mTc);
+      const toolBadges = lightweight ? [] : summarizeToolNames(step.tool_calls);
+      if (!lightweight) {
+        const mAsst = measureText(contentStr);
+        addMeasure(groups.assistant, mAsst);
+        pushHeavyCandidate(sIdx, 'assistant', '模型回复', contentStr, mAsst);
+        if (step.thinking) {
+          const mThink = measureText(step.thinking);
+          addMeasure(groups.thinking, mThink);
+          pushHeavyCandidate(sIdx, 'thinking', '模型思考', step.thinking, mThink);
+        }
+        pendingToolLabels = Array.isArray(step.tool_calls)
+          ? step.tool_calls.map(formatToolCallLabel)
+          : [];
+        if (Array.isArray(step.tool_calls) && step.tool_calls.length) {
+          toolCallsCount += step.tool_calls.length;
+          const tcRaw = JSON.stringify(step.tool_calls);
+          const mTc = measureText(tcRaw);
+          addMeasure(groups.tools, mTc);
+          const tcLabel = toolBadges.length ? `调用 ${toolBadges.slice(0, 2).join(', ')}` : '工具调用';
+          pushHeavyCandidate(sIdx, 'tool', tcLabel, tcRaw, mTc);
+        }
       }
       const stepUsage = extractStepUsage(step);
       stepMetaMap.set(sIdx, {
@@ -4726,6 +4853,31 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         latestErrorStepIdx = Math.max(latestErrorStepIdx, sIdx);
         if (contentStr) {
           latestStepError = { stepIndex: sIdx, text: contentStr };
+          if (!lightweight) {
+            const dKind = classifyDiagnosticEventText(contentStr);
+            if (dKind) {
+              transcriptDiagEvents.push({
+                kind: dKind,
+                stepIndex: sIdx,
+                createdAt: step.created_at || '',
+                detail: sanitizeSqliteText(contentStr, 120)
+              });
+            }
+          }
+        }
+      }
+    } else if (type === 'CHECKPOINT' || step.checkpoint) {
+      if (!lightweight) {
+        const cpText = contentStr || step.checkpoint?.sessionSummary || '';
+        const mCp = measureText(cpText);
+        addMeasure(groups.summaries, mCp);
+        pushHeavyCandidate(sIdx, 'checkpoint', '压缩摘要', cpText, mCp);
+      }
+    } else if (type === 'ERROR_MESSAGE' || step.status === 'ERROR') {
+      latestErrorStepIdx = Math.max(latestErrorStepIdx, sIdx);
+      if (contentStr) {
+        latestStepError = { stepIndex: sIdx, text: contentStr };
+        if (!lightweight) {
           const dKind = classifyDiagnosticEventText(contentStr);
           if (dKind) {
             transcriptDiagEvents.push({
@@ -4737,37 +4889,20 @@ export async function scanConversation(requestedConvId = '', options = {}) {
           }
         }
       }
-    } else if (type === 'CHECKPOINT' || step.checkpoint) {
-      const cpText = contentStr || step.checkpoint?.sessionSummary || '';
-      const mCp = measureText(cpText);
-      addMeasure(groups.summaries, mCp);
-      pushHeavyCandidate(sIdx, 'checkpoint', '压缩摘要', cpText, mCp);
-    } else if (type === 'ERROR_MESSAGE' || step.status === 'ERROR') {
-      latestErrorStepIdx = Math.max(latestErrorStepIdx, sIdx);
-      if (contentStr) {
-        latestStepError = { stepIndex: sIdx, text: contentStr };
-        const dKind = classifyDiagnosticEventText(contentStr);
-        if (dKind) {
-          transcriptDiagEvents.push({
-            kind: dKind,
-            stepIndex: sIdx,
-            createdAt: step.created_at || '',
-            detail: sanitizeSqliteText(contentStr, 120)
-          });
-        }
+      if (!lightweight) {
+        const mErr = measureText(contentStr);
+        addMeasure(groups.tools, mErr);
+        const queuedLbl = type === 'GENERIC' && pendingToolLabels.length ? pendingToolLabels.shift() : '';
+        pushHeavyCandidate(sIdx, 'tool', resolveToolStepLabel(step, queuedLbl), contentStr, mErr);
       }
-      const mErr = measureText(contentStr);
-      addMeasure(groups.tools, mErr);
-      const queuedLbl = type === 'GENERIC' && pendingToolLabels.length ? pendingToolLabels.shift() : '';
-      pushHeavyCandidate(sIdx, 'tool', resolveToolStepLabel(step, queuedLbl), contentStr, mErr);
-    } else {
+    } else if (!lightweight) {
       const mTool = measureText(contentStr);
       addMeasure(groups.tools, mTool);
       const queuedLbl = type === 'GENERIC' && pendingToolLabels.length ? pendingToolLabels.shift() : '';
       pushHeavyCandidate(sIdx, 'tool', resolveToolStepLabel(step, queuedLbl), contentStr, mTool);
     }
 
-    if (Array.isArray(step.media)) {
+    if (!lightweight && Array.isArray(step.media)) {
       const mediaSource = type === 'USER_INPUT' ? 'user' : 'assistant';
       for (const m of step.media) {
         if (!m || (!m.uri && !m.inline_data && !m.inlineData)) continue;
@@ -4792,15 +4927,26 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   const ageMs = logStatMtime > 0 ? Math.max(0, nowMs - logStatMtime) : 0;
   const isRetryCheck = Boolean(!force && sameBaseKey && !prevHit?.metaSettled);
   const prevRetryCount = sameBaseKey ? Number(prevHit?.retryCount || 0) : 0;
+  const logSigMatches = (entry) => Boolean(
+    entry && (
+      (entry.size === logStatSize && entry.mtimeMs === logStatMtime) ||
+      (entry.logSize === logStatSize && entry.logMtimeMs === logStatMtime) ||
+      (compactStatMtime > 0 && entry.compactSize === compactStatSize && entry.compactMtimeMs === compactStatMtime) ||
+      (fullStatMtime > 0 && (
+        (entry.size === fullStatSize && entry.mtimeMs === fullStatMtime) ||
+        (entry.logSize === fullStatSize && entry.logMtimeMs === fullStatMtime)
+      ))
+    )
+  );
   let genMetaBundle = null;
   let genFromCache = false;
+  let existingConvDiskEntry = null;
   if (!force && hasLsConfig && !isRetryCheck) {
     const memGen = convGenMetaCache.get(convId);
     const memCovers = Boolean(
       memGen &&
       memGen.lsKey === lsKey &&
-      memGen.logSize === logStatSize &&
-      memGen.logMtimeMs === logStatMtime &&
+      logSigMatches(memGen) &&
       memGen.generatorList?.length &&
       requiredModelSteps.every((stepNum) => hasCompleteGenStepMetrics(memGen.callsByStep?.get(stepNum), stepMetaMap.get(stepNum))) &&
       isGenListFullySettled(memGen.generatorList, stepMetaMap) &&
@@ -4812,12 +4958,12 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     } else {
       const diskCache = loadActiveConvGenDiskCache();
       const diskEntry = diskCache?.convs?.[convId];
+      existingConvDiskEntry = diskEntry || null;
       if (
         diskEntry &&
         lsDiskHash &&
         diskEntry.lsKeyHash === lsDiskHash &&
-        diskEntry.size === logStatSize &&
-        diskEntry.mtimeMs === logStatMtime &&
+        logSigMatches(diskEntry) &&
         diskEntry.settled === true
       ) {
         const diskList = Array.isArray(diskEntry.generatorList) ? diskEntry.generatorList : [];
@@ -4864,29 +5010,41 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   }
 
   if (!genFromCache && hasLsConfig && (rawSteps.length > 0 || force)) {
-    genMetaBundle = await fetchGeneratorMetadataForConv(convId, force, {
+    const genPromise = fetchGeneratorMetadataForConv(convId, force, {
       bypassMemTtl: isRetryCheck,
       nowMs,
       logSize: logStatSize,
-      logMtimeMs: logStatMtime
+      logMtimeMs: logStatMtime,
+      ...(lightweight ? { timeoutMs: rpcTimeoutMs, unrefSocket: true, allowStaleDiskFallback: true } : {})
     });
-  } else if (!genFromCache && !hasLsConfig && allowDiskCacheWithoutLs && rawSteps.length > 0) {
-    const diskCache = loadActiveConvGenDiskCache();
-    const diskEntry = diskCache?.convs?.[convId];
-    if (diskEntry && Array.isArray(diskEntry.generatorList) && diskEntry.generatorList.length > 0) {
-      const diskList = diskEntry.generatorList;
-      genMetaBundle = {
-        at: Number(diskEntry.fetchedAt || nowMs),
-        lsKey: '',
-        logSize: diskEntry.size,
-        logMtimeMs: diskEntry.mtimeMs,
-        generatorList: diskList,
-        callsByStep: buildCallsByStepFromList(diskList),
-        emptyFromHost: Boolean(diskEntry.empty),
-        rpcFailed: false,
-        fromDiskCache: true
-      };
-      genFromCache = true;
+    if (lightweight) {
+      [host, genMetaBundle] = await Promise.all([hostPromise, genPromise]);
+    } else {
+      genMetaBundle = await genPromise;
+    }
+  } else {
+    if (lightweight) {
+      host = await hostPromise;
+    }
+    if (!genFromCache && !hasLsConfig && allowDiskCacheWithoutLs && rawSteps.length > 0) {
+      const diskCache = loadActiveConvGenDiskCache();
+      const diskEntry = diskCache?.convs?.[convId];
+      existingConvDiskEntry = existingConvDiskEntry || diskEntry || null;
+      if (diskEntry && Array.isArray(diskEntry.generatorList) && diskEntry.generatorList.length > 0) {
+        const diskList = diskEntry.generatorList;
+        genMetaBundle = {
+          at: Number(diskEntry.fetchedAt || nowMs),
+          lsKey: '',
+          logSize: diskEntry.size,
+          logMtimeMs: diskEntry.mtimeMs,
+          generatorList: diskList,
+          callsByStep: buildCallsByStepFromList(diskList),
+          emptyFromHost: Boolean(diskEntry.empty),
+          rpcFailed: false,
+          fromDiskCache: true
+        };
+        genFromCache = true;
+      }
     }
   }
 
@@ -4929,10 +5087,51 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   }
 
   // Optional read-only SQLite offline enrichment (zero-crash fallback when unavailable)
-  const [sqliteSignals, summariesIndex] = await Promise.all([
-    convDbPath ? readConversationSqliteSignals(convDbPath, { includeLatestGenDetail: true }) : Promise.resolve(null),
-    readMergedSummariesIndex(agDir, cliDataDir, ideDataDir)
-  ]);
+  let sqliteSignals = null;
+  let summariesIndex = null;
+  if (lightweight) {
+    let hasBundleBudget = false;
+    let hasBundleTiming = false;
+    for (let i = bundleList.length - 1; i >= 0; i--) {
+      const gm = bundleList[i];
+      const cm = gm?.chatModel || gm?.chatMetadata || null;
+      if (!cm) continue;
+      if (!hasBundleBudget && Number(cm?.chatStartMetadata?.contextWindowMetadata?.maxContextTokens || 0) > 0) {
+        hasBundleBudget = true;
+      }
+      if (
+        !hasBundleTiming && (
+          parseDurationSec(cm.timeToFirstToken) !== null ||
+          parseDurationSec(cm.streamingDuration) !== null
+        )
+      ) {
+        hasBundleTiming = true;
+      }
+      if (hasBundleBudget && hasBundleTiming) break;
+    }
+    if (convDbPath && (!hasBundleBudget || !hasBundleTiming)) {
+      const latestSqlGen = await readConversationLatestGenSignal(convDbPath, { timeoutMs: sqliteTimeoutMs });
+      if (latestSqlGen) {
+        const genByStep = new Map();
+        for (const sIdx of (latestSqlGen.stepIndices || [])) {
+          genByStep.set(sIdx, latestSqlGen);
+        }
+        const lastModelStep = requiredModelSteps.length ? requiredModelSteps[requiredModelSteps.length - 1] : null;
+        if (lastModelStep !== null && !genByStep.has(lastModelStep)) {
+          genByStep.set(lastModelStep, latestSqlGen);
+        }
+        sqliteSignals = {
+          latestMaxContextTokens: latestSqlGen.maxContextTokens || null,
+          genByStep
+        };
+      }
+    }
+  } else {
+    [sqliteSignals, summariesIndex] = await Promise.all([
+      convDbPath ? readConversationSqliteSignals(convDbPath, { includeLatestGenDetail: true }) : Promise.resolve(null),
+      readMergedSummariesIndex(agDir, cliDataDir, ideDataDir)
+    ]);
+  }
 
   // Build turn-by-turn metrics combining GeneratorMetadata + SQLite + Transcript steps
   const turnCandidates = [];
@@ -5366,23 +5565,31 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         callsByStep: bundleCallsByStep
       });
     }
-    if (bundleList.length) {
-      maybePersistConvStepModels(
-        convId,
-        existsSync(compactPath) ? compactPath : targetLogPath,
-        bundleList
-      );
-    }
-    if (diskSettledEligible || bundleList.length) {
-      saveActiveConvGenDiskEntry(convId, {
-        lsKeyHash: lsDiskHash,
-        size: logStatSize,
-        mtimeMs: logStatMtime,
-        fetchedAt: nowMs,
-        settled: diskSettledEligible,
-        empty: !bundleList.length,
-        generatorList: slimGeneratorListForCache(bundleList, latestTurnSourceGm)
-      });
+    const shouldPersistInLightweight = Boolean(
+      diskSettledEligible ||
+      !existingConvDiskEntry ||
+      (nowMs - Number(existingConvDiskEntry.fetchedAt || 0)) >= 5000
+    );
+    if (!lightweight || shouldPersistInLightweight) {
+      if (bundleList.length) {
+        maybePersistConvStepModels(
+          convId,
+          existsSync(compactPath) ? compactPath : targetLogPath,
+          bundleList
+        );
+      }
+      if (diskSettledEligible || bundleList.length) {
+        saveActiveConvGenDiskEntry(convId, {
+          lsKeyHash: lsDiskHash,
+          size: fullStatMtime > 0 ? fullStatSize : logStatSize,
+          mtimeMs: fullStatMtime > 0 ? fullStatMtime : logStatMtime,
+          ...(compactStatMtime > 0 ? { compactSize: compactStatSize, compactMtimeMs: compactStatMtime } : {}),
+          fetchedAt: nowMs,
+          settled: diskSettledEligible,
+          empty: !bundleList.length,
+          generatorList: slimGeneratorListForCache(bundleList, latestTurnSourceGm)
+        });
+      }
     }
   }
 
@@ -5422,7 +5629,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
 
   // Populate system & tool definition token estimates from server contextBreakdown if present
   const contextBreakdown = candidateContextBreakdown;
-  if (contextBreakdown?.groups?.length) {
+  if (!lightweight && contextBreakdown?.groups?.length) {
     const sysG = contextBreakdown.groups.find((g) => g.name === 'System Prompt');
     const toolG = contextBreakdown.groups.find((g) => g.name === 'Tools');
     if (sysG) groups.system = { chars: sysG.tokens * 4, bytes: sysG.tokens * 4, low: sysG.tokens, high: sysG.tokens };
@@ -5430,39 +5637,45 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   }
 
   // Inspect attachments
-  const attachments = [...mediaMap.values()].map(inspectAttachmentItem);
+  const attachments = lightweight ? [] : [...mediaMap.values()].map(inspectAttachmentItem);
   const attachmentTotal = emptyMeasure();
-  for (const att of attachments) {
-    const mult = att.references || 1;
-    addMeasure(attachmentTotal, {
-      chars: (att.chars || 0) * mult,
-      bytes: (att.bytes || 0) * mult,
-      low: (att.low || 0) * mult,
-      high: (att.high || 0) * mult
-    });
+  if (!lightweight) {
+    for (const att of attachments) {
+      const mult = att.references || 1;
+      addMeasure(attachmentTotal, {
+        chars: (att.chars || 0) * mult,
+        bytes: (att.bytes || 0) * mult,
+        low: (att.low || 0) * mult,
+        high: (att.high || 0) * mult
+      });
+    }
   }
 
   const localTotal = emptyMeasure();
-  for (const g of Object.values(groups)) addMeasure(localTotal, g);
-  addMeasure(localTotal, attachmentTotal);
+  if (!lightweight) {
+    for (const g of Object.values(groups)) addMeasure(localTotal, g);
+    addMeasure(localTotal, attachmentTotal);
+  }
 
   const localTotalMid = Math.round((localTotal.low + localTotal.high) / 2);
-  const heavyItems = heavyCandidates
-    .filter((item) => item.estTokens > 0)
-    .sort((a, b) => (b.estTokens - a.estTokens) || (a.stepIndex - b.stepIndex))
-    .slice(0, 10)
-    .map((item, idx) => ({
-      rank: idx + 1,
-      stepIndex: item.stepIndex,
-      kind: item.kind,
-      label: item.label,
-      preview: item.preview,
-      estTokens: item.estTokens,
-      sharePercent: localTotalMid > 0
-        ? Number(((item.estTokens / localTotalMid) * 100).toFixed(1))
-        : 0,
-      chars: item.chars
-    }));
+  const heavyItems = lightweight
+    ? []
+    : heavyCandidates
+        .filter((item) => item.estTokens > 0)
+        .sort((a, b) => (b.estTokens - a.estTokens) || (a.stepIndex - b.stepIndex))
+        .slice(0, 10)
+        .map((item, idx) => ({
+          rank: idx + 1,
+          stepIndex: item.stepIndex,
+          kind: item.kind,
+          label: item.label,
+          preview: item.preview,
+          estTokens: item.estTokens,
+          sharePercent: localTotalMid > 0
+            ? Number(((item.estTokens / localTotalMid) * 100).toFixed(1))
+            : 0,
+          chars: item.chars
+        }));
 
   const lastRawStep = rawSteps.length ? rawSteps[rawSteps.length - 1] : null;
   const hasTrailingZeroTokError = Boolean(
@@ -5572,6 +5785,73 @@ export async function scanConversation(requestedConvId = '', options = {}) {
 
   const modelQuota = resolveModelQuota(currentModelDisplay, host.modelConfigs, host.quotaSummaryGroups);
   const unknownAttachmentsCount = attachments.filter((a) => a.status !== 'parsed').length;
+
+  if (lightweight) {
+    const contextPayload = {
+      model: currentModelDisplay,
+      modelKey: currentModelKey,
+      used: usedTokens,
+      baseUsed: baseUsedTokens,
+      pendingTokens,
+      pendingStepsCount,
+      actual: latestValidTurn?.totalTokens ?? null,
+      estimate: latestEstimateTurn?.estimate ?? null,
+      budget: budgetTokens,
+      budgetSource,
+      remaining: remainingTokens,
+      percent: usedPercent,
+      inputTokens: latestValidTurn?.inputTokens ?? null,
+      cacheTokens: latestValidTurn?.cacheTokens ?? null,
+      outputTokens: latestValidTurn?.outputTokens ?? null,
+      cacheHitPercent,
+      sessionCostUSD: Number(sessionCostUSD.toFixed(4)),
+      latestPromptStartup,
+      quota: modelQuota
+    };
+    const speedPayload = latestValidTurn ? {
+      tps: latestValidTurn.tps,
+      streamingTps: latestValidTurn.streamingTps,
+      avgTps,
+      peakTps,
+      duration: latestValidTurn.duration,
+      ttft: latestValidTurn.ttft,
+      streamingSec: latestValidTurn.streamingSec,
+      outputTokens: latestValidTurn.outputTokens,
+      thinkingTokens: latestValidTurn.thinkingTokens,
+      responseTokens: latestValidTurn.responseTokens,
+      isServerExact: Boolean(latestValidTurn?._isServerExact)
+    } : null;
+    const latestHostCacheMtimeMs = getFileMtimeSigSafe(getHostStatusCachePath());
+    if (convId) {
+      saveStatuslineSnapEntry(convId, {
+        targetLogPath,
+        logSize: logStatSize,
+        logMtimeMs: logStatMtime,
+        fullSize: fullStatSize,
+        fullMtimeMs: fullStatMtime,
+        hostCacheMtimeMs: latestHostCacheMtimeMs,
+        lsKeyHash: lsDiskHash,
+        metaSettled,
+        savedAt: nowMs,
+        quotas: host.quotas || [],
+        context: contextPayload,
+        speed: speedPayload,
+        turnsCount: turns.length
+      });
+    }
+    return {
+      ok: true,
+      scannedAt: nowMs,
+      conversationId: convId,
+      conversationSource,
+      quotas: host.quotas || [],
+      quotaStatus: host.quotaStatus,
+      context: contextPayload,
+      speed: speedPayload,
+      turnsCount: turns.length,
+      turns: []
+    };
+  }
 
   // Resolve workspace URI & repository metadata via official agentapi if available (in-memory cache only)
   let wsMeta = convWorkspaceCache.get(convId) ?? null;
