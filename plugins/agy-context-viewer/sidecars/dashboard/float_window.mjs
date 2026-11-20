@@ -1574,6 +1574,9 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
       menubarMode: currentState?.menubarMode || 'context',
       allowDiskCacheWithoutLs: true
     });
+    if (!convId && snap?.pinnedConvId !== undefined && currentState.pinnedConvId !== (snap.pinnedConvId || '')) {
+      currentState.pinnedConvId = snap.pinnedConvId || '';
+    }
     if (hooks.onActiveContextSnap && (!convId || convId === currentState.pinnedConvId)) {
       hooks.onActiveContextSnap(snap);
     }
@@ -1583,6 +1586,7 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
         unchanged: true,
         etag: snap.etag,
         conversationId: snap.conversationId,
+        pinnedConvId: snap.pinnedConvId ?? null,
         recentConversations: snap.recentConversations
       };
     }
@@ -1926,6 +1930,9 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
       latestSnap = snap;
       state.activeConvId = snap.conversationId || null;
       state.activeConvTitle = snap.conversationTitle || null;
+      if (snap.pinnedConvId !== undefined) {
+        state.pinnedConvId = snap.pinnedConvId || '';
+      }
       const sig = `${snap.etag || ''}|${snap.conversationId || ''}`;
       if (sig !== lastSnapSig) {
         lastSnapSig = sig;

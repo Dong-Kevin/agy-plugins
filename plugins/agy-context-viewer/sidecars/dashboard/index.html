@@ -158,11 +158,28 @@
         <button type="button" role="tab" aria-selected="false" class="main-tab" data-tab="history">用量趋势</button>
         <button type="button" role="tab" aria-selected="false" class="main-tab" data-tab="cost">费用与订阅</button>
       </div>
-      <div class="conv-picker-wrap">
+      <div class="conv-picker-wrap" id="conv-picker-wrap">
         <button id="btn-follow-current" type="button" class="ghost-btn xs hidden" title="切回自动跟随当前对话">回到当前</button>
-        <select id="conv-select" class="conv-select" aria-label="选择要查看的会话" title="默认自动跟随当前面板所属对话，也可切换查看近期归档对话">
-          <option value="">自动跟随当前对话</option>
-        </select>
+        <div class="conv-dropdown" id="conv-dropdown">
+          <button id="conv-picker-trigger" type="button" class="conv-picker-trigger" aria-haspopup="dialog" aria-expanded="false" aria-controls="conv-popover" title="选择按项目分组的会话或切回自动跟随">
+            <span id="conv-trigger-label" class="conv-trigger-label">自动跟随当前对话</span>
+            <span class="conv-trigger-caret" aria-hidden="true">▾</span>
+          </button>
+          <select id="conv-select" class="conv-select-hidden" aria-label="选择要查看的会话" aria-hidden="true" tabindex="-1">
+            <option value="">自动跟随当前对话</option>
+          </select>
+          <div id="conv-popover" class="conv-popover hidden" role="dialog" aria-label="按项目分组选择会话">
+            <div class="conv-pop-head">
+              <div class="conv-search-box">
+                <svg class="svg-ic conv-search-ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg>
+                <input id="conv-search-input" type="search" class="conv-search-input" placeholder="搜索会话标题或项目名…" autocomplete="off" spellcheck="false" aria-label="搜索会话标题或项目名">
+                <button id="conv-search-clear" type="button" class="conv-search-clear hidden" aria-label="清空搜索">×</button>
+              </div>
+              <div id="conv-project-pills" class="conv-project-pills" role="tablist" aria-label="按项目筛选"></div>
+            </div>
+            <div id="conv-pop-body" class="conv-pop-body"></div>
+          </div>
+        </div>
       </div>
     </nav>
 

@@ -67,6 +67,7 @@ function createHandlers(getDefaultConvId, makeResponse, handlerOpts = {}) {
           unchanged: true,
           etag: snap.etag,
           conversationId: snap.conversationId,
+          pinnedConvId: snap.pinnedConvId ?? null,
           recentConversations: snap.recentConversations
         };
       }

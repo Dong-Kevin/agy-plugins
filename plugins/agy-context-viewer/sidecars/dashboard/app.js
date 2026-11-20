@@ -48,6 +48,21 @@
     selectedConvId: '',
     hostConvId: window.sidecar?.conversationId || '',
     workspaceUri: '',
+    recentConversations: [],
+    activeConvId: '',
+    pinSyncSeq: 0,
+    pinSyncPending: 0,
+    userModifiedConvSelection: false,
+    convPicker: {
+      open: false,
+      search: '',
+      projectFilter: '__all__', // '__all__' | '__current__' | 'proj:<name>'
+      collapsePrefs: null,
+      lastSelectSig: '',
+      lastTriggerSig: '',
+      lastPillsSig: '',
+      lastBodySig: ''
+    },
     contextEtag: '',
     contextEtagConv: '',
     contextReqSeq: 0,
@@ -450,6 +465,7 @@
     }
 
     const reqSeq = ++state.contextReqSeq;
+    const pinSeqAtStart = state.pinSyncSeq;
     state.contextInFlight = true;
     state.contextInFlightConv = targetConv;
     const qs = new URLSearchParams();
@@ -464,16 +480,51 @@
       if (reqSeq !== state.contextReqSeq || targetConv !== activeTarget) {
         return;
       }
+
+      let needReconcileRefetch = false;
+      if (snap && snap.pinnedConvId !== undefined && !state.pinSyncPending && pinSeqAtStart === state.pinSyncSeq) {
+        const backendPinned = typeof snap.pinnedConvId === 'string' ? snap.pinnedConvId.trim() : '';
+        if (!backendPinned && state.selectedConvId) {
+          state.selectedConvId = '';
+          state.contextEtag = '';
+          state.contextEtagConv = state.hostConvId || '';
+          needReconcileRefetch = Boolean(
+            snap.unchanged || !snap.ok || (snap.conversationId && snap.conversationId === targetConv)
+          );
+        } else if (backendPinned && !state.hostConvId && state.selectedConvId !== backendPinned) {
+          state.selectedConvId = backendPinned;
+          state.contextEtag = '';
+          state.contextEtagConv = backendPinned;
+          needReconcileRefetch = Boolean(
+            snap.unchanged || !snap.ok || snap.conversationId !== backendPinned
+          );
+        }
+      }
+
       if (snap?.recentConversations) {
         renderConversationPicker(snap.recentConversations, snap.conversationId);
+      } else if (needReconcileRefetch) {
+        renderConversationPicker(state.recentConversations, snap?.conversationId || state.activeConvId);
       }
-      if (snap?.unchanged && state.contextData && (!targetConv || state.contextData.conversationId === targetConv)) {
+
+      if (needReconcileRefetch) {
+        setTimeout(() => loadContext(true).catch(() => {}), 0);
+        return;
+      }
+
+      const expectedConv = state.selectedConvId || state.hostConvId || snap?.conversationId || '';
+      if (
+        snap?.unchanged &&
+        state.contextData &&
+        (!expectedConv || state.contextData.conversationId === expectedConv)
+      ) {
         return;
       }
       if (snap?.ok) {
         state.contextEtag = snap.etag || '';
-        state.contextEtagConv = targetConv;
+        state.contextEtagConv = state.selectedConvId || state.hostConvId || '';
         state.contextData = snap;
+        renderConversationPicker(snap.recentConversations || state.recentConversations, snap.conversationId);
         renderContextPanel(snap);
         renderTopCapsules();
       }
@@ -539,6 +590,27 @@
       }
       if (s.entrypoints?.shortcut && typeof s.entrypoints.shortcut === 'object') {
         state.shortcut = { ...state.shortcut, ...s.entrypoints.shortcut };
+      }
+      const persistedPinned = typeof s.entrypoints?.pinnedConvId === 'string'
+        ? s.entrypoints.pinnedConvId.trim()
+        : '';
+      if (
+        persistedPinned &&
+        !state.hostConvId &&
+        !state.selectedConvId &&
+        !state.pinSyncPending &&
+        !state.userModifiedConvSelection
+      ) {
+        state.selectedConvId = persistedPinned;
+        state.contextEtag = '';
+        state.contextEtagConv = persistedPinned;
+        renderConversationPicker(state.recentConversations, state.activeConvId || persistedPinned);
+        if (
+          (state.contextData && state.contextData.conversationId !== persistedPinned) ||
+          (state.contextInFlight && state.contextInFlightConv !== persistedPinned)
+        ) {
+          loadContext(true).catch(() => {});
+        }
       }
       applyAppearanceToDom();
       syncFloatButtonUi();
@@ -659,27 +731,452 @@
     return 'var(--cv-accent)';
   }
 
-  function renderConversationPicker(list = [], activeId = '') {
+  const CONV_COLLAPSE_STORAGE_KEY = 'cv_project_collapse_v1';
+  const UNCATEGORIZED_PROJECT = '未归类工作区';
+
+  function loadProjectCollapsePrefs() {
+    if (state.convPicker.collapsePrefs) return state.convPicker.collapsePrefs;
+    let parsed = {};
+    try {
+      const raw = window.localStorage?.getItem(CONV_COLLAPSE_STORAGE_KEY);
+      if (raw) {
+        const obj = JSON.parse(raw);
+        if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+          parsed = obj;
+        }
+      }
+    } catch {}
+    state.convPicker.collapsePrefs = parsed;
+    return parsed;
+  }
+
+  function saveProjectCollapsePrefs(prefs) {
+    state.convPicker.collapsePrefs = prefs;
+    try {
+      window.localStorage?.setItem(CONV_COLLAPSE_STORAGE_KEY, JSON.stringify(prefs));
+    } catch {}
+  }
+
+  function getItemProjectName(item) {
+    const raw = item?.projectName ? String(item.projectName).trim() : '';
+    return raw || UNCATEGORIZED_PROJECT;
+  }
+
+  function truncateLabel(raw, maxLen = 22) {
+    const str = String(raw || '').trim();
+    if (!str) return '';
+    return str.length > maxLen ? `${str.slice(0, maxLen - 1)}…` : str;
+  }
+
+  function fmtRelativeTime(tsMs, nowMs = Date.now()) {
+    const t = Number(tsMs || 0);
+    if (!Number.isFinite(t) || t <= 0) return '未知时间';
+    const diff = Math.max(0, nowMs - t);
+    if (diff < 45_000) return '刚刚';
+    if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
+    if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
+    if (diff < 30 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`;
+    const dt = new Date(t);
+    const mo = String(dt.getMonth() + 1).padStart(2, '0');
+    const da = String(dt.getDate()).padStart(2, '0');
+    return `${mo}-${da}`;
+  }
+
+  function buildGroupedConversations(list = [], activeId = '') {
+    const displayConvId = state.selectedConvId || activeId || state.activeConvId || state.contextData?.conversationId || '';
+    const groupsMap = new Map();
+    let activeItem = null;
+
+    for (const item of list) {
+      if (!item || !item.id) continue;
+      if (item.id === displayConvId) activeItem = item;
+      const projName = getItemProjectName(item);
+      if (!groupsMap.has(projName)) {
+        groupsMap.set(projName, []);
+      }
+      groupsMap.get(projName).push(item);
+    }
+
+    let currentActiveProject = activeItem ? getItemProjectName(activeItem) : '';
+    if (!currentActiveProject && state.contextData) {
+      const ctxRepoName = state.contextData?.repoInfo?.name ? String(state.contextData.repoInfo.name).trim() : '';
+      currentActiveProject = ctxRepoName || UNCATEGORIZED_PROJECT;
+    }
+
+    const groups = [];
+    for (const [name, items] of groupsMap.entries()) {
+      items.sort((a, b) => Number(b.effectiveActiveMs || b.updatedAtMs || 0) - Number(a.effectiveActiveMs || a.updatedAtMs || 0));
+      let maxActiveMs = 0;
+      for (const it of items) {
+        const ts = Number(it.effectiveActiveMs || it.updatedAtMs || 0);
+        if (ts > maxActiveMs) maxActiveMs = ts;
+      }
+      groups.push({
+        name,
+        items,
+        maxActiveMs,
+        hasActive: items.some((it) => it.id === displayConvId)
+      });
+    }
+
+    groups.sort((a, b) => {
+      const aUncat = a.name === UNCATEGORIZED_PROJECT;
+      const bUncat = b.name === UNCATEGORIZED_PROJECT;
+      if (aUncat !== bUncat) return aUncat ? 1 : -1;
+      if (b.maxActiveMs !== a.maxActiveMs) return b.maxActiveMs - a.maxActiveMs;
+      return a.name.localeCompare(b.name, 'zh-CN');
+    });
+
+    return {
+      groups,
+      displayConvId,
+      currentActiveProject,
+      firstProject: groups[0]?.name || ''
+    };
+  }
+
+  function positionConvPopover() {
+    const pop = $('conv-popover');
+    const wrap = $('conv-dropdown');
+    if (!pop || !wrap || pop.classList.contains('hidden')) return;
+    pop.classList.remove('align-left');
+    const wrapRect = wrap.getBoundingClientRect();
+    const popWidth = Math.min(340, Math.max(200, window.innerWidth - 24));
+    if (wrapRect.right - popWidth < 12 && wrapRect.left + popWidth <= window.innerWidth - 12) {
+      pop.classList.add('align-left');
+    }
+  }
+
+  function openConvPopover() {
+    const pop = $('conv-popover');
+    const trigger = $('conv-picker-trigger');
+    if (!pop || !trigger) return;
+    state.convPicker.open = true;
+    pop.classList.remove('hidden');
+    trigger.setAttribute('aria-expanded', 'true');
+    renderConvPopoverPills(true);
+    renderConvPopoverBody(true);
+    positionConvPopover();
+    const searchInput = $('conv-search-input');
+    if (searchInput) {
+      try { searchInput.focus({ preventScroll: true }); } catch {}
+    }
+  }
+
+  function closeConvPopover({ restoreFocus = false } = {}) {
+    const pop = $('conv-popover');
+    const trigger = $('conv-picker-trigger');
+    state.convPicker.open = false;
+    if (pop) pop.classList.add('hidden');
+    if (trigger) {
+      trigger.setAttribute('aria-expanded', 'false');
+      if (restoreFocus) {
+        try { trigger.focus({ preventScroll: true }); } catch {}
+      }
+    }
+  }
+
+  function syncConvTriggerAndSelect(list = [], activeId = '') {
     const sel = $('conv-select');
     const followBtn = $('btn-follow-current');
-    if (followBtn) followBtn.classList.toggle('hidden', !state.selectedConvId);
-    if (!sel) return;
-    const prevVal = state.selectedConvId;
-    const optionsHtml = [
-      `<option value="">${escZh('自动跟随当前对话')}</option>`
-    ];
-    for (const item of list) {
-      const tag = item.source === 'cli' ? '[CLI] ' : '';
-      const shortTitle = String(item.title || item.id.slice(0, 8)).slice(0, 22);
-      const tokBadge = item.lastContextTokens > 0 ? ` · ${fmtTokens(item.lastContextTokens, 0)}` : '';
-      const isCurrentAuto = !prevVal && item.id === activeId;
-      const suffix = isCurrentAuto ? '（当前）' : '';
-      optionsHtml.push(
-        `<option value="${esc(item.id)}">${escZh(`${tag}${shortTitle}${tokBadge}${suffix}`)}</option>`
-      );
+    const trigger = $('conv-picker-trigger');
+    const triggerLabel = $('conv-trigger-label');
+    const pinnedId = state.selectedConvId || '';
+
+    if (followBtn) followBtn.classList.toggle('hidden', !pinnedId);
+    if (trigger) trigger.classList.toggle('is-pinned', Boolean(pinnedId));
+
+    const effectiveActiveId = activeId || state.activeConvId || state.contextData?.conversationId || '';
+    const activeItem = effectiveActiveId ? list.find((c) => c.id === effectiveActiveId) : null;
+    const pinnedItem = pinnedId ? list.find((c) => c.id === pinnedId) : null;
+
+    let labelText = '自动跟随当前对话';
+    let titleText = '默认自动跟随当前活跃对话，点击可按项目分组筛选并切换会话';
+    if (pinnedId) {
+      const projName = pinnedItem
+        ? getItemProjectName(pinnedItem)
+        : (state.contextData?.conversationId === pinnedId && state.contextData?.repoInfo?.name
+          ? String(state.contextData.repoInfo.name).trim()
+          : '会话');
+      const fullTitle = pinnedItem?.title || pinnedItem?.annTitle
+        || (state.contextData?.conversationId === pinnedId ? state.contextData?.conversationTitle : '')
+        || pinnedId.slice(0, 8);
+      labelText = `[${projName}] ${truncateLabel(fullTitle, 20)}`;
+      titleText = `已固定查看：[${projName}] ${fullTitle}`;
+    } else {
+      const fullTitle = activeItem?.title || activeItem?.annTitle || state.contextData?.conversationTitle || '';
+      if (fullTitle) {
+        labelText = `自动跟随 · ${truncateLabel(fullTitle, 18)}`;
+        titleText = `自动跟随当前对话：${fullTitle}`;
+      }
     }
-    sel.innerHTML = optionsHtml.join('');
-    sel.value = prevVal || '';
+
+    const triggerSig = `${pinnedId}|${labelText}|${titleText}`;
+    if (triggerSig !== state.convPicker.lastTriggerSig) {
+      state.convPicker.lastTriggerSig = triggerSig;
+      if (triggerLabel) setText(triggerLabel, labelText);
+      if (trigger) trigger.setAttribute('title', formatZh(titleText));
+    }
+
+    if (!sel) return;
+    const selectSig = [
+      pinnedId,
+      effectiveActiveId,
+      ...list.map((c) => `${c.id}:${c.source || ''}:${c.title || ''}:${c.lastContextTokens || 0}`)
+    ].join('\u0001');
+    if (selectSig !== state.convPicker.lastSelectSig) {
+      state.convPicker.lastSelectSig = selectSig;
+      const optionsHtml = [`<option value="">${escZh('自动跟随当前对话')}</option>`];
+      let hasPinnedInList = !pinnedId;
+      for (const item of list) {
+        if (pinnedId && item.id === pinnedId) hasPinnedInList = true;
+        const tag = item.source === 'cli' ? '[CLI] ' : '';
+        const shortTitle = String(item.title || item.id.slice(0, 8)).slice(0, 22);
+        const tokBadge = item.lastContextTokens > 0 ? ` · ${fmtTokens(item.lastContextTokens, 0)}` : '';
+        const isCurrentAuto = !pinnedId && item.id === effectiveActiveId;
+        const suffix = isCurrentAuto ? '（当前）' : '';
+        optionsHtml.push(
+          `<option value="${esc(item.id)}">${escZh(`${tag}${shortTitle}${tokBadge}${suffix}`)}</option>`
+        );
+      }
+      if (pinnedId && !hasPinnedInList) {
+        optionsHtml.push(
+          `<option value="${esc(pinnedId)}">${escZh(`[已固定] ${pinnedId.slice(0, 8)}`)}</option>`
+        );
+      }
+      sel.innerHTML = optionsHtml.join('');
+    }
+    if (sel.value !== pinnedId) {
+      sel.value = pinnedId;
+    }
+  }
+
+  function renderConvPopoverPills(forceRender = false) {
+    const pillsEl = $('conv-project-pills');
+    if (!pillsEl) return;
+    const list = state.recentConversations || [];
+    const { groups, currentActiveProject } = buildGroupedConversations(list, state.activeConvId);
+
+    const curProjGroup = currentActiveProject
+      ? groups.find((g) => g.name === currentActiveProject)
+      : null;
+    const namedGroups = groups.filter((g) => g.name !== UNCATEGORIZED_PROJECT);
+
+    if (
+      state.convPicker.projectFilter.startsWith('proj:') &&
+      !namedGroups.some((g) => `proj:${g.name}` === state.convPicker.projectFilter)
+    ) {
+      state.convPicker.projectFilter = '__all__';
+    }
+
+    const pills = [
+      { key: '__all__', label: '全部', count: list.length }
+    ];
+    if (curProjGroup) {
+      pills.push({ key: '__current__', label: '当前项目', count: curProjGroup.items.length, title: currentActiveProject });
+    }
+    for (const g of namedGroups) {
+      pills.push({ key: `proj:${g.name}`, label: g.name, count: g.items.length, title: g.name });
+    }
+
+    const pillsSig = `${state.convPicker.projectFilter}|${pills.map((p) => `${p.key}:${p.count}`).join('\u0001')}`;
+    if (!forceRender && pillsSig === state.convPicker.lastPillsSig) return;
+    state.convPicker.lastPillsSig = pillsSig;
+
+    const prevScrollLeft = pillsEl.scrollLeft;
+    pillsEl.innerHTML = pills.map((p) => {
+      const active = state.convPicker.projectFilter === p.key;
+      const tipAttr = p.title ? ` title="${escZh(p.title)}"` : '';
+      return (
+        `<button type="button" role="tab" aria-selected="${active ? 'true' : 'false'}" ` +
+        `class="conv-proj-pill${active ? ' active' : ''}" data-proj-filter="${esc(p.key)}"${tipAttr}>` +
+        `<span class="conv-proj-pill-name">${escZh(p.label)}</span>` +
+        `<span class="conv-proj-pill-cnt">${esc(p.count)}</span>` +
+        `</button>`
+      );
+    }).join('');
+    pillsEl.scrollLeft = prevScrollLeft;
+  }
+
+  function renderConvPopoverBody(forceRender = false) {
+    const bodyEl = $('conv-pop-body');
+    if (!bodyEl) return;
+    const list = state.recentConversations || [];
+    const {
+      groups,
+      displayConvId,
+      currentActiveProject,
+      firstProject
+    } = buildGroupedConversations(list, state.activeConvId);
+
+    const q = state.convPicker.search.trim().toLowerCase();
+    const projFilter = state.convPicker.projectFilter;
+    const forceExpandAll = Boolean(q) || projFilter !== '__all__';
+    const prefs = loadProjectCollapsePrefs();
+    const nowMs = Date.now();
+    const minuteBucket = Math.floor(nowMs / 60_000);
+
+    const filteredGroups = [];
+    for (const g of groups) {
+      if (projFilter === '__current__' && g.name !== currentActiveProject) continue;
+      if (projFilter.startsWith('proj:') && g.name !== projFilter.slice(5)) continue;
+
+      const matchedItems = q
+        ? g.items.filter((item) => {
+            const title = String(item.title || '').toLowerCase();
+            const annTitle = String(item.annTitle || '').toLowerCase();
+            const shortId = String(item.shortId || item.id || '').toLowerCase();
+            const repoLabel = String(item.repoLabel || '').toLowerCase();
+            const proj = g.name.toLowerCase();
+            return (
+              title.includes(q) ||
+              annTitle.includes(q) ||
+              shortId.includes(q) ||
+              repoLabel.includes(q) ||
+              proj.includes(q)
+            );
+          })
+        : g.items;
+
+      if (matchedItems.length) {
+        const isExpanded = forceExpandAll
+          ? true
+          : (typeof prefs[g.name] === 'boolean'
+            ? !prefs[g.name]
+            : (g.name === currentActiveProject || g.name === firstProject));
+        filteredGroups.push({
+          ...g,
+          items: matchedItems,
+          expanded: isExpanded
+        });
+      }
+    }
+
+    const activePreviewId = state.activeConvId || state.contextData?.conversationId || '';
+    const activePreviewItem = activePreviewId ? list.find((c) => c.id === activePreviewId) : null;
+    const autoPreviewTitle = activePreviewItem?.title || activePreviewItem?.annTitle || state.contextData?.conversationTitle || '正在检测当前活跃对话…';
+    const autoPreviewSource = activePreviewItem?.source || '';
+
+    const bodySig = [
+      state.selectedConvId || '',
+      displayConvId,
+      q,
+      projFilter,
+      minuteBucket,
+      autoPreviewTitle,
+      autoPreviewSource,
+      ...filteredGroups.map((g) => (
+        `${g.name}:${g.expanded ? 1 : 0}:${g.hasActive ? 1 : 0}:` +
+        g.items.map((it) => `${it.id}:${it.title || ''}:${it.source || ''}:${it.isRunning ? 1 : 0}:${it.lastContextTokens || 0}:${it.turnsCount || 0}:${it.effectiveActiveMs || it.updatedAtMs || 0}`).join(',')
+      ))
+    ].join('\u0001');
+
+    if (!forceRender && bodySig === state.convPicker.lastBodySig) return;
+    state.convPicker.lastBodySig = bodySig;
+
+    const prevScrollTop = bodyEl.scrollTop;
+    const isAutoSelected = !state.selectedConvId;
+    const autoSourceTag = autoPreviewSource === 'cli'
+      ? `<span class="conv-src-tag cli">CLI</span>`
+      : (autoPreviewSource ? `<span class="conv-src-tag">${escZh('桌面端')}</span>` : '');
+    const autoCurBadge = isAutoSelected ? `<span class="conv-cur-badge">${escZh('当前')}</span>` : '';
+
+    const htmlParts = [
+      `<button type="button" class="conv-auto-row${isAutoSelected ? ' is-selected' : ''}" data-conv-auto="1">` +
+      `<div class="conv-auto-top"><span>${escZh('自动跟随当前对话')}</span>${autoCurBadge}</div>` +
+      `<div class="conv-auto-sub">${autoSourceTag}<span class="conv-auto-preview" title="${escZh(autoPreviewTitle)}">${escZh(autoPreviewTitle)}</span></div>` +
+      `</button>`
+    ];
+
+    if (!filteredGroups.length) {
+      htmlParts.push(`<div class="conv-pop-empty">${escZh('当前筛选条件下暂无匹配会话')}</div>`);
+    } else {
+      for (const g of filteredGroups) {
+        const activeDot = g.hasActive ? `<span class="conv-group-active-dot" title="${escZh('当前会话所在项目')}"></span>` : '';
+        const itemsHtml = g.expanded
+          ? g.items.map((item) => {
+              const title = item.title || item.annTitle || item.shortId || item.id.slice(0, 8);
+              const cliBadge = item.source === 'cli'
+                ? `<span class="conv-cli-badge" title="agy CLI 会话">CLI</span>`
+                : '';
+              const runningBadge = item.isRunning
+                ? `<span class="conv-running-pill" title="${escZh('正在运行中')}"><i class="conv-running-dot"></i>${escZh('运行中')}</span>`
+                : '';
+              const isCur = item.id === displayConvId;
+              const curBadge = isCur ? `<span class="conv-cur-badge">${escZh('当前')}</span>` : '';
+              const tokText = `${fmtTokens(item.lastContextTokens || 0, 1)} tok`;
+              const turnsText = `${fmtInt(item.turnsCount || 0)} 轮`;
+              const relText = fmtRelativeTime(item.effectiveActiveMs || item.updatedAtMs, nowMs);
+              const line2 = `${tokText} · ${turnsText} · ${relText}`;
+              const tipParts = [title, item.repoLabel || g.name, line2].filter(Boolean);
+              return (
+                `<button type="button" class="conv-item${isCur ? ' is-selected' : ''}" data-conv-id="${esc(item.id)}" title="${escZh(tipParts.join(' · '))}">` +
+                `<div class="conv-item-line1">${cliBadge}<span class="conv-item-title">${escZh(title)}</span>${runningBadge}${curBadge}</div>` +
+                `<div class="conv-item-line2">${escZh(line2)}</div>` +
+                `</button>`
+              );
+            }).join('')
+          : '';
+
+        htmlParts.push(
+          `<div class="conv-group">` +
+          `<button type="button" class="conv-group-head" data-proj-toggle="${esc(g.name)}" aria-expanded="${g.expanded ? 'true' : 'false'}">` +
+          `<span class="conv-group-chevron" aria-hidden="true">▸</span>` +
+          `<span class="conv-group-name" title="${escZh(g.name)}">${escZh(g.name)}</span>` +
+          activeDot +
+          `<span class="conv-group-count">${esc(g.items.length)}</span>` +
+          `</button>` +
+          (g.expanded ? `<div class="conv-group-items">${itemsHtml}</div>` : '') +
+          `</div>`
+        );
+      }
+    }
+
+    bodyEl.innerHTML = htmlParts.join('');
+    bodyEl.scrollTop = prevScrollTop;
+  }
+
+  function renderConversationPicker(list = [], activeId = '') {
+    if (Array.isArray(list)) {
+      state.recentConversations = list;
+    }
+    if (typeof activeId === 'string' && activeId) {
+      state.activeConvId = activeId;
+    }
+    const items = state.recentConversations || [];
+    syncConvTriggerAndSelect(items, state.activeConvId);
+    if (state.convPicker.open) {
+      renderConvPopoverPills(false);
+      renderConvPopoverBody(false);
+    }
+  }
+
+  async function applyPinnedConversation(nextConvId, { showFollowToast = false, closePopover = true } = {}) {
+    const normalized = typeof nextConvId === 'string' ? nextConvId.trim() : '';
+    state.userModifiedConvSelection = true;
+    state.pinSyncSeq += 1;
+    state.pinSyncPending += 1;
+    state.selectedConvId = normalized;
+    state.contextEtag = '';
+    state.contextEtagConv = normalized || state.hostConvId || '';
+    state.contextInFlight = false;
+    state.contextInFlightConv = '';
+
+    if (closePopover) closeConvPopover();
+    renderConversationPicker(state.recentConversations, state.activeConvId || normalized);
+    if (showFollowToast && !normalized) {
+      showToast('已切回自动跟随当前对话');
+    }
+
+    try {
+      await apiFetch('/api/entrypoints', {
+        method: 'POST',
+        body: { pinnedConvId: normalized }
+      }).catch(() => {});
+    } finally {
+      state.pinSyncPending = Math.max(0, state.pinSyncPending - 1);
+    }
+    loadContext(true).catch(() => {});
   }
 
   // -------------------------------------------------------------------------
@@ -3493,35 +3990,104 @@
       });
     });
 
-    // Conversation selector & follow-current button
+    // Conversation selector popover, hidden native select & follow-current button
+    $('conv-picker-trigger')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (state.convPicker.open) {
+        closeConvPopover();
+      } else {
+        openConvPopover();
+      }
+    });
+
+    const convSearchInput = $('conv-search-input');
+    const convSearchClear = $('conv-search-clear');
+    if (convSearchInput) {
+      let searchComposing = false;
+      const syncClearBtn = () => {
+        if (convSearchClear) {
+          convSearchClear.classList.toggle('hidden', !(convSearchInput.value || '').length);
+        }
+      };
+      convSearchInput.addEventListener('compositionstart', () => {
+        searchComposing = true;
+      });
+      convSearchInput.addEventListener('compositionend', () => {
+        searchComposing = false;
+        state.convPicker.search = convSearchInput.value || '';
+        syncClearBtn();
+        renderConvPopoverBody(true);
+      });
+      convSearchInput.addEventListener('input', () => {
+        syncClearBtn();
+        if (searchComposing) return;
+        state.convPicker.search = convSearchInput.value || '';
+        renderConvPopoverBody(true);
+      });
+      convSearchClear?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        convSearchInput.value = '';
+        state.convPicker.search = '';
+        syncClearBtn();
+        renderConvPopoverBody(true);
+        try { convSearchInput.focus({ preventScroll: true }); } catch {}
+      });
+    }
+
+    $('conv-project-pills')?.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-proj-filter]');
+      if (!btn) return;
+      const nextFilter = btn.dataset.projFilter || '__all__';
+      if (nextFilter === state.convPicker.projectFilter) return;
+      state.convPicker.projectFilter = nextFilter;
+      renderConvPopoverPills(true);
+      renderConvPopoverBody(true);
+    });
+
+    $('conv-pop-body')?.addEventListener('click', (e) => {
+      const autoRow = e.target.closest('[data-conv-auto]');
+      if (autoRow) {
+        applyPinnedConversation('', { showFollowToast: true, closePopover: true });
+        return;
+      }
+      const toggleBtn = e.target.closest('[data-proj-toggle]');
+      if (toggleBtn) {
+        const projName = toggleBtn.dataset.projToggle;
+        if (!projName) return;
+        const currentlyExpanded = toggleBtn.getAttribute('aria-expanded') === 'true';
+        const prefs = { ...loadProjectCollapsePrefs(), [projName]: currentlyExpanded };
+        saveProjectCollapsePrefs(prefs);
+        renderConvPopoverBody(true);
+        return;
+      }
+      const itemBtn = e.target.closest('[data-conv-id]');
+      if (itemBtn) {
+        const convId = itemBtn.dataset.convId || '';
+        if (convId) {
+          applyPinnedConversation(convId, { closePopover: true });
+        }
+      }
+    });
+
+    document.addEventListener('pointerdown', (e) => {
+      if (!state.convPicker.open) return;
+      const dropdown = $('conv-dropdown');
+      if (dropdown && !dropdown.contains(e.target)) {
+        closeConvPopover();
+      }
+    });
+
+    window.addEventListener('resize', () => {
+      if (state.convPicker.open) positionConvPopover();
+    });
+
     $('conv-select')?.addEventListener('change', (e) => {
-      state.selectedConvId = e.target.value || '';
-      state.contextEtag = '';
-      state.contextEtagConv = state.selectedConvId || state.hostConvId || '';
-      state.contextInFlight = false;
-      state.contextInFlightConv = '';
-      $('btn-follow-current')?.classList.toggle('hidden', !state.selectedConvId);
-      apiFetch('/api/entrypoints', {
-        method: 'POST',
-        body: { pinnedConvId: state.selectedConvId }
-      }).catch(() => {});
-      loadContext(true).catch(() => {});
+      const val = e.target.value || '';
+      applyPinnedConversation(val, { showFollowToast: !val, closePopover: true });
     });
 
     $('btn-follow-current')?.addEventListener('click', () => {
-      state.selectedConvId = '';
-      if ($('conv-select')) $('conv-select').value = '';
-      $('btn-follow-current')?.classList.add('hidden');
-      state.contextEtag = '';
-      state.contextEtagConv = state.hostConvId || '';
-      state.contextInFlight = false;
-      state.contextInFlightConv = '';
-      apiFetch('/api/entrypoints', {
-        method: 'POST',
-        body: { pinnedConvId: '' }
-      }).catch(() => {});
-      loadContext(true).catch(() => {});
-      showToast('已切回自动跟随当前对话');
+      applyPinnedConversation('', { showFollowToast: true, closePopover: true });
     });
 
     // When user clicks inside an Aux Pane bound to a specific host conversation, notify Menu Bar
@@ -3817,6 +4383,12 @@
       }
 
       if (ev.repeat) return;
+      if (ev.key === 'Escape' && !ev.metaKey && !ev.ctrlKey && !ev.altKey && state.convPicker.open) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        closeConvPopover({ restoreFocus: true });
+        return;
+      }
       if (state.shortcut?.enabled && state.shortcut?.accelerator && eventMatchesAccelerator(ev, state.shortcut.accelerator)) {
         ev.preventDefault();
         ev.stopPropagation();

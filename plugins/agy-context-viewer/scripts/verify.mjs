@@ -4125,6 +4125,43 @@ async function main() {
         `F3 浏览器降级小窗点击关闭按钮未同时通知后端与关闭窗口：closed=${fallbackCloseTriggered}, winClose=${windowCloseCount}`
       );
 
+      // Verify fallback server /api/entrypoints pinnedConvId -> /api/context & unchanged:true preserves pinnedConvId
+      const rPinSet = await rawHttpRequest({
+        port: fbPort,
+        method: 'POST',
+        path: '/api/entrypoints',
+        headers: {
+          Origin: `http://127.0.0.1:${fbPort}`,
+          'Content-Type': 'application/json',
+          'X-CV-Token': fbToken
+        },
+        body: JSON.stringify({ pinnedConvId: convId })
+      });
+      assert(rPinSet.status === 200, `降级服务 POST /api/entrypoints 固定会话失败：${rPinSet.status}`);
+      const rCtxFull = JSON.parse((await rawHttpRequest({ port: fbPort, path: `/api/context?conversationId=${convId}` })).body);
+      assert(
+        rCtxFull.ok && rCtxFull.pinnedConvId === convId && rCtxFull.etag,
+        `降级服务完整 /api/context 未透传 pinnedConvId：${JSON.stringify({ ok: rCtxFull.ok, pinnedConvId: rCtxFull.pinnedConvId })}`
+      );
+      const rCtxUnchanged = JSON.parse(
+        (await rawHttpRequest({ port: fbPort, path: `/api/context?conversationId=${convId}&etag=${encodeURIComponent(rCtxFull.etag)}` })).body
+      );
+      assert(
+        rCtxUnchanged.unchanged === true && rCtxUnchanged.pinnedConvId === convId,
+        `降级服务 unchanged:true 响应未透传 pinnedConvId：${JSON.stringify(rCtxUnchanged)}`
+      );
+      await rawHttpRequest({
+        port: fbPort,
+        method: 'POST',
+        path: '/api/entrypoints',
+        headers: {
+          Origin: `http://127.0.0.1:${fbPort}`,
+          'Content-Type': 'application/json',
+          'X-CV-Token': fbToken
+        },
+        body: JSON.stringify({ pinnedConvId: '' })
+      });
+
       fallbackCloseTriggered = false;
       const rUnauthClose = await rawHttpRequest({
         port: fbPort,
@@ -5286,6 +5323,7 @@ async function main() {
     await verifyStatuslineFastPath();
     await verifyPowertoolsP1P2Features(cvHtmlSource, cvAppSource);
     await verifyCacheStatsAndCustomRange(cvHtmlSource, cvAppSource);
+    await verifyCliFollowAndProjectGrouping(cvHtmlSource, cvAppSource);
 
     // macOS Swift native host typecheck
     if (process.platform === 'darwin' && existsSync('/usr/bin/swiftc')) {
@@ -9061,6 +9099,715 @@ async function verifyCacheStatsAndCustomRange(cvHtmlSource, cvAppSource) {
         cliStatusOut.includes('模型缓存') &&
         cliStatusOut.includes('Gemini 4 Neon 95%'),
       `CLI status 未输出会话均值或模型缓存：${cliStatusOut}`
+    );
+  } finally {
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+}
+
+async function verifyCliFollowAndProjectGrouping(cvHtmlSource, cvAppSource) {
+  console.log('[verify] 8/8 CLI 自动跟随灵敏度、项目分组筛选与 pinnedConvId 同步回归测试...');
+
+  // 8.1: Float HTML bundle integrity & DOM hooks check
+  const cvCssSource = readFileSync(join(ROOT, 'sidecars', 'dashboard', 'styles.css'), 'utf-8');
+  assert(
+    cvHtmlSource.includes('id="conv-picker-trigger"') &&
+      cvHtmlSource.includes('id="conv-popover"') &&
+      cvHtmlSource.includes('id="conv-search-input"') &&
+      cvHtmlSource.includes('id="conv-project-pills"') &&
+      cvHtmlSource.includes('id="conv-pop-body"') &&
+      cvHtmlSource.includes('id="btn-follow-current"'),
+    'index.html 缺少项目分组会话选择器关键 DOM ID'
+  );
+  const floatBundledHtml = cvHtmlSource
+    .replace(/<script\s+src="\/preload\.js"><\/script>/i, '')
+    .replace(/<link\s+rel="stylesheet"\s+href="\/styles\.css[^"]*">/i, () => `<style id="cv-inline-styles">\n${cvCssSource.replace(/<\/style/gi, '<\\/style')}\n</style>`)
+    .replace(/<script\s+src="\/app\.js[^"]*"><\/script>/i, () => `<script>window.__CV_FLOAT_MODE__ = true;</script>\n<script>\n${cvAppSource.replace(/<\/script/gi, '<\\/script')}\n</script>`);
+  assert(
+    !/<script\s+src="\/preload\.js"><\/script>/i.test(floatBundledHtml) &&
+      !/<link\s+rel="stylesheet"\s+href="\/styles\.css/i.test(floatBundledHtml) &&
+      !/<script\s+src="\/app\.js/i.test(floatBundledHtml) &&
+      floatBundledHtml.includes('<style id="cv-inline-styles">') &&
+      floatBundledHtml.indexOf('window.__CV_FLOAT_MODE__ = true;') < floatBundledHtml.indexOf('renderConversationPicker'),
+    'float_window.mjs 打包 index.html/styles.css/app.js 正则替换或注入顺序异常'
+  );
+
+  // 8.2: Isolated backend tests for CLI auto-follow, swarm keepalive, anti-pollution, history.jsonl, pinned cleanup, project metadata & ~ filtering
+  const tmpRoot = mkdtempSync(join(tmpdir(), 'ag-cv-cli-proj-'));
+  const agDir = join(tmpRoot, 'ag');
+  const cliDir = join(tmpRoot, 'cli');
+  const ideDir = join(tmpRoot, 'ide');
+  const stateDir = join(tmpRoot, 'state');
+  const repoAlphaDir = join(tmpRoot, 'repo-alpha');
+  const repoBetaDir = join(tmpRoot, 'repo-beta');
+  for (const d of [agDir, cliDir, ideDir, stateDir, join(repoAlphaDir, '.git'), repoBetaDir]) {
+    mkdirSync(d, { recursive: true });
+  }
+  writeFileSync(join(repoAlphaDir, '.git', 'HEAD'), 'ref: refs/heads/feat/group\n', 'utf-8');
+
+  const savedEnv = {
+    AG_DIR: process.env.AG_DIR,
+    AG_CLI_DIR: process.env.AG_CLI_DIR,
+    AG_IDE_DIR: process.env.AG_IDE_DIR,
+    ANTIGRAVITY_APP_DATA_DIR: process.env.ANTIGRAVITY_APP_DATA_DIR,
+    ANTIGRAVITY_CLI_DATA_DIR: process.env.ANTIGRAVITY_CLI_DATA_DIR,
+    ANTIGRAVITY_IDE_DATA_DIR: process.env.ANTIGRAVITY_IDE_DATA_DIR,
+    ANTIGRAVITY_EXECUTABLE_DATA_DIR: process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR,
+    ANTIGRAVITY_LS_ADDRESS: process.env.ANTIGRAVITY_LS_ADDRESS,
+    ANTIGRAVITY_CSRF_TOKEN: process.env.ANTIGRAVITY_CSRF_TOKEN
+  };
+
+  const mkUuid = (n) => ['cc000000', '0000', '4000', '8000', String(n).padStart(12, '0')].join('-');
+  const writeTranscript = (rootDir, convId, steps, mtimeMs) => {
+    const logDir = join(rootDir, 'brain', convId, '.system_generated', 'logs');
+    mkdirSync(logDir, { recursive: true });
+    const logPath = join(logDir, 'transcript.jsonl');
+    writeFileSync(logPath, steps.map((s) => JSON.stringify(s)).join('\n') + '\n', 'utf-8');
+    if (mtimeMs) {
+      const sec = mtimeMs / 1000;
+      utimesSync(logPath, sec, sec);
+    }
+    return logPath;
+  };
+
+  try {
+    process.env.AG_DIR = agDir;
+    process.env.AG_CLI_DIR = cliDir;
+    process.env.AG_IDE_DIR = ideDir;
+    process.env.ANTIGRAVITY_APP_DATA_DIR = agDir;
+    process.env.ANTIGRAVITY_CLI_DATA_DIR = cliDir;
+    process.env.ANTIGRAVITY_IDE_DATA_DIR = ideDir;
+    process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR = stateDir;
+    delete process.env.ANTIGRAVITY_LS_ADDRESS;
+    delete process.env.ANTIGRAVITY_CSRF_TOKEN;
+
+    const collectorMod = await import(
+      `${pathToFileURL(join(ROOT, 'sidecars', 'dashboard', 'collector.mjs')).href}?cv_cli_proj=${Date.now()}`
+    );
+    const {
+      listRecentConversations,
+      readActiveSessionHint,
+      scanConversation,
+      updateActiveSessionHint
+    } = collectorMod;
+
+    const nowMs = Date.now();
+    // 28 newer desktop conversations (should not squeeze out older CLI sessions due to per-source floor)
+    const desktopMainId = mkUuid(1);
+    for (let i = 1; i <= 28; i++) {
+      const did = mkUuid(i);
+      const tMs = nowMs - (600_000 + i * 2000);
+      writeTranscript(agDir, did, [
+        { step_index: 0, type: 'USER_INPUT', created_at: new Date(tMs).toISOString(), content: `Desktop task ${i}` },
+        { step_index: 1, type: 'PLANNER_RESPONSE', created_at: new Date(tMs + 500).toISOString(), model: 'Gemini 4 Carbon', input_tokens: 100, output_tokens: 20 }
+      ], tMs);
+    }
+
+    // Old CLI session with stale swarm `phase: 'RUNNING'` and recent trailing `SYSTEM_MESSAGE` / `CHECKPOINT` noise
+    const cliOldStaleId = mkUuid(101);
+    const cliOldChildId = mkUuid(102);
+    const staleTurnMs = nowMs - 15 * 60_000;
+    writeTranscript(cliDir, cliOldStaleId, [
+      { step_index: 0, type: 'USER_INPUT', created_at: new Date(staleTurnMs).toISOString(), content: 'Old CLI stale swarm' },
+      { step_index: 1, type: 'PLANNER_RESPONSE', created_at: new Date(staleTurnMs + 1000).toISOString(), model: 'Gemini 4 Neon', input_tokens: 500, output_tokens: 50 },
+      { step_index: 2, type: 'SYSTEM_MESSAGE', created_at: new Date(nowMs - 2000).toISOString(), content: 'Background timer ping' },
+      { step_index: 3, type: 'CHECKPOINT', created_at: new Date(nowMs - 1000).toISOString(), content: 'checkpoint' }
+    ], nowMs - 1000);
+    writeTranscript(cliDir, cliOldChildId, [
+      { step_index: 0, type: 'SYSTEM_MESSAGE', created_at: new Date(staleTurnMs).toISOString(), content: 'Worker boot' },
+      { step_index: 1, type: 'PLANNER_RESPONSE', created_at: new Date(staleTurnMs + 2000).toISOString(), model: 'Gemini 4 Neon', input_tokens: 200, output_tokens: 20 },
+      { step_index: 2, type: 'SYSTEM_MESSAGE', created_at: new Date(nowMs - 1500).toISOString(), content: 'Stale child ping' }
+    ], nowMs - 1500);
+    mkdirSync(join(cliDir, 'brain', cliOldStaleId, '.system_generated', 'swarm'), { recursive: true });
+    writeFileSync(
+      join(cliDir, 'brain', cliOldStaleId, '.system_generated', 'swarm', 'members.json'),
+      JSON.stringify({ members: [{ conversation_id: cliOldChildId, phase: 'RUNNING' }] }),
+      'utf-8'
+    );
+
+    // Active parent CLI session: parent USER_INPUT was 4m ago (outside 3m window), kept alive by active non-killed swarm child
+    const cliActiveParentId = mkUuid(103);
+    const cliActiveChildId = mkUuid(104);
+    const parentTurnMs = nowMs - 4 * 60_000;
+    const childProgressMs = nowMs - 15_000;
+    writeTranscript(cliDir, cliActiveParentId, [
+      { step_index: 0, type: 'USER_INPUT', created_at: new Date(parentTurnMs).toISOString(), content: 'Active swarm parent' },
+      { step_index: 1, type: 'PLANNER_RESPONSE', created_at: new Date(parentTurnMs + 1000).toISOString(), model: 'Gemini 4 Neon', input_tokens: 800, output_tokens: 80 },
+      { step_index: 2, type: 'SYSTEM_MESSAGE', created_at: new Date(nowMs - 5000).toISOString(), content: 'swarm_wait' }
+    ], nowMs - 5000);
+    writeTranscript(cliDir, cliActiveChildId, [
+      { step_index: 0, type: 'SYSTEM_MESSAGE', created_at: new Date(parentTurnMs + 2000).toISOString(), content: 'Child start' },
+      { step_index: 1, type: 'PLANNER_RESPONSE', created_at: new Date(childProgressMs).toISOString(), model: 'Gemini 4 Carbon', input_tokens: 400, output_tokens: 40 }
+    ], childProgressMs);
+    mkdirSync(join(cliDir, 'brain', cliActiveParentId, '.system_generated', 'swarm'), { recursive: true });
+    writeFileSync(
+      join(cliDir, 'brain', cliActiveParentId, '.system_generated', 'swarm', 'members.json'),
+      JSON.stringify({ members: [{ conversation_id: cliActiveChildId, phase: 'WORKING' }] }),
+      'utf-8'
+    );
+
+    // CLI session with tilde workspace in last_conversations.json (must filter '~' to null) + valid repoBeta
+    const cliTildeId = mkUuid(105);
+    const cliBetaId = mkUuid(106);
+    writeTranscript(cliDir, cliTildeId, [
+      { step_index: 0, type: 'USER_INPUT', created_at: new Date(nowMs - 900_000).toISOString(), content: 'Tilde home CLI' }
+    ], nowMs - 900_000);
+    writeTranscript(cliDir, cliBetaId, [
+      { step_index: 0, type: 'USER_INPUT', created_at: new Date(nowMs - 850_000).toISOString(), content: 'Beta CLI' }
+    ], nowMs - 850_000);
+    mkdirSync(join(cliDir, 'cache'), { recursive: true });
+    writeFileSync(
+      join(cliDir, 'cache', 'last_conversations.json'),
+      JSON.stringify({
+        workspaces: {
+          '~': cliTildeId,
+          [repoBetaDir]: cliBetaId
+        }
+      }),
+      'utf-8'
+    );
+
+    // Check per-source floor (limit=24 still retains CLI entries) + swarm keepalive vs stale RUNNING/SYSTEM_MESSAGE
+    const recent24 = listRecentConversations(24, nowMs);
+    assert(
+      recent24.some((c) => c.source === 'desktop') && recent24.some((c) => c.source === 'cli'),
+      `listRecentConversations(24) 分源保底失败（28 条 Desktop 不得挤掉 CLI）：sources=${[...new Set(recent24.map((c) => c.source))].join(',')}`
+    );
+
+    const snapParent = await scanConversation('', { force: true, nowMs });
+    const oldItem = snapParent.recentConversations?.find((c) => c.id === cliOldStaleId);
+    const parentItem = snapParent.recentConversations?.find((c) => c.id === cliActiveParentId);
+    const tildeItem = snapParent.recentConversations?.find((c) => c.id === cliTildeId);
+    const betaItem = snapParent.recentConversations?.find((c) => c.id === cliBetaId);
+    assert(
+      snapParent.conversationId === cliActiveParentId &&
+        oldItem?.isRunning === false &&
+        parentItem?.isRunning === true,
+      `Swarm 保活与抗旧 RUNNING/SYSTEM_MESSAGE 污染异常：chosen=${snapParent.conversationId}, oldRun=${oldItem?.isRunning}, parentRun=${parentItem?.isRunning}`
+    );
+    assert(
+      tildeItem?.projectName === null &&
+        tildeItem?.repoLabel === null &&
+        betaItem?.projectName === 'repo-beta',
+      `recentConversations 项目元数据回填或 ~ 过滤异常：tilde=${JSON.stringify(tildeItem)}, beta=${JSON.stringify(betaItem)}`
+    );
+
+    // Append a new CLI session to history.jsonl -> immediate auto-follow switch + git branch repoLabel
+    const cliNewId = mkUuid(107);
+    const histTsMs = nowMs + 2000;
+    writeTranscript(cliDir, cliNewId, [
+      { step_index: 0, type: 'USER_INPUT', created_at: new Date(histTsMs - 500).toISOString(), content: 'New CLI alpha session' },
+      { step_index: 1, type: 'PLANNER_RESPONSE', created_at: new Date(histTsMs).toISOString(), model: 'Gemini 4 Neon', input_tokens: 600, output_tokens: 60 }
+    ], histTsMs);
+    writeFileSync(
+      join(cliDir, 'history.jsonl'),
+      `${JSON.stringify({ conversationId: cliNewId, timestamp: histTsMs, workspace: repoAlphaDir })}\n`,
+      'utf-8'
+    );
+    const snapNewCli = await scanConversation('', { force: true, nowMs: histTsMs + 500 });
+    const alphaItem = snapNewCli.recentConversations?.find((c) => c.id === cliNewId);
+    assert(
+      snapNewCli.conversationId === cliNewId &&
+        alphaItem?.projectName === 'repo-alpha' &&
+        alphaItem?.repoLabel === 'repo-alpha@feat/group',
+      `CLI history.jsonl 切主或 Git 分支标签回填异常：chosen=${snapNewCli.conversationId}, alpha=${JSON.stringify(alphaItem)}`
+    );
+
+    // Desktop Aux Pane explicit conversationId must never regress under active CLI sessions
+    const snapDesktopAux = await scanConversation(desktopMainId, { force: true, nowMs: histTsMs + 500 });
+    assert(
+      snapDesktopAux.conversationId === desktopMainId,
+      `Desktop Aux Pane 显式 conversationId 发生退化：${snapDesktopAux.conversationId}`
+    );
+
+    // Invalid / deleted pinnedConvId must auto-clear and fall back cleanly
+    const deletedPinnedId = mkUuid(999);
+    updateActiveSessionHint({ pinnedConvId: deletedPinnedId });
+    const snapPinnedCleared = await scanConversation('', { force: true, nowMs: histTsMs + 600 });
+    assert(
+      snapPinnedCleared.pinnedConvId === null &&
+        snapPinnedCleared.conversationId === cliNewId &&
+        readActiveSessionHint().pinnedConvId === '',
+      `失效 pinnedConvId 未自动清理或回退异常：snapPinned=${snapPinnedCleared.pinnedConvId}, hint=${readActiveSessionHint().pinnedConvId}`
+    );
+
+    // Monitor member in sleeping Swarm must NOT keep old parent alive or hijack a quiet-reading newer session (> 3m old)
+    const monitorTestNowMs = histTsMs + 10 * 60_000;
+    const cliQuietReadingId = mkUuid(109);
+    const cliOldMonitorParentId = mkUuid(110);
+    const cliMonitorWorkerId = mkUuid(111);
+    const cliMonitorNumberedId = mkUuid(112);
+    const quietTurnMs = monitorTestNowMs - 4 * 60_000; // 4m ago (> 3m ACTIVE_WORK_WINDOW_MS)
+    const oldSwarmTurnMs = monitorTestNowMs - 20 * 60_000; // 20m ago
+    const monitorWakeMs = monitorTestNowMs - 20_000; // 20s ago
+    writeTranscript(cliDir, cliQuietReadingId, [
+      { step_index: 0, type: 'USER_INPUT', created_at: new Date(quietTurnMs).toISOString(), content: 'Quiet reading session' },
+      { step_index: 1, type: 'PLANNER_RESPONSE', created_at: new Date(quietTurnMs + 10_000).toISOString(), model: 'Gemini 4 Neon', input_tokens: 700, output_tokens: 70 }
+    ], quietTurnMs + 10_000);
+    writeTranscript(cliDir, cliOldMonitorParentId, [
+      { step_index: 0, type: 'USER_INPUT', created_at: new Date(oldSwarmTurnMs).toISOString(), content: 'Old sleeping swarm parent' },
+      { step_index: 1, type: 'PLANNER_RESPONSE', created_at: new Date(oldSwarmTurnMs + 5000).toISOString(), model: 'Gemini 4 Neon', input_tokens: 500, output_tokens: 50 }
+    ], oldSwarmTurnMs + 5000);
+    writeTranscript(cliDir, cliMonitorWorkerId, [
+      { step_index: 0, type: 'SYSTEM_MESSAGE', created_at: new Date(oldSwarmTurnMs + 6000).toISOString(), content: 'Monitor start' },
+      { step_index: 1, type: 'PLANNER_RESPONSE', created_at: new Date(monitorWakeMs).toISOString(), model: 'Gemini 4 Carbon', input_tokens: 150, output_tokens: 15 }
+    ], monitorWakeMs);
+    writeTranscript(cliDir, cliMonitorNumberedId, [
+      { step_index: 0, type: 'SYSTEM_MESSAGE', created_at: new Date(oldSwarmTurnMs + 6000).toISOString(), content: 'Monitor-1 start' },
+      { step_index: 1, type: 'PLANNER_RESPONSE', created_at: new Date(monitorWakeMs).toISOString(), model: 'Gemini 4 Carbon', input_tokens: 150, output_tokens: 15 }
+    ], monitorWakeMs);
+    mkdirSync(join(cliDir, 'brain', cliOldMonitorParentId, '.system_generated', 'swarm'), { recursive: true });
+    writeFileSync(
+      join(cliDir, 'brain', cliOldMonitorParentId, '.system_generated', 'swarm', 'members.json'),
+      JSON.stringify({
+        members: {
+          monitor: { conversation_id: cliMonitorWorkerId, phase: 'WORKING' },
+          'Monitor-1': { conversation_id: cliMonitorNumberedId, role: 'monitor-1', phase: 'RUNNING' }
+        }
+      }),
+      'utf-8'
+    );
+    const snapMonitorIsolation = await scanConversation('', { force: true, nowMs: monitorTestNowMs });
+    const oldMonitorParentItem = snapMonitorIsolation.recentConversations?.find((c) => c.id === cliOldMonitorParentId);
+    assert(
+      snapMonitorIsolation.conversationId === cliQuietReadingId &&
+        oldMonitorParentItem?.isRunning === false,
+      `旧 Swarm 的 monitor 巡检成员不应伪保活或抢占静默阅读中的新会话：chosen=${snapMonitorIsolation.conversationId}, expected=${cliQuietReadingId}, oldMonitorRun=${oldMonitorParentItem?.isRunning}`
+    );
+
+    // cli.mjs statusline: silent redraw on old conv must NOT write cliActiveConvId, while real progression DOES
+    const cliEntry = join(ROOT, 'sidecars', 'dashboard', 'cli.mjs');
+    const slEnv = { ...process.env, NO_COLOR: '1' };
+    updateActiveSessionHint({ cliActiveConvId: '', cliActiveAt: 0 });
+    // Cold statusline on old conv (mtime > 30s ago) -> no progression -> must not hijack cliActiveConvId
+    execFileSync(process.execPath, [cliEntry, 'statusline', '--format', 'plain'], {
+      input: JSON.stringify({ session_id: cliOldStaleId, conversation_id: cliOldStaleId }),
+      env: slEnv,
+      encoding: 'utf-8',
+      timeout: 10000
+    });
+    assert(
+      readActiveSessionHint().cliActiveConvId === '',
+      `旧会话静默 statusline 重绘不应写入 cliActiveConvId：${readActiveSessionHint().cliActiveConvId}`
+    );
+    // Real progression on cliNewId (first cold read within 30s or file growth) -> writes cliActiveConvId
+    const freshProgId = mkUuid(108);
+    const freshNow = Date.now();
+    const freshLogPath = writeTranscript(cliDir, freshProgId, [
+      { step_index: 0, type: 'USER_INPUT', created_at: new Date(freshNow).toISOString(), content: 'Progressed CLI' }
+    ], freshNow);
+    execFileSync(process.execPath, [cliEntry, 'statusline', '--format', 'plain'], {
+      input: JSON.stringify({ session_id: freshProgId, conversation_id: freshProgId }),
+      env: slEnv,
+      encoding: 'utf-8',
+      timeout: 10000
+    });
+    // Append a new real turn so file size grows beyond cached statusline snap
+    writeFileSync(
+      freshLogPath,
+      [
+        JSON.stringify({ step_index: 0, type: 'USER_INPUT', created_at: new Date(freshNow).toISOString(), content: 'Progressed CLI' }),
+        JSON.stringify({ step_index: 1, type: 'PLANNER_RESPONSE', created_at: new Date(freshNow + 500).toISOString(), model: 'Gemini 4 Neon', input_tokens: 300, output_tokens: 30 })
+      ].join('\n') + '\n',
+      'utf-8'
+    );
+    execFileSync(process.execPath, [cliEntry, 'statusline', '--format', 'plain'], {
+      input: JSON.stringify({ session_id: freshProgId, conversation_id: freshProgId }),
+      env: slEnv,
+      encoding: 'utf-8',
+      timeout: 10000
+    });
+    assert(
+      readActiveSessionHint().cliActiveConvId === freshProgId,
+      `真实步进后 statusline 未写入 cliActiveConvId：${readActiveSessionHint().cliActiveConvId}`
+    );
+
+    // 8.3: Frontend VM tests for project grouping, uncategorized bottom, filter pills not breaking auto-follow, search expand, collapse persistence & pinnedConvId sync
+    const runFrontendPickerScenario = async ({
+      hostConvId = '',
+      initialSettingsPinned = '',
+      initialContextPinned = '',
+      initialContextConv = ''
+    }) => {
+      const els = new Map();
+      const makeEl = (id = '', initClasses = []) => {
+        const classes = new Set(initClasses);
+        const attrs = new Map();
+        const listeners = new Map();
+        return {
+          id,
+          value: '',
+          textContent: '',
+          innerHTML: '',
+          scrollTop: 0,
+          scrollLeft: 0,
+          focused: false,
+          dataset: {},
+          style: {},
+          className: initClasses.join(' '),
+          classList: {
+            add: (...names) => names.forEach((n) => classes.add(n)),
+            remove: (...names) => names.forEach((n) => classes.delete(n)),
+            toggle: (n, force) => {
+              const on = force === undefined ? !classes.has(n) : Boolean(force);
+              if (on) classes.add(n);
+              else classes.delete(n);
+              return on;
+            },
+            contains: (n) => classes.has(n)
+          },
+          addEventListener: (type, fn) => {
+            if (!listeners.has(type)) listeners.set(type, []);
+            listeners.get(type).push(fn);
+          },
+          dispatch: (type, ev = {}) => {
+            for (const fn of listeners.get(type) || []) {
+              fn({ target: ev.target || {}, stopPropagation: () => {}, preventDefault: () => {}, ...ev });
+            }
+          },
+          focus: function () { this.focused = true; },
+          getBoundingClientRect: () => ({ left: 120, right: 340, top: 40, bottom: 68 }),
+          contains: () => false,
+          setAttribute: (k, v) => attrs.set(k, String(v)),
+          getAttribute: (k) => (attrs.has(k) ? attrs.get(k) : null),
+          hasAttribute: (k) => attrs.has(k),
+          removeAttribute: (k) => attrs.delete(k),
+          querySelector: () => null,
+          querySelectorAll: () => [],
+          remove: () => {}
+        };
+      };
+      const getEl = (id) => {
+        if (!els.has(id)) els.set(id, makeEl(id));
+        return els.get(id);
+      };
+      els.set('conv-popover', makeEl('conv-popover', ['conv-popover', 'hidden']));
+      els.set('btn-follow-current', makeEl('btn-follow-current', ['ghost-btn', 'xs', 'hidden']));
+
+      const localMap = new Map();
+      const intervalCbs = [];
+      const postedEntrypoints = [];
+      const contextQueries = [];
+      let backendPinned = initialContextPinned;
+      let contextReturnUnchanged = false;
+      const convHot = mkUuid(201);
+      const convOld = mkUuid(202);
+      const convUncat = mkUuid(203);
+      const recentList = [
+        {
+          id: convUncat,
+          shortId: convUncat.slice(0, 8),
+          source: 'desktop',
+          title: 'Uncat newest',
+          projectName: null,
+          repoLabel: null,
+          isRunning: false,
+          lastContextTokens: 1200,
+          turnsCount: 2,
+          effectiveActiveMs: nowMs - 5_000,
+          updatedAtMs: nowMs - 5_000
+        },
+        {
+          id: convHot,
+          shortId: convHot.slice(0, 8),
+          source: 'cli',
+          title: 'Hot CLI task',
+          projectName: 'proj-hot',
+          repoLabel: 'proj-hot@main',
+          isRunning: true,
+          lastContextTokens: 8400,
+          turnsCount: 6,
+          effectiveActiveMs: nowMs - 10_000,
+          updatedAtMs: nowMs - 10_000
+        },
+        {
+          id: convOld,
+          shortId: convOld.slice(0, 8),
+          source: 'desktop',
+          title: 'Old Alpha task',
+          projectName: 'proj-old',
+          repoLabel: 'proj-old@dev',
+          isRunning: false,
+          lastContextTokens: 3200,
+          turnsCount: 3,
+          effectiveActiveMs: nowMs - 3_600_000,
+          updatedAtMs: nowMs - 3_600_000
+        }
+      ];
+      const mkVmSnap = (cid) => {
+        const it = recentList.find((x) => x.id === cid) || recentList[1];
+        return {
+          ok: true,
+          etag: `etag-${it.id}`,
+          conversationId: it.id,
+          conversationTitle: it.title,
+          conversationSource: it.source,
+          pinnedConvId: backendPinned || null,
+          repoInfo: it.projectName ? { name: it.projectName, label: it.repoLabel } : null,
+          recentConversations: recentList,
+          window: { used: 1000, budget: 10000, remaining: 9000, pct: 10, serverBudget: 10000, serverPct: 10 },
+          context: { usedTokens: 1000, budgetTokens: 10000, inputTokens: 400, cacheTokens: 600, outputTokens: 100, error: { kind: 'none' }, breakdown: { groups: [] } },
+          speed: null,
+          audit: { groups: {} },
+          quotas: [],
+          quotaStatus: { state: 'unavailable' },
+          turns: []
+        };
+      };
+
+      const rootAttrs = new Map();
+      const rootStyles = new Map();
+      const sandbox = {
+        console, Date, Math, JSON, URL, URLSearchParams, Set, Map, Array, Object, String, Number, Boolean, Promise, Error,
+        NodeFilter: { SHOW_TEXT: 4 },
+        MutationObserver: class { observe() {} disconnect() {} },
+        ResizeObserver: class { observe() {} disconnect() {} },
+        IntersectionObserver: class { observe() {} disconnect() {} },
+        getComputedStyle: () => ({ color: 'rgb(255, 255, 255)', getPropertyValue: () => '' }),
+        setTimeout, clearTimeout, clearInterval,
+        setInterval: (fn, ms) => { intervalCbs.push({ fn, ms }); return intervalCbs.length; },
+        requestAnimationFrame: (fn) => { fn(); return 1; },
+        localStorage: {
+          getItem: (k) => (localMap.has(k) ? localMap.get(k) : null),
+          setItem: (k, v) => localMap.set(k, String(v))
+        },
+        sessionStorage: { getItem: () => null, setItem: () => {} },
+        navigator: { platform: 'MacIntel', userAgent: 'Mozilla/5.0' },
+        document: {
+          readyState: 'complete',
+          hidden: false,
+          visibilityState: 'visible',
+          documentElement: {
+            clientWidth: 380,
+            clientHeight: 720,
+            dataset: {},
+            appendChild: () => {},
+            style: {
+              getPropertyValue: (k) => rootStyles.get(k) || '',
+              setProperty: (k, v) => rootStyles.set(k, String(v)),
+              removeProperty: (k) => rootStyles.delete(k)
+            },
+            getAttribute: (k) => (rootAttrs.has(k) ? rootAttrs.get(k) : null),
+            setAttribute: (k, v) => rootAttrs.set(k, String(v)),
+            hasAttribute: (k) => rootAttrs.has(k),
+            removeAttribute: (k) => rootAttrs.delete(k)
+          },
+          body: makeEl('body'),
+          getElementById: getEl,
+          querySelector: () => null,
+          querySelectorAll: () => [],
+          createTreeWalker: () => ({ nextNode: () => false, currentNode: null }),
+          addEventListener: () => {},
+          createElement: () => makeEl('')
+        },
+        window: null,
+        fetch: async (urlStr, opts = {}) => {
+          const u = new URL(urlStr, 'http://127.0.0.1');
+          if (u.pathname === '/api/settings') {
+            return {
+              ok: true,
+              status: 200,
+              json: async () => ({
+                ok: true,
+                uiPreferences: {},
+                entrypoints: { pinnedConvId: initialSettingsPinned },
+                presets: []
+              })
+            };
+          }
+          if (u.pathname === '/api/history') {
+            return { ok: true, status: 200, json: async () => ({ ok: true, etag: 'h1', presets: [], daily: [], totals: {} }) };
+          }
+          if (u.pathname === '/api/entrypoints' && String(opts.method || 'GET').toUpperCase() === 'POST') {
+            const parsed = JSON.parse(opts.body || '{}');
+            postedEntrypoints.push(parsed);
+            if (typeof parsed.pinnedConvId === 'string') backendPinned = parsed.pinnedConvId;
+            return { ok: true, status: 200, json: async () => ({ ok: true }) };
+          }
+          if (u.pathname === '/api/context') {
+            const qCid = u.searchParams.get('conversationId') || '';
+            const qEtag = u.searchParams.get('etag') || '';
+            contextQueries.push({ conversationId: qCid, etag: qEtag, force: u.searchParams.get('force') === '1' });
+            const resolvedCid = qCid || initialContextConv || convHot;
+            if (contextReturnUnchanged) {
+              return {
+                ok: true,
+                status: 200,
+                json: async () => ({
+                  ok: true,
+                  unchanged: true,
+                  etag: qEtag || `etag-${resolvedCid}`,
+                  conversationId: resolvedCid,
+                  pinnedConvId: backendPinned || null,
+                  recentConversations: recentList
+                })
+              };
+            }
+            return { ok: true, status: 200, json: async () => mkVmSnap(resolvedCid) };
+          }
+          return { ok: true, status: 200, json: async () => ({ ok: true }) };
+        }
+      };
+      sandbox.window = {
+        innerWidth: 380,
+        location: { origin: 'http://127.0.0.1', href: 'http://127.0.0.1/' },
+        matchMedia: () => ({ matches: false, addEventListener: () => {} }),
+        getComputedStyle: sandbox.getComputedStyle,
+        addEventListener: () => {},
+        sidecar: { conversationId: hostConvId },
+        self: null,
+        top: null,
+        fetch: sandbox.fetch
+      };
+      sandbox.location = sandbox.window.location;
+      sandbox.window.self = sandbox.window;
+      sandbox.window.top = sandbox.window;
+      sandbox.window.localStorage = sandbox.localStorage;
+      sandbox.globalThis = sandbox;
+
+      runInNewContext(cvAppSource, sandbox, { filename: 'dashboard-app-picker.js' });
+      await new Promise((r) => setTimeout(r, 50));
+
+      return {
+        getEl,
+        localMap,
+        intervalCbs,
+        postedEntrypoints,
+        contextQueries,
+        convHot,
+        convOld,
+        convUncat,
+        setBackendPinned: (v) => { backendPinned = v; },
+        setContextReturnUnchanged: (v) => { contextReturnUnchanged = v; }
+      };
+    };
+
+    // Scenario A: Grouping order, uncategorized bottom, filter pills keep auto-follow, search auto-expands, collapse persists, polling keeps search input
+    const scA = await runFrontendPickerScenario({ hostConvId: '', initialContextConv: mkUuid(201) });
+    const triggerBtn = scA.getEl('conv-picker-trigger');
+    const popBody = scA.getEl('conv-pop-body');
+    const pillsEl = scA.getEl('conv-project-pills');
+    const searchInput = scA.getEl('conv-search-input');
+    const convSelect = scA.getEl('conv-select');
+
+    triggerBtn.dispatch('click', { target: triggerBtn });
+    assert(!scA.getEl('conv-popover').classList.contains('hidden'), '点击触发按钮应打开分组 Popover');
+    const bodyHtmlInit = popBody.innerHTML;
+    const idxHot = bodyHtmlInit.indexOf('data-proj-toggle="proj-hot"');
+    const idxOld = bodyHtmlInit.indexOf('data-proj-toggle="proj-old"');
+    const idxUncat = bodyHtmlInit.indexOf('data-proj-toggle="未归类工作区"');
+    assert(
+      idxHot > 0 && idxOld > idxHot && idxUncat > idxOld,
+      `项目分组排序异常（具名项目按活跃降序且未归类置底）：hot=${idxHot}, old=${idxOld}, uncat=${idxUncat}`
+    );
+    assert(
+      bodyHtmlInit.includes('conv-cli-badge') && bodyHtmlInit.includes('运行中'),
+      '分组 Popover 缺少 CLI 徽章或运行中绿点'
+    );
+    // proj-old should be collapsed by default (not active & not first)
+    assert(
+      /data-proj-toggle="proj-old"\s+aria-expanded="false"/.test(bodyHtmlInit) &&
+        /data-proj-toggle="proj-hot"\s+aria-expanded="true"/.test(bodyHtmlInit),
+      `默认折叠策略异常（仅当前/首个展开）：${bodyHtmlInit}`
+    );
+
+    // Filter pill click must NOT change selectedConvId or post /api/entrypoints
+    const postsBeforeFilter = scA.postedEntrypoints.length;
+    pillsEl.dispatch('click', {
+      target: { closest: (sel) => (sel === '[data-proj-filter]' ? { dataset: { projFilter: 'proj:proj-old' } } : null) }
+    });
+    assert(
+      convSelect.value === '' &&
+        scA.postedEntrypoints.length === postsBeforeFilter &&
+        scA.getEl('btn-follow-current').classList.contains('hidden') &&
+        popBody.innerHTML.includes(`data-conv-id="${scA.convOld}"`) &&
+        !popBody.innerHTML.includes(`data-conv-id="${scA.convHot}"`) &&
+        !popBody.innerHTML.includes('data-proj-toggle="proj-hot"'),
+      `切换项目筛选胶囊不应改变选中会话或打断自动跟随：val=${convSelect.value}, posts=${scA.postedEntrypoints.length}`
+    );
+
+    // Reset filter to __all__, then search "Old Alpha" -> auto-expands proj-old & poll preserves search input
+    pillsEl.dispatch('click', {
+      target: { closest: (sel) => (sel === '[data-proj-filter]' ? { dataset: { projFilter: '__all__' } } : null) }
+    });
+    searchInput.value = 'Old Alpha';
+    searchInput.dispatch('input', { target: searchInput });
+    assert(
+      /data-proj-toggle="proj-old"\s+aria-expanded="true"/.test(popBody.innerHTML) &&
+        popBody.innerHTML.includes(`data-conv-id="${scA.convOld}"`) &&
+        !popBody.innerHTML.includes(`data-conv-id="${scA.convHot}"`),
+      '搜索应自动展开命中分组并过滤未命中项'
+    );
+    const pollCb = scA.intervalCbs.find((c) => c.ms === 1500);
+    assert(Boolean(pollCb), '应注册 1500ms 轮询');
+    pollCb.fn();
+    await new Promise((r) => setTimeout(r, 20));
+    assert(
+      scA.getEl('conv-search-input') === searchInput && searchInput.value === 'Old Alpha',
+      '1.5s 轮询不应销毁或清空搜索输入框'
+    );
+
+    // Clear search & manually collapse proj-hot -> persists to localStorage['cv_project_collapse_v1']
+    searchInput.value = '';
+    searchInput.dispatch('input', { target: searchInput });
+    popBody.dispatch('click', {
+      target: {
+        closest: (sel) => (sel === '[data-proj-toggle]'
+          ? { dataset: { projToggle: 'proj-hot' }, getAttribute: () => 'true' }
+          : null)
+      }
+    });
+    const savedCollapse = JSON.parse(scA.localMap.get('cv_project_collapse_v1') || '{}');
+    assert(
+      savedCollapse['proj-hot'] === true &&
+        /data-proj-toggle="proj-hot"\s+aria-expanded="false"/.test(popBody.innerHTML),
+      `手动折叠偏好未持久化至 cv_project_collapse_v1：${scA.localMap.get('cv_project_collapse_v1')}`
+    );
+
+    // Scenario B: Boot with persisted pinnedConvId, then backend clears expired pinnedConvId on unchanged:true poll
+    const scB = await runFrontendPickerScenario({
+      hostConvId: '',
+      initialSettingsPinned: mkUuid(202),
+      initialContextPinned: mkUuid(202),
+      initialContextConv: mkUuid(202)
+    });
+    assert(
+      scB.getEl('conv-select').value === scB.convOld &&
+        !scB.getEl('btn-follow-current').classList.contains('hidden') &&
+        scB.getEl('conv-trigger-label').textContent.includes('[proj-old]') &&
+        scB.contextQueries.some((q) => q.conversationId === scB.convOld),
+      `boot 恢复 pinnedConvId 失败：sel=${scB.getEl('conv-select').value}, label=${scB.getEl('conv-trigger-label').textContent}`
+    );
+    // Simulate expired pinnedConvId cleared by backend while returning unchanged:true
+    scB.setBackendPinned('');
+    scB.setContextReturnUnchanged(true);
+    const queriesBeforeExpire = scB.contextQueries.length;
+    scB.intervalCbs.find((c) => c.ms === 1500).fn();
+    await new Promise((r) => setTimeout(r, 40));
+    const queriesAfterExpire = scB.contextQueries.slice(queriesBeforeExpire);
+    assert(
+      scB.getEl('conv-select').value === '' &&
+        scB.getEl('btn-follow-current').classList.contains('hidden') &&
+        queriesAfterExpire.some((q) => q.conversationId === '' && q.force === true),
+      `后端清理失效 pinnedConvId 后前端未切回自动跟随并强制重拉：sel=${scB.getEl('conv-select').value}, queries=${JSON.stringify(queriesAfterExpire)}`
+    );
+
+    // Scenario C: Desktop Aux Pane with hostConvId must NOT be hijacked by persisted pinnedConvId
+    const scC = await runFrontendPickerScenario({
+      hostConvId: mkUuid(201),
+      initialSettingsPinned: mkUuid(202),
+      initialContextPinned: mkUuid(202),
+      initialContextConv: mkUuid(201)
+    });
+    assert(
+      scC.getEl('conv-select').value === '' &&
+        scC.getEl('btn-follow-current').classList.contains('hidden') &&
+        scC.contextQueries.every((q) => q.conversationId === scC.convHot),
+      `Desktop Aux Pane 不得被后台 pinnedConvId 劫持：sel=${scC.getEl('conv-select').value}, queries=${JSON.stringify(scC.contextQueries)}`
     );
   } finally {
     for (const [k, v] of Object.entries(savedEnv)) {

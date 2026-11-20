@@ -32,6 +32,7 @@ import {
   getSidebarEntryStatus,
   isCliRuntimeEnv,
   MENUBAR_MODES,
+  noteCliActiveHint,
   scanConversation,
   setCliStatusLineConfig,
   setSidebarEntrypoint,
@@ -1591,6 +1592,10 @@ async function runStatuslineCommand(rawArgs) {
     noFallbackToRecent: hasStdinJson && !stdinConvId,
     skipWorkspaceLookup: true
   });
+
+  if (stdinConvId && ctx?.transcriptProgressed) {
+    noteCliActiveHint(stdinConvId, Date.now());
+  }
 
   const line = buildStatuslineText(ctx, stdinPayload, { format, terminalWidth });
   process.stdout.write(`${line}\n`);
