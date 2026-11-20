@@ -67,6 +67,12 @@
     diagTab: 'events', // 'events' | 'routing'
     heatPageOffset: 0,
     selectedBucketKey: '',
+    customRange: {
+      start: '',
+      end: '',
+      preset: '30d', // '7d' | '30d' | '90d' | 'mtd' | 'prevMonth' | 'all' | 'custom'
+      granularity: 'auto' // 'auto' | 'day' | 'week' | 'month'
+    },
 
     // Cost view controls
     costScope: 'period',
@@ -812,19 +818,16 @@
       const nextMinVal = hasNextMin
         ? ctx.projectedNextMin
         : (hasPromptBase ? ctx.promptUsed + Number(ctx.outputTokens || 0) + Number(ctx.pendingTokens || 0) : null);
-      const nextBaseNote = hasDeltaTail && nextMinVal && nextMinVal > ctx.promptUsed
-        ? ` · 下轮底数 ${fmtTokens(nextMinVal, 1)}`
-        : '';
-      const subText = `入 ${fmtTokens(ctx.inputTokens || 0, 1)} · 缓 ${fmtTokens(ctx.cacheTokens || 0, 1)}${pendNote}${nextBaseNote}`;
+      const subText = `入 ${fmtTokens(ctx.inputTokens || 0, 1)} · 缓 ${fmtTokens(ctx.cacheTokens || 0, 1)}${pendNote}`;
       setText('ctx-used-sub', subText);
       if (usedSubEl) {
-        if (hasDeltaTail && nextMinVal) {
+        if (hasDeltaTail && nextMinVal && nextMinVal > ctx.promptUsed) {
           const pctPart = typeof ctx.projectedNextPercent === 'number' && Number.isFinite(ctx.projectedNextPercent)
             ? `（约 ${ctx.projectedNextPercent.toFixed(1)}%）`
             : '';
           usedSubEl.setAttribute(
             'title',
-            formatZh(`本轮 Prompt ${fmtTokens(ctx.promptUsed, 1)} · 含输出 / 待发底数 ${fmtTokens(nextMinVal, 1)}${pctPart}`)
+            formatZh(`本轮 Prompt ${fmtTokens(ctx.promptUsed, 1)} · 含输出 / 待发下轮底数 ${fmtTokens(nextMinVal, 1)}${pctPart}`)
           );
         } else {
           usedSubEl.setAttribute('title', formatZh(subText));
@@ -836,26 +839,75 @@
     }
 
     setText('ctx-budget', win.budget ? fmtTokens(win.budget) : (win.used === null ? '--' : '未知'));
-    setText('ctx-budget-sub', win.budget ? '服务端实时阈值' : (win.used === null ? '待首轮同步' : '本地未记录上限'));
-    setText('ctx-rem', win.remaining !== null ? fmtTokens(win.remaining) : '--');
-    setText(
-      'ctx-rem-sub',
-      win.remaining !== null && win.budget > 0
-        ? `剩余 ${Math.max(0, 100 - (pct || 0)).toFixed(1)}% 空间`
-        : (win.used !== null ? '需服务端上限计算' : '等待服务端统计')
-    );
+    const budgetSubEl = $('ctx-budget-sub');
+    if (win.budget) {
+      if (win.remaining !== null && win.budget > 0) {
+        const remPct = Math.max(0, 100 - (pct || 0)).toFixed(1);
+        setText('ctx-budget-sub', `余 ${fmtTokens(win.remaining, 1)} (${remPct}%)`);
+        budgetSubEl?.setAttribute('title', formatZh(`剩余可用 ${fmtTokens(win.remaining)}（${remPct}%）· 服务端实时阈值`));
+      } else {
+        setText('ctx-budget-sub', '服务端实时阈值');
+        budgetSubEl?.setAttribute('title', '服务端实时阈值');
+      }
+    } else {
+      const fallbackBudgetSub = win.used === null ? '待首轮同步' : '本地未记录上限';
+      setText('ctx-budget-sub', fallbackBudgetSub);
+      budgetSubEl?.setAttribute('title', fallbackBudgetSub);
+    }
 
-    setText('ctx-cache-rate', ctx.cacheHitPercent !== null ? `${ctx.cacheHitPercent.toFixed(1)}%` : '--');
+    const cacheRateClass = (val) => {
+      if (val === null || val === undefined || !Number.isFinite(Number(val))) return 'm-val';
+      const num = Number(val);
+      if (num >= 70) return 'm-val good-text';
+      if (num >= 30) return 'm-val accent-text';
+      return 'm-val warn-text';
+    };
+
+    const st = ctx.sessionTotals || {};
+    const sessCachePct = typeof st.cacheHitPercent === 'number' && Number.isFinite(st.cacheHitPercent)
+      ? st.cacheHitPercent
+      : null;
+    const sessCacheEl = $('ctx-session-cache');
+    if (sessCacheEl) {
+      sessCacheEl.className = cacheRateClass(sessCachePct);
+      setText(sessCacheEl, sessCachePct !== null ? `${sessCachePct.toFixed(1)}%` : '--');
+    }
+    const sessTurnsCount = Number(st.turnsCount || audit.turnsCount || 0);
+    const sessCacheSubText = sessCachePct !== null
+      ? `${sessTurnsCount > 0 ? `${fmtInt(sessTurnsCount)} 轮 · ` : ''}命中 ${fmtTokens(st.cacheTokens || 0, 1)}`
+      : (win.used === null ? '等待模型轮次' : '暂无缓存读取');
+    setText('ctx-session-cache-sub', sessCacheSubText);
+    const sessCacheCell = $('ctx-session-cache-cell');
+    if (sessCacheCell) {
+      const sessPromptTot = Number(st.inputTokens || 0) + Number(st.cacheTokens || 0);
+      const savedNote = Number(ctx.sessionCacheSavingsUSD || 0) > 0
+        ? ` · 缓存已省 ${fmtUSD(ctx.sessionCacheSavingsUSD)}`
+        : '';
+      sessCacheCell.setAttribute(
+        'title',
+        sessCachePct !== null
+          ? formatZh(`当前会话平均缓存命中率 ${sessCachePct.toFixed(1)}%（累计命中 ${fmtInt(st.cacheTokens || 0)} / 提示输入 ${fmtInt(sessPromptTot)} tok${savedNote}）`)
+          : '当前会话全部有效轮次的加权平均缓存命中率（累计缓存读取 / 累计提示输入）'
+      );
+    }
+
+    const roundCachePct = typeof ctx.cacheHitPercent === 'number' && Number.isFinite(ctx.cacheHitPercent)
+      ? ctx.cacheHitPercent
+      : null;
+    const roundCacheEl = $('ctx-cache-rate');
+    if (roundCacheEl) {
+      roundCacheEl.className = cacheRateClass(roundCachePct);
+      setText(roundCacheEl, roundCachePct !== null ? `${roundCachePct.toFixed(1)}%` : '--');
+    }
     setText(
       'ctx-cache-sub',
-      ctx.cacheTokens ? `命中 ${fmtTokens(ctx.cacheTokens)}` : '缓存读取占比'
+      ctx.cacheTokens ? `命中 ${fmtTokens(ctx.cacheTokens, 1)}` : '缓存读取占比'
     );
 
     // 3-Segment Context Bar (System / Tools / Messages)
     renderSegmentedBreakdown(ctx, audit);
 
     // Session Cumulative 4-Dimension Throughput
-    const st = ctx.sessionTotals || {};
     setText('cum-cache-overall', st.cacheHitPercent != null ? `累计缓存率 ${st.cacheHitPercent.toFixed(1)}%` : '累计缓存率 --');
     setText('cum-cache-tok', fmtTokens(st.cacheTokens || 0));
     const cumCacheSavedEl = $('cum-cache-saved');
@@ -931,6 +983,9 @@
         ? `累计 ${fmtTokens(st.totalTokens, 1)} · ${cumSummaryCost}`
         : `累计 -- · ${cumSummaryCost}`
     );
+
+    // Card 1.2: Session Models & Per-Model Average Cache Hit Rate
+    renderSessionModelsCard(ctx, snap.turns || []);
 
     // Card 1.5: Swarm / Subagent Tree Aggregation
     renderAgentTreeCard(snap.agentTree || null);
@@ -1334,6 +1389,9 @@
       const speedChip = t.tps != null
         ? `<span class="turn-chip speed">${esc(`${t.tps} tok/s${ttftSub}${effSub}`)}</span>`
         : (hasTurnEffGap ? `<span class="turn-chip speed">${esc(`整请求 ${t.effectiveTps} tok/s${ttftSub}`)}</span>` : '');
+      const modelChip = t.model && t.model !== '未记录模型'
+        ? `<span class="turn-chip">${esc(t.model)}</span>`
+        : '';
       const toolsHtml = (t.tools || []).map((toolName) =>
         `<span class="turn-chip tool">${esc(toolName)}</span>`
       ).join('');
@@ -1352,6 +1410,7 @@
         `<span>${escZh(`缓存 ${t.cacheHitPercent ?? 0}%`)}</span>` +
         `<span>·</span>` +
         `<span>${escZh(`入 ${fmtTokens(t.inputTokens, 1)} / 出 ${fmtTokens(t.outputTokens, 1)}${thinkSub}`)}</span>` +
+        modelChip +
         costChip +
         speedChip +
         toolsHtml +
@@ -1539,6 +1598,139 @@
         }).join('');
       }
     }
+  }
+
+  function deriveSessionModelsFallback(ctx = {}, turns = []) {
+    if (!Array.isArray(turns) || !turns.length) return [];
+    const suffixRe = /\s*\((?:XHigh|Low|Medium|High|Minimal|Thinking|Fast|Orchestrator)\)\s*$/i;
+    const aggMap = new Map();
+    for (const t of turns) {
+      if (!t || !(Number(t.totalTokens || 0) > 0)) continue;
+      const rawDisp = t.model && t.model !== '未记录模型' ? String(t.model).trim() : '';
+      const cleanDisp = rawDisp ? rawDisp.replace(suffixRe, '').trim() : '';
+      const mKey = t.modelKey || null;
+      const groupKey = mKey ? `key:${mKey}` : (cleanDisp ? `name:${cleanDisp.toLowerCase()}` : 'unrecorded');
+      const displayName = cleanDisp || '未记录模型';
+      let item = aggMap.get(groupKey);
+      if (!item) {
+        item = {
+          modelKey: mKey,
+          displayName,
+          turnsCount: 0,
+          inputTokens: 0,
+          cacheTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+          costUSD: 0,
+          cacheSavingsUSD: 0,
+          tpsSum: 0,
+          tpsCount: 0,
+          variants: new Set()
+        };
+        aggMap.set(groupKey, item);
+      }
+      item.turnsCount += 1;
+      item.inputTokens += Number(t.inputTokens || 0);
+      item.cacheTokens += Number(t.cacheTokens || 0);
+      item.outputTokens += Number(t.outputTokens || 0);
+      item.totalTokens += Number(t.totalTokens || 0);
+      item.costUSD += Number(t.costUSD || 0);
+      if (typeof t.tps === 'number' && t.tps > 0) {
+        item.tpsSum += t.tps;
+        item.tpsCount += 1;
+      }
+      if (rawDisp && rawDisp !== displayName) item.variants.add(rawDisp);
+    }
+    const activeDisp = String(ctx?.model || '').replace(suffixRe, '').trim().toLowerCase();
+    return [...aggMap.values()]
+      .map((m) => {
+        const promptSum = m.inputTokens + m.cacheTokens;
+        return {
+          modelKey: m.modelKey,
+          displayName: m.displayName,
+          turnsCount: m.turnsCount,
+          inputTokens: m.inputTokens,
+          cacheTokens: m.cacheTokens,
+          outputTokens: m.outputTokens,
+          totalTokens: m.totalTokens,
+          cacheHitPercent: promptSum > 0 ? Number(((m.cacheTokens / promptSum) * 100).toFixed(1)) : null,
+          costUSD: Number(m.costUSD.toFixed(4)),
+          cacheSavingsUSD: 0,
+          avgTps: m.tpsCount > 0 ? Number((m.tpsSum / m.tpsCount).toFixed(1)) : null,
+          variants: [...m.variants].slice(0, 4),
+          isCurrent: Boolean(
+            (ctx?.modelKey && m.modelKey && m.modelKey === ctx.modelKey) ||
+            (!ctx?.modelKey && activeDisp && activeDisp !== '未记录模型' && m.displayName.toLowerCase() === activeDisp)
+          )
+        };
+      })
+      .sort((a, b) => (b.totalTokens - a.totalTokens) || (b.turnsCount - a.turnsCount));
+  }
+
+  function renderSessionModelsCard(ctx = {}, turns = []) {
+    const wrap = $('ctx-session-models-wrap');
+    const list = $('ctx-session-models-list');
+    if (!wrap || !list) return;
+
+    const models = Array.isArray(ctx?.sessionModels)
+      ? ctx.sessionModels.filter(Boolean)
+      : deriveSessionModelsFallback(ctx, turns);
+
+    if (!models.length) {
+      wrap.classList.add('hidden');
+      setText('ctx-session-models-count', '0 个模型');
+      list.innerHTML = '';
+      return;
+    }
+
+    wrap.classList.remove('hidden');
+    setText('ctx-session-models-count', `${fmtInt(models.length)} 个模型`);
+    setText(
+      'ctx-session-models-hint',
+      models.length === 1
+        ? `共 ${fmtInt(models[0].turnsCount || 0)} 轮 · 单模型均值`
+        : '按消耗排序 · 模型级平均缓存'
+    );
+
+    list.innerHTML = models.map((m) => {
+      const pct = typeof m.cacheHitPercent === 'number' && Number.isFinite(m.cacheHitPercent)
+        ? m.cacheHitPercent
+        : null;
+      const rateCls = pct === null ? '' : (pct >= 70 ? 'good-text' : pct >= 30 ? 'accent-text' : 'warn-text');
+      const barCol = pct === null ? 'var(--cv-muted)' : (pct >= 70 ? 'var(--good)' : pct >= 30 ? 'var(--cv-accent)' : 'var(--warn)');
+      const barW = pct !== null ? Math.min(100, Math.max(2, pct)) : 0;
+      const promptTot = Number(m.inputTokens || 0) + Number(m.cacheTokens || 0);
+      const curTag = m.isCurrent ? `<span class="session-model-cur">${escZh('当前')}</span>` : '';
+      const variantsNote = Array.isArray(m.variants) && m.variants.length
+        ? `（含档位：${m.variants.join(' / ')}）`
+        : '';
+      const tipParts = [
+        `${m.displayName || '未记录模型'}${variantsNote}`,
+        `${fmtInt(m.turnsCount || 0)} 轮`,
+        pct !== null ? `平均缓存命中 ${pct.toFixed(1)}%` : '无缓存数据',
+        `缓存 ${fmtTokens(m.cacheTokens || 0, 1)} / 新增输入 ${fmtTokens(m.inputTokens || 0, 1)} / 输出 ${fmtTokens(m.outputTokens || 0, 1)}`,
+        m.avgTps != null ? `均速 ${m.avgTps} tok/s` : '',
+        m.costUSD > 0 ? `折算 ${fmtUSD(m.costUSD)}` : '',
+        m.cacheSavingsUSD > 0 ? `缓存省 ${fmtUSD(m.cacheSavingsUSD)}` : ''
+      ].filter(Boolean);
+
+      return (
+        `<div class="session-model-row${m.isCurrent ? ' is-current' : ''}" title="${escZh(tipParts.join(' · '))}">` +
+        `<div class="session-model-top">` +
+        `<span class="session-model-left">` +
+        `<span class="session-model-name">${esc(m.displayName || '未记录模型')}</span>` +
+        curTag +
+        `<span class="turn-chip">${escZh(`${fmtInt(m.turnsCount || 0)} 轮`)}</span>` +
+        `</span>` +
+        `<span class="session-model-right">` +
+        `<span class="session-model-tok num">${escZh(`命中 ${fmtTokens(m.cacheTokens || 0, 1)} / ${fmtTokens(promptTot, 1)}`)}</span>` +
+        `<span class="session-model-rate ${rateCls}">${esc(pct !== null ? `${pct.toFixed(1)}%` : '--')}</span>` +
+        `</span>` +
+        `</div>` +
+        `<div class="thin-track xs"><div class="thin-fill" style="width:${barW.toFixed(1)}%;background:${barCol}"></div></div>` +
+        `</div>`
+      );
+    }).join('');
   }
 
   function renderAgentTreeCard(agentTree) {
@@ -1767,6 +1959,10 @@
     if (navRow) navRow.classList.toggle('hidden', state.chartMode !== 'daily');
     const hourlyRow = $('hourly-day-row');
     if (hourlyRow) hourlyRow.classList.toggle('hidden', state.chartMode !== 'hourly');
+    const customRow = $('custom-range-row');
+    if (customRow) customRow.classList.toggle('hidden', state.chartMode !== 'custom');
+    const customSum = $('custom-range-summary');
+    if (customSum) customSum.classList.toggle('hidden', state.chartMode !== 'custom');
 
     if (state.chartMode === 'hourly') {
       const hourlyObj = hist.hourlyBySource?.[srcKey] || hist.hourlyBySource?.all || null;
@@ -1781,6 +1977,8 @@
       renderYearlyBubbles(dailyMap, hist);
     } else if (state.chartMode === 'cumulative') {
       renderCumulativeCurve(dailyMap, hist);
+    } else if (state.chartMode === 'custom') {
+      renderCustomRangeChart(dailyMap, hist);
     }
 
     renderDiagnosticsCard(hist.diagnostics || null);
@@ -1845,16 +2043,19 @@
       const chips = byModel.map((m) => {
         const tok = Number(m.tokens || 0);
         const share = Math.round((tok / denom) * 100);
+        const mPrompt = Number(m.input || 0) + Number(m.cache || 0);
+        const mCachePct = mPrompt > 0 ? Number(((Number(m.cache || 0) / mPrompt) * 100).toFixed(1)) : null;
         const tipParts = [
           m.name,
           `${fmtTokens(tok, 1)} tok (${share}%)`,
+          mCachePct !== null ? `缓存命中 ${mCachePct.toFixed(1)}%` : '',
           m.steps ? `${fmtInt(m.steps)} 次` : '',
           m.costUSD > 0 ? `约 ${fmtUSD(m.costUSD)}` : ''
         ].filter(Boolean);
         return (
           `<span class="inspector-model-chip" title="${escZh(tipParts.join(' · '))}">` +
           `<span class="inspector-model-name">${escZh(m.name)}</span>` +
-          `<span class="num muted">${escZh(`${fmtTokens(tok, 1)} (${share}%)`)}</span>` +
+          `<span class="num muted">${escZh(`${fmtTokens(tok, 1)} (${share}%)`)}${mCachePct !== null ? ` · ${mCachePct.toFixed(0)}%` : ''}</span>` +
           `</span>`
         );
       }).join('');
@@ -1893,7 +2094,7 @@
     const { today, startSun, displayEnd } = computeHeatmapDateWindow(hist.todayKey, state.heatPageOffset);
 
     const firstDate = parseLocalDate(hist.firstUseDate || hist.todayKey);
-    if ($('btn-heat-prev')) $('btn-heat-prev').disabled = startSun <= firstDate && state.heatPageOffset >= 3;
+    if ($('btn-heat-prev')) $('btn-heat-prev').disabled = startSun <= firstDate;
     if ($('btn-heat-next')) $('btn-heat-next').disabled = state.heatPageOffset <= 0;
     setText('heat-range-label', `${toYmd(startSun)} 至 ${toYmd(displayEnd)}`);
 
@@ -1963,19 +2164,16 @@
       requestAnimationFrame(() => { stage.scrollLeft = stage.scrollWidth; });
     }
 
-    stage.querySelectorAll('.heat-cell:not(.future)').forEach((el) => {
-      const inspect = (lock) => {
-        const k = el.dataset.day;
-        if (lock) {
-          state.selectedBucketKey = k;
-          stage.querySelectorAll('.heat-cell.selected').forEach((n) => n.classList.remove('selected'));
-          el.classList.add('selected');
-        }
-        updateInspector(k, dailyMap[k]);
-      };
-      el.addEventListener('mouseenter', () => inspect(false));
-      el.addEventListener('click', () => inspect(true));
-    });
+    stage.__cvStageInspect = (el, lock) => {
+      const k = el?.dataset?.day;
+      if (!k) return;
+      if (lock) {
+        state.selectedBucketKey = k;
+        stage.querySelectorAll('.heat-cell.selected').forEach((n) => n.classList.remove('selected'));
+        el.classList.add('selected');
+      }
+      updateInspector(k, dailyMap[k]);
+    };
 
     const inspectKey = state.selectedBucketKey && dailyMap[state.selectedBucketKey]
       ? state.selectedBucketKey
@@ -2035,8 +2233,10 @@
     if (!agg._modelMap) agg._modelMap = new Map();
     for (const m of rec.byModel) {
       if (!m || !m.name) continue;
-      const prev = agg._modelMap.get(m.name) || { name: m.name, tokens: 0, steps: 0, costUSD: 0 };
+      const prev = agg._modelMap.get(m.name) || { name: m.name, tokens: 0, input: 0, cache: 0, steps: 0, costUSD: 0 };
       prev.tokens += Number(m.tokens || 0);
+      prev.input += Number(m.input || 0);
+      prev.cache += Number(m.cache || 0);
       prev.steps += Number(m.steps || 0);
       prev.costUSD += Number(m.costUSD || 0);
       agg._modelMap.set(m.name, prev);
@@ -2054,6 +2254,8 @@
       .map((m) => ({
         name: m.name,
         tokens: m.tokens,
+        input: m.input,
+        cache: m.cache,
         steps: m.steps,
         costUSD: Number(m.costUSD.toFixed(6))
       }));
@@ -2094,7 +2296,7 @@
     renderBarBuckets(stage, buckets, dailyMap, hist, 12);
   }
 
-  function renderBarBuckets(stage, buckets, dailyMap, hist, monthsSpan) {
+  function renderBarBuckets(stage, buckets, dailyMap, hist, monthsSpan, opts = {}) {
     const maxVal = Math.max(...buckets.map((b) => b.agg.total), 1);
     let sumTok = 0;
     let sumCost = 0;
@@ -2102,38 +2304,51 @@
       sumTok += b.agg.total;
       sumCost += b.agg.costUSD > 0 ? b.agg.costUSD : b.agg.refCostUSD;
     }
+    const defaultIdx = opts.defaultSelectedIdx != null && opts.defaultSelectedIdx >= 0 && opts.defaultSelectedIdx < buckets.length
+      ? opts.defaultSelectedIdx
+      : (buckets.length - 1);
+    const labelStep = buckets.length <= 12 ? 1 : (buckets.length <= 24 ? 2 : Math.ceil(buckets.length / 7));
+    const labelMod = buckets.length > 1 ? ((buckets.length - 1) % labelStep) : 0;
 
     stage.innerHTML = `<div class="bar-chart">${buckets.map((b, idx) => {
       const hPct = b.agg.total > 0 ? Math.max(4, (b.agg.total / maxVal) * 100) : 2;
-      const showLbl = buckets.length <= 12 || idx % 2 === 1;
+      const showLbl = labelStep === 1 || (idx % labelStep === labelMod) || idx === buckets.length - 1;
       return (
-        `<div class="bar-col${ idx === buckets.length - 1 ? ' selected' : '' }" data-bidx="${idx}" title="${escZh(`${b.key}：${fmtTokens(b.agg.total)}`)}">` +
+        `<div class="bar-col${idx === defaultIdx ? ' selected' : ''}" data-bidx="${idx}" title="${escZh(`${b.key}：${fmtTokens(b.agg.total)}`)}">` +
         `<div class="bar-pillar" style="height:${hPct.toFixed(1)}%"></div>` +
         `<span class="bar-lbl">${showLbl ? escZh(b.shortLabel) : ''}</span>` +
         `</div>`
       );
     }).join('')}</div>`;
 
-    stage.querySelectorAll('.bar-col').forEach((col) => {
-      const trigger = (lock) => {
-        const b = buckets[Number(col.dataset.bidx)];
-        if (!b) return;
-        if (lock) {
-          stage.querySelectorAll('.bar-col.selected').forEach((n) => n.classList.remove('selected'));
-          col.classList.add('selected');
-        }
-        updateInspector(b.key, b.agg);
-      };
-      col.addEventListener('mouseenter', () => trigger(false));
-      col.addEventListener('click', () => trigger(true));
-    });
+    stage.__cvStageInspect = (col, lock) => {
+      const idxAttr = col?.dataset?.bidx;
+      if (idxAttr === undefined) return;
+      const b = buckets[Number(idxAttr)];
+      if (!b) return;
+      if (lock) {
+        stage.querySelectorAll('.bar-col.selected').forEach((n) => n.classList.remove('selected'));
+        col.classList.add('selected');
+      }
+      updateInspector(b.key, b.agg);
+    };
 
-    const latest = buckets[buckets.length - 1];
+    const latest = buckets[defaultIdx];
     if (latest) updateInspector(latest.key, latest.agg);
 
-    const activeDays = Object.values(dailyMap).filter((v) => v.total > 0).length;
+    const activeDays = opts.activeDaysOverride != null
+      ? opts.activeDaysOverride
+      : Object.values(dailyMap).filter((v) => v.total > 0).length;
+    const calendarDays = opts.calendarDaysOverride != null
+      ? opts.calendarDaysOverride
+      : (monthsSpan * 30);
     updateSummaryRibbon(
-      { totalTokens: sumTok, costUSD: sumCost, calendarDays: monthsSpan * 30, activeDays },
+      {
+        totalTokens: opts.rangeTotalOverride ?? sumTok,
+        costUSD: opts.rangeCostOverride ?? sumCost,
+        calendarDays,
+        activeDays
+      },
       hist.planStatus,
       monthsSpan
     );
@@ -2182,14 +2397,12 @@
       );
     }).join('')}</div>`;
 
-    stage.querySelectorAll('.month-bubble-card').forEach((card) => {
-      const handler = () => {
-        const item = months[Number(card.dataset.midx)];
-        if (item) updateInspector(item.key, item.agg);
-      };
-      card.addEventListener('mouseenter', handler);
-      card.addEventListener('click', handler);
-    });
+    stage.__cvStageInspect = (card) => {
+      const midx = card?.dataset?.midx;
+      if (midx === undefined) return;
+      const item = months[Number(midx)];
+      if (item) updateInspector(item.key, item.agg);
+    };
 
     const curMonthIdx = Math.max(0, Number((hist.todayKey || '').slice(5, 7)) - 1);
     updateInspector(months[curMonthIdx].key, months[curMonthIdx].agg);
@@ -2373,19 +2586,17 @@
       );
     }).join('')}</div>`;
 
-    stage.querySelectorAll('.bar-col').forEach((col) => {
-      const trigger = (lock) => {
-        const b = buckets[Number(col.dataset.hidx)];
-        if (!b) return;
-        if (lock) {
-          stage.querySelectorAll('.bar-col.selected').forEach((n) => n.classList.remove('selected'));
-          col.classList.add('selected');
-        }
-        updateInspector(b.key, b.agg);
-      };
-      col.addEventListener('mouseenter', () => trigger(false));
-      col.addEventListener('click', () => trigger(true));
-    });
+    stage.__cvStageInspect = (col, lock) => {
+      const hidx = col?.dataset?.hidx;
+      if (hidx === undefined) return;
+      const b = buckets[Number(hidx)];
+      if (!b) return;
+      if (lock) {
+        stage.querySelectorAll('.bar-col.selected').forEach((n) => n.classList.remove('selected'));
+        col.classList.add('selected');
+      }
+      updateInspector(b.key, b.agg);
+    };
 
     const defBucket = buckets[defaultIdx];
     if (defBucket) updateInspector(defBucket.key, defBucket.agg);
@@ -2395,6 +2606,251 @@
       hist?.planStatus,
       1
     );
+  }
+
+  function resolveCustomDatePreset(presetId, hist) {
+    const todayKey = hist?.todayKey || toYmd(new Date());
+    const todayDt = parseLocalDate(todayKey);
+    const firstUse = hist?.firstUseDate && hist.firstUseDate <= todayKey ? hist.firstUseDate : todayKey;
+    const shift = (days) => {
+      const d = new Date(todayDt);
+      d.setDate(d.getDate() + days);
+      return toYmd(d);
+    };
+    if (presetId === '7d') return { start: shift(-6), end: todayKey };
+    if (presetId === '90d') return { start: shift(-89), end: todayKey };
+    if (presetId === 'mtd') return { start: `${todayKey.slice(0, 7)}-01`, end: todayKey };
+    if (presetId === 'prevMonth') {
+      const firstPrev = new Date(todayDt.getFullYear(), todayDt.getMonth() - 1, 1);
+      const lastPrev = new Date(todayDt.getFullYear(), todayDt.getMonth(), 0);
+      return { start: toYmd(firstPrev), end: toYmd(lastPrev) };
+    }
+    if (presetId === 'all') return { start: firstUse, end: todayKey };
+    return { start: shift(-29), end: todayKey };
+  }
+
+  function renderCustomRangeChart(dailyMap, hist) {
+    const stage = $('chart-stage');
+    if (!stage) return;
+    const todayKey = hist?.todayKey || toYmd(new Date());
+    if (!state.customRange.start || !state.customRange.end) {
+      const defRange = resolveCustomDatePreset(state.customRange.preset || '30d', hist);
+      state.customRange.start = defRange.start;
+      state.customRange.end = defRange.end;
+    }
+
+    let startYmd = state.customRange.start;
+    let endYmd = state.customRange.end;
+    if (startYmd > endYmd) {
+      [startYmd, endYmd] = [endYmd, startYmd];
+      state.customRange.start = startYmd;
+      state.customRange.end = endYmd;
+    }
+
+    const startInput = $('custom-start-date');
+    const endInput = $('custom-end-date');
+    if (startInput) {
+      startInput.value = startYmd;
+      startInput.max = todayKey;
+    }
+    if (endInput) {
+      endInput.value = endYmd;
+      endInput.max = todayKey;
+    }
+    document.querySelectorAll('#custom-preset-seg .seg-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.cpreset === state.customRange.preset);
+    });
+    const granChoice = state.customRange.granularity || 'auto';
+    document.querySelectorAll('#custom-gran-seg .seg-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.cgran === granChoice);
+    });
+
+    const startDt = parseLocalDate(startYmd);
+    const endDt = parseLocalDate(endYmd);
+    const daysList = [];
+    const cur = new Date(startDt);
+    let guard = 0;
+    while (cur <= endDt && guard < 1500) {
+      guard += 1;
+      daysList.push({ dt: new Date(cur), ymd: toYmd(cur) });
+      cur.setDate(cur.getDate() + 1);
+    }
+
+    const effectiveGran = granChoice === 'auto'
+      ? (daysList.length <= 45 ? 'day' : daysList.length <= 180 ? 'week' : 'month')
+      : granChoice;
+
+    const rangeAgg = { total: 0, input: 0, cache: 0, output: 0, steps: 0, costUSD: 0, refCostUSD: 0 };
+    let calendarDays = 0;
+    let activeDays = 0;
+    for (const item of daysList) {
+      if (item.ymd <= todayKey) calendarDays += 1;
+      const rec = dailyMap[item.ymd];
+      if (rec && rec.total > 0) {
+        activeDays += 1;
+        rangeAgg.total += rec.total;
+        rangeAgg.input += rec.input;
+        rangeAgg.cache += rec.cache;
+        rangeAgg.output += rec.output;
+        rangeAgg.steps += rec.steps;
+        rangeAgg.costUSD += rec.costUSD;
+        rangeAgg.refCostUSD += rec.refCostUSD;
+        mergeDayByModel(rangeAgg, rec);
+      }
+    }
+    finalizeAggByModel(rangeAgg);
+
+    const multiYear = startYmd.slice(0, 4) !== endYmd.slice(0, 4);
+    const buckets = [];
+    if (effectiveGran === 'day') {
+      for (const item of daysList) {
+        const rec = dailyMap[item.ymd] || { total: 0, input: 0, cache: 0, output: 0, steps: 0, costUSD: 0, refCostUSD: 0, byModel: [] };
+        buckets.push({
+          key: item.ymd,
+          shortLabel: `${item.dt.getMonth() + 1}/${item.dt.getDate()}`,
+          agg: rec
+        });
+      }
+    } else if (effectiveGran === 'week') {
+      const weekMap = new Map();
+      for (const item of daysList) {
+        const sun = new Date(item.dt);
+        sun.setDate(sun.getDate() - sun.getDay());
+        const wkKey = toYmd(sun);
+        let wk = weekMap.get(wkKey);
+        if (!wk) {
+          wk = {
+            startYmd: item.ymd,
+            endYmd: item.ymd,
+            shortLabel: `${item.dt.getMonth() + 1}/${item.dt.getDate()}`,
+            agg: { total: 0, input: 0, cache: 0, output: 0, steps: 0, costUSD: 0, refCostUSD: 0 }
+          };
+          weekMap.set(wkKey, wk);
+        }
+        wk.endYmd = item.ymd;
+        const rec = dailyMap[item.ymd];
+        if (rec) {
+          wk.agg.total += rec.total;
+          wk.agg.input += rec.input;
+          wk.agg.cache += rec.cache;
+          wk.agg.output += rec.output;
+          wk.agg.steps += rec.steps;
+          wk.agg.costUSD += rec.costUSD;
+          wk.agg.refCostUSD += rec.refCostUSD;
+          mergeDayByModel(wk.agg, rec);
+        }
+      }
+      for (const wk of weekMap.values()) {
+        finalizeAggByModel(wk.agg);
+        buckets.push({
+          key: wk.startYmd === wk.endYmd ? wk.startYmd : `${wk.startYmd} ~ ${wk.endYmd}`,
+          shortLabel: wk.shortLabel,
+          agg: wk.agg
+        });
+      }
+    } else {
+      const monthMap = new Map();
+      for (const item of daysList) {
+        const ym = item.ymd.slice(0, 7);
+        let mo = monthMap.get(ym);
+        if (!mo) {
+          const mNum = item.dt.getMonth() + 1;
+          mo = {
+            ym,
+            shortLabel: multiYear ? `${String(item.dt.getFullYear()).slice(2)}/${mNum}` : `${mNum}月`,
+            agg: { total: 0, input: 0, cache: 0, output: 0, steps: 0, costUSD: 0, refCostUSD: 0 }
+          };
+          monthMap.set(ym, mo);
+        }
+        const rec = dailyMap[item.ymd];
+        if (rec) {
+          mo.agg.total += rec.total;
+          mo.agg.input += rec.input;
+          mo.agg.cache += rec.cache;
+          mo.agg.output += rec.output;
+          mo.agg.steps += rec.steps;
+          mo.agg.costUSD += rec.costUSD;
+          mo.agg.refCostUSD += rec.refCostUSD;
+          mergeDayByModel(mo.agg, rec);
+        }
+      }
+      for (const mo of monthMap.values()) {
+        finalizeAggByModel(mo.agg);
+        buckets.push({
+          key: `${mo.ym} 自然月`,
+          shortLabel: mo.shortLabel,
+          agg: mo.agg
+        });
+      }
+    }
+
+    const granLabelMap = { day: '按天', week: '按周', month: '按月' };
+    setText(
+      'custom-range-meta',
+      `共 ${fmtInt(daysList.length)} 天 · 活跃 ${fmtInt(activeDays)} 天 · ${granLabelMap[effectiveGran] || ''} ${fmtInt(buckets.length)} 栏`
+    );
+
+    const sumBox = $('custom-range-summary');
+    if (sumBox) {
+      const rangePrompt = rangeAgg.input + rangeAgg.cache;
+      const rangeCachePct = rangePrompt > 0 ? Number(((rangeAgg.cache / rangePrompt) * 100).toFixed(1)) : null;
+      const rangeCost = rangeAgg.costUSD > 0 ? rangeAgg.costUSD : rangeAgg.refCostUSD;
+      const pillCls = rangeCachePct === null ? 'neutral' : (rangeCachePct >= 70 ? 'good' : rangeCachePct >= 30 ? 'accent' : 'warn');
+      const cachePillHtml = rangeCachePct !== null
+        ? `<span class="diag-summary-pill ${pillCls}">${escZh(`区间平均缓存 ${rangeCachePct.toFixed(1)}%`)}</span>`
+        : `<span class="diag-summary-pill neutral">${escZh('暂无缓存数据')}</span>`;
+      let modelsHtml = '';
+      if (rangeAgg.byModel.length > 0) {
+        const denom = Math.max(1, rangeAgg.total, rangeAgg.byModel.reduce((s, m) => s + Number(m.tokens || 0), 0));
+        modelsHtml = `<div class="inspector-models-row">` + rangeAgg.byModel.map((m) => {
+          const tok = Number(m.tokens || 0);
+          const share = Math.round((tok / denom) * 100);
+          const mPrompt = Number(m.input || 0) + Number(m.cache || 0);
+          const mCache = mPrompt > 0 ? Number(((Number(m.cache || 0) / mPrompt) * 100).toFixed(1)) : null;
+          const tipParts = [
+            m.name,
+            `${fmtTokens(tok, 1)} tok (${share}%)`,
+            mCache !== null ? `缓存命中 ${mCache.toFixed(1)}%` : '',
+            m.steps ? `${fmtInt(m.steps)} 次` : '',
+            m.costUSD > 0 ? `约 ${fmtUSD(m.costUSD)}` : ''
+          ].filter(Boolean);
+          return (
+            `<span class="inspector-model-chip" title="${escZh(tipParts.join(' · '))}">` +
+            `<span class="inspector-model-name">${escZh(m.name)}</span>` +
+            `<span class="num muted">${escZh(`${fmtTokens(tok, 1)} (${share}%)`)}${mCache !== null ? ` · 缓 ${mCache.toFixed(0)}%` : ''}</span>` +
+            `</span>`
+          );
+        }).join('') + `</div>`;
+      }
+      sumBox.innerHTML =
+        `<div class="custom-sum-head">` +
+        `<span><strong>${escZh(`${startYmd} 至 ${endYmd}`)}</strong> · ${escZh(`总计 ${fmtTokens(rangeAgg.total)} (${fmtInt(rangeAgg.steps)} 次请求)`)}</span>` +
+        cachePillHtml +
+        `</div>` +
+        `<div class="custom-sum-meta num">` +
+        `<span>${escZh(`输入 ${fmtTokens(rangeAgg.input, 1)} / 缓存 ${fmtTokens(rangeAgg.cache, 1)} / 输出 ${fmtTokens(rangeAgg.output, 1)}`)}</span>` +
+        `<span>·</span>` +
+        `<span>${escZh(`约 ${fmtUSD(rangeCost)} (${fmtCNY(rangeCost)})`)}</span>` +
+        `</div>` +
+        modelsHtml;
+    }
+
+    let lastActiveBucketIdx = -1;
+    for (let i = buckets.length - 1; i >= 0; i--) {
+      if (buckets[i].agg.total > 0) {
+        lastActiveBucketIdx = i;
+        break;
+      }
+    }
+    const effectiveCalDays = Math.max(1, calendarDays || daysList.length);
+    const monthsSpan = Math.max(1, effectiveCalDays / 30);
+    renderBarBuckets(stage, buckets, dailyMap, hist, monthsSpan, {
+      defaultSelectedIdx: lastActiveBucketIdx >= 0 ? lastActiveBucketIdx : Math.max(0, buckets.length - 1),
+      calendarDaysOverride: effectiveCalDays,
+      activeDaysOverride: activeDays,
+      rangeTotalOverride: rangeAgg.total,
+      rangeCostOverride: rangeAgg.costUSD > 0 ? rangeAgg.costUSD : rangeAgg.refCostUSD
+    });
   }
 
   function fmtDiagTime(isoStr, fallbackDate = '') {
@@ -3526,6 +3982,64 @@
       state.heatPageOffset = Math.max(0, state.heatPageOffset - 1);
       if (state.historyData) renderHistoryPanel(state.historyData);
     });
+
+    // Delegated hover & click inspection for heatmap, bar charts & year bubbles
+    const chartStage = $('chart-stage');
+    if (chartStage) {
+      let lastHoverTarget = null;
+      chartStage.addEventListener('mouseover', (ev) => {
+        const el = ev.target?.closest?.('.heat-cell:not(.future), .bar-col, .month-bubble-card');
+        if (!el || el === lastHoverTarget) return;
+        lastHoverTarget = el;
+        chartStage.__cvStageInspect?.(el, false);
+      });
+      chartStage.addEventListener('mouseleave', () => {
+        lastHoverTarget = null;
+      });
+      chartStage.addEventListener('click', (ev) => {
+        const el = ev.target?.closest?.('.heat-cell:not(.future), .bar-col, .month-bubble-card');
+        if (el) chartStage.__cvStageInspect?.(el, true);
+      });
+    }
+
+    // Custom date range presets, granularity & date pickers
+    document.querySelectorAll('#custom-preset-seg .seg-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const presetId = btn.dataset.cpreset || '30d';
+        const resolved = resolveCustomDatePreset(presetId, state.historyData);
+        state.customRange.preset = presetId;
+        state.customRange.start = resolved.start;
+        state.customRange.end = resolved.end;
+        if (state.historyData) renderHistoryPanel(state.historyData);
+      });
+    });
+
+    document.querySelectorAll('#custom-gran-seg .seg-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        state.customRange.granularity = btn.dataset.cgran || 'auto';
+        if (state.historyData) renderHistoryPanel(state.historyData);
+      });
+    });
+
+    const handleCustomDateInput = (which, rawVal) => {
+      const val = String(rawVal || '').trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(val)) return;
+      state.customRange.preset = 'custom';
+      if (which === 'start') {
+        state.customRange.start = val;
+        if (state.customRange.end && val > state.customRange.end) {
+          state.customRange.end = val;
+        }
+      } else {
+        state.customRange.end = val;
+        if (state.customRange.start && val < state.customRange.start) {
+          state.customRange.start = val;
+        }
+      }
+      if (state.historyData) renderHistoryPanel(state.historyData);
+    };
+    $('custom-start-date')?.addEventListener('change', (ev) => handleCustomDateInput('start', ev.target.value));
+    $('custom-end-date')?.addEventListener('change', (ev) => handleCustomDateInput('end', ev.target.value));
 
     // Cost scope & mode switches
     document.querySelectorAll('#cost-scope-seg .seg-btn').forEach((btn) => {

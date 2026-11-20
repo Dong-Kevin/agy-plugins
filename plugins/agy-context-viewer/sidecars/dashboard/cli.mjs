@@ -658,8 +658,9 @@ function buildCompactSummary(ctx = {}, hist = {}) {
         responseTokens: st.responseTokens ?? 0,
         grossTokens: st.totalTokens ?? 0,
         cacheHitPercent: st.cacheHitPercent ?? null,
-        turnsCount: activeConvMeta?.turnsCount || turns.length || 0
+        turnsCount: st.turnsCount || activeConvMeta?.turnsCount || turns.length || 0
       },
+      sessionModels: Array.isArray(cx.sessionModels) ? cx.sessionModels : [],
       roundApiCostUSD: Number((cx.roundCostUSD || 0).toFixed(4)),
       sessionApiCostUSD: Number((cx.sessionCostUSD || 0).toFixed(4)),
       sessionCacheSavingsUSD: Number((cx.sessionCacheSavingsUSD || 0).toFixed(4)),
@@ -816,7 +817,18 @@ function printPrettyStatus(ctx, hist) {
     const effTpsPart = (effTps > 0 && (!streamTps || Math.abs(effTps - streamTps) / streamTps >= 0.2))
       ? ` · 整请求 ${effTps} t/s`
       : '';
-    out.push(`缓存速度  单轮缓存命中 ${c.bold}${cv.cacheHitPercent != null ? `${cv.cacheHitPercent}%` : '--'}${c.reset}${startupPart}  ·  最新 ${c.cyan}${cv.speed.latestTps ? `${cv.speed.latestTps} tok/s` : '--'}${c.reset} (均值 ${cv.speed.avgTps ?? '--'} / 峰值 ${cv.speed.peakTps ?? '--'} tok/s, TTFT ${cv.speed.ttftSec ?? '--'}s${effTpsPart})`);
+    const sessCachePart = cv.sessionTotals.cacheHitPercent != null
+      ? ` · 会话均值 ${c.bold}${cv.sessionTotals.cacheHitPercent}%${c.reset}`
+      : '';
+    out.push(`缓存速度  单轮缓存命中 ${c.bold}${cv.cacheHitPercent != null ? `${cv.cacheHitPercent}%` : '--'}${c.reset}${sessCachePart}${startupPart}  ·  最新 ${c.cyan}${cv.speed.latestTps ? `${cv.speed.latestTps} tok/s` : '--'}${c.reset} (均值 ${cv.speed.avgTps ?? '--'} / 峰值 ${cv.speed.peakTps ?? '--'} tok/s, TTFT ${cv.speed.ttftSec ?? '--'}s${effTpsPart})`);
+    if (cv.sessionModels.length > 0) {
+      const modelCacheStr = cv.sessionModels
+        .slice(0, 4)
+        .map((m) => `${m.displayName} ${c.bold}${m.cacheHitPercent != null ? `${m.cacheHitPercent}%` : '--'}${c.reset} ${c.dim}(${m.turnsCount}轮)${c.reset}`)
+        .join(' · ');
+      const moreModels = cv.sessionModels.length > 4 ? ` ${c.dim}等 ${cv.sessionModels.length} 个模型${c.reset}` : '';
+      out.push(`模型缓存  ${modelCacheStr}${moreModels}`);
+    }
     const thinkTok = Number(cv.sessionTotals.thinkingTokens || 0);
     const respTok = Number(cv.sessionTotals.responseTokens || 0) || Math.max(0, Number(cv.sessionTotals.outputTokens || 0) - thinkTok);
     const thinkSplitPart = thinkTok > 0 ? ` (含思考 ${fmtTok(thinkTok)} / 正文 ${fmtTok(respTok)})` : '';
@@ -1418,7 +1430,7 @@ function buildStatuslineText(ctx, stdinPayload = {}, { format = 'ansi', terminal
     ? cx.cacheHitPercent
     : (stdinPromptSum > 0 ? Number(((curCacheRead / stdinPromptSum) * 100).toFixed(1)) : null);
 
-  const latestTps = sp.streamingTps ?? sp.tps ?? null;
+  const latestTps = sp.tps ?? sp.streamingTps ?? null;
   const sessionCost = cx.sessionCostUSD > 0 ? cx.sessionCostUSD : null;
   const quotaPool = pickQuotaPool(ctx, modelDisplay);
 
@@ -1457,7 +1469,8 @@ function buildStatuslineText(ctx, stdinPayload = {}, { format = 'ansi', terminal
   }
 
   if (latestTps !== null && latestTps > 0) {
-    segments.push({ prio: 3, text: paintTag(`⚡ ${Math.round(latestTps)}t/s`, 'cyan', format) });
+    const tpsFmt = Number(Number(latestTps).toFixed(1));
+    segments.push({ prio: 3, text: paintTag(`⚡ ${tpsFmt}t/s`, 'cyan', format) });
   }
 
   const costStr = formatUsdCompact(sessionCost);
@@ -1630,7 +1643,7 @@ function renderWatchPanel(ctx, width = 60, intervalMs = 1500) {
         : startupState === 'cold'
           ? ` · ${c.red}首跳冷${c.reset}`
           : '';
-    lines.push(`缓存  ${c.bold}${cx.cacheHitPercent != null ? `${cx.cacheHitPercent}%` : '--'}${c.reset}${startupPart} · 速度 ${c.cyan}${sp.streamingTps ?? sp.tps ?? '--'} t/s${c.reset} · 费用 ${c.yellow}${fmtUsd(cx.sessionCostUSD || 0, 3)}${c.reset}`);
+    lines.push(`缓存  ${c.bold}${cx.cacheHitPercent != null ? `${cx.cacheHitPercent}%` : '--'}${c.reset}${startupPart} · 速度 ${c.cyan}${sp.tps ?? sp.streamingTps ?? '--'} t/s${c.reset} · 费用 ${c.yellow}${fmtUsd(cx.sessionCostUSD || 0, 3)}${c.reset}`);
     lines.push(`吞吐  ${turns.length} 轮 · 累计 ${fmtTok(st.totalTokens)} (缓存 ${fmtTok(st.cacheTokens)} / 输出 ${fmtTok(st.outputTokens)})`);
     if (ctx?.agentTree?.childrenCount > 0) {
       const tt = ctx.agentTree.treeTotals || {};

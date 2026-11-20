@@ -45,6 +45,7 @@ import {
   getImageDimensions,
   groupModelQuotas,
   measureText,
+  MODEL_DISPLAY_NAMES,
   normalizeModelId,
   parseUserPlanStatus,
   PRICING_VERIFIED_DATE,
@@ -4225,6 +4226,13 @@ function getFileMtimeSigSafe(filePath) {
   }
 }
 
+function getSqliteFileSigSafe(dbPath) {
+  const base = getFileMtimeSigSafe(dbPath);
+  if (base === '0') return '0';
+  const wal = getFileMtimeSigSafe(`${dbPath}-wal`);
+  return wal === '0' ? base : `${base}|${wal}`;
+}
+
 function collectAgentTree(convId, convBrainDir, {
   agDir,
   cliDir,
@@ -4703,6 +4711,9 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   }
 
   const hostCacheMtimeMs = getFileMtimeSigSafe(getHostStatusCachePath());
+  const convDbPath = resolveConvDbPath(convId, conversationSource, agDir, cliDataDir, ideDataDir);
+  const convDbSig = getSqliteFileSigSafe(convDbPath);
+  const genCacheMtimeMs = lightweight ? getFileMtimeSigSafe(getActiveConvGenCachePath()) : '0';
   if (lightweight && !force && convId) {
     const snapCache = loadStatuslineSnapCache();
     const snap = snapCache?.convs?.[convId];
@@ -4716,6 +4727,8 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         snap.fullSize === fullStatSize &&
         snap.fullMtimeMs === fullStatMtime &&
         snap.hostCacheMtimeMs === hostCacheMtimeMs &&
+        snap.convDbSig === convDbSig &&
+        snap.genCacheMtimeMs === genCacheMtimeMs &&
         snap.lsKeyHash === lsDiskHash &&
         age < ttl
       );
@@ -4746,8 +4759,6 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   });
   let host = lightweight ? null : await hostPromise;
 
-  const convDbPath = resolveConvDbPath(convId, conversationSource, agDir, cliDataDir, ideDataDir);
-  const convDbSig = lightweight ? '' : getFileMtimeSigSafe(convDbPath);
   const swarmSig = lightweight ? '' : getFileMtimeSigSafe(join(convBrainDir, '.system_generated', 'swarm', 'members.json'));
   const subagentsSig = lightweight ? '' : getFileMtimeSigSafe(join(convBrainDir, '.system_generated', 'subagents'));
   const baseSnapKey = lightweight ? '' : `${convId}|${logStatMtime}|${logStatSize}|${convDbSig}|${swarmSig}|${subagentsSig}|${host.sig}|${lsMemHash}|${agDir}|${stateDir}`;
@@ -4784,16 +4795,17 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   let logMtimeMs = 0;
 
   const rawSteps = [];
-  if (existsSync(targetLogPath)) {
-    const st = statSync(targetLogPath);
-    logMtimeMs = st.mtimeMs;
-    const lines = readFileSync(targetLogPath, 'utf-8').split(/\r?\n/);
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        rawSteps.push(JSON.parse(line));
-      } catch {}
-    }
+  if (targetLogPath && (logStatMtime > 0 || existsSync(targetLogPath))) {
+    try {
+      logMtimeMs = logStatMtime > 0 ? logStatMtime : statSync(targetLogPath).mtimeMs;
+      const lines = readFileSync(targetLogPath, 'utf-8').split(/\r?\n/);
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          rawSteps.push(JSON.parse(line));
+        } catch {}
+      }
+    } catch {}
   }
 
   totalSteps = rawSteps.length;
@@ -4813,12 +4825,11 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   const pushHeavyCandidate = (stepIndex, kind, label, rawText, m) => {
     const estTokens = Math.round(((m?.low || 0) + (m?.high || 0)) / 2);
     if (estTokens <= 0) return;
-    const cleanedRaw = kind === 'tool' ? stripToolResultHeader(rawText) : rawText;
     heavyCandidates.push({
       stepIndex,
       kind,
       label,
-      preview: sanitizeDiagnosticText(cleanedRaw, 72),
+      rawText,
       estTokens,
       chars: m?.chars || 0
     });
@@ -5168,33 +5179,42 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   let summariesIndex = null;
   if (lightweight) {
     let hasBundleBudget = false;
-    let hasBundleTiming = false;
     for (let i = bundleList.length - 1; i >= 0; i--) {
       const gm = bundleList[i];
       const cm = gm?.chatModel || gm?.chatMetadata || null;
-      if (!cm) continue;
-      if (!hasBundleBudget && Number(cm?.chatStartMetadata?.contextWindowMetadata?.maxContextTokens || 0) > 0) {
+      if (cm && Number(cm?.chatStartMetadata?.contextWindowMetadata?.maxContextTokens || 0) > 0) {
         hasBundleBudget = true;
+        break;
       }
-      if (
-        !hasBundleTiming && (
-          parseDurationSec(cm.timeToFirstToken) !== null ||
-          parseDurationSec(cm.streamingDuration) !== null
-        )
-      ) {
-        hasBundleTiming = true;
-      }
-      if (hasBundleBudget && hasBundleTiming) break;
     }
-    if (convDbPath && (!hasBundleBudget || !hasBundleTiming)) {
+    const lastModelStep = requiredModelSteps.length ? requiredModelSteps[requiredModelSteps.length - 1] : null;
+    const latestBundleEntry = lastModelStep !== null
+      ? (bundleCallsByStep.get(lastModelStep) || null)
+      : (bundleList.length ? bundleList[bundleList.length - 1] : null);
+    const latestCm = latestBundleEntry?.chatModel || latestBundleEntry?.chatMetadata || null;
+    const hasLatestTiming = Boolean(
+      latestCm && (
+        parseDurationSec(latestCm.timeToFirstToken) !== null ||
+        parseDurationSec(latestCm.streamingDuration) !== null
+      )
+    );
+    if (convDbPath && (!hasBundleBudget || !hasLatestTiming)) {
       const latestSqlGen = await readConversationLatestGenSignal(convDbPath, { timeoutMs: sqliteTimeoutMs });
       if (latestSqlGen) {
         const genByStep = new Map();
-        for (const sIdx of (latestSqlGen.stepIndices || [])) {
-          genByStep.set(sIdx, latestSqlGen);
+        const sqlEntries = Array.isArray(latestSqlGen.recentEntries) && latestSqlGen.recentEntries.length
+          ? latestSqlGen.recentEntries
+          : [latestSqlGen];
+        let anySqlHasStepIndices = false;
+        for (const sqlEntry of sqlEntries) {
+          const steps = Array.isArray(sqlEntry?.stepIndices) ? sqlEntry.stepIndices : [];
+          if (steps.length > 0) anySqlHasStepIndices = true;
+          for (const sIdx of steps) {
+            genByStep.set(sIdx, sqlEntry);
+          }
         }
-        const lastModelStep = requiredModelSteps.length ? requiredModelSteps[requiredModelSteps.length - 1] : null;
-        if (lastModelStep !== null && !genByStep.has(lastModelStep)) {
+        // Only fall back to lastModelStep when SQLite row omits stepIndices, so stale SQLite rows cannot bleed into newer turns
+        if (!anySqlHasStepIndices && lastModelStep !== null && !genByStep.has(lastModelStep)) {
           genByStep.set(lastModelStep, latestSqlGen);
         }
         sqliteSignals = {
@@ -5304,6 +5324,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       streamingTps,
       effectiveTps,
       costUSD: costInfo.costUSD ?? 0,
+      _cacheSavingsUSD: costInfo.cacheSavingsUSD ?? 0,
       isPriced: costInfo.isPriced,
       error: s.status === 'ERROR' ? String(s.content || '请求报错') : '',
       contextBreakdown: null,
@@ -5366,9 +5387,17 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       const modelKey = normalizeModelId(rawModel, host.dynamicModelMap);
       const displayModel = rawModel ? formatModelDisplayName(rawModel, modelKey) : '';
 
-      const ttft = parseDurationSec(cm.timeToFirstToken);
-      const streamingSec = parseDurationSec(cm.streamingDuration);
-      const hasServerTiming = ttft !== null || streamingSec !== null;
+      const lsTtft = parseDurationSec(cm.timeToFirstToken);
+      const lsStreamingSec = parseDurationSec(cm.streamingDuration);
+      const hasLsTiming = lsTtft !== null || lsStreamingSec !== null;
+      const sqlTtft = typeof sqlGen?.ttft === 'number' && Number.isFinite(sqlGen.ttft) ? sqlGen.ttft : null;
+      const sqlStreamingSec = typeof sqlGen?.streamingSec === 'number' && Number.isFinite(sqlGen.streamingSec)
+        ? sqlGen.streamingSec
+        : null;
+      const hasSqlTiming = !hasLsTiming && (sqlTtft !== null || sqlStreamingSec !== null);
+      const ttft = hasLsTiming ? lsTtft : (hasSqlTiming ? sqlTtft : null);
+      const streamingSec = hasLsTiming ? lsStreamingSec : (hasSqlTiming ? sqlStreamingSec : null);
+      const hasServerTiming = hasLsTiming || hasSqlTiming;
       const duration = hasServerTiming
         ? (ttft !== null && streamingSec !== null ? ttft + streamingSec : (ttft ?? streamingSec ?? null))
         : (timingMeta?.arrayIdx >= 0 ? estimateStepDuration(rawSteps, timingMeta.arrayIdx, logMtimeMs) : null);
@@ -5440,10 +5469,11 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         streamingTps,
         effectiveTps,
         costUSD: costInfo.costUSD ?? 0,
+        _cacheSavingsUSD: costInfo.cacheSavingsUSD ?? 0,
         isPriced: costInfo.isPriced,
         error: turnError,
         contextBreakdown: null,
-        _isServerExact: Boolean(hasServerUsage && hasServerTiming)
+        _isServerExact: Boolean(hasServerUsage && hasLsTiming)
       });
     }
     for (const reqStepIdx of requiredModelSteps) {
@@ -5700,8 +5730,9 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   const latestTurn = turns.length ? turns[turns.length - 1] : null;
   const latestValidTurn = [...turns].reverse().find((t) => t.totalTokens > 0 && !t.error) || latestTurn;
 
-  // Session cumulative throughput & session-wide TPS stats
+  // Session cumulative throughput, per-model breakdown & session-wide TPS stats
   const sessionTotals = {
+    turnsCount: turns.length,
     inputTokens: 0,
     cacheTokens: 0,
     outputTokens: 0,
@@ -5710,15 +5741,70 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     totalTokens: 0,
     cacheHitPercent: null
   };
+  const sessionModelAggMap = new Map();
+  const SESSION_MODEL_SUFFIX_RE = /\s*\((?:XHigh|Low|Medium|High|Minimal|Thinking|Fast|Orchestrator)\)\s*$/i;
   const validTpsValues = [];
   for (const t of turns) {
-    sessionTotals.inputTokens += t.inputTokens || 0;
-    sessionTotals.cacheTokens += t.cacheTokens || 0;
-    sessionTotals.outputTokens += t.outputTokens || 0;
-    sessionTotals.thinkingTokens += t.thinkingTokens || 0;
+    const tIn = t.inputTokens || 0;
+    const tCache = t.cacheTokens || 0;
+    const tOut = t.outputTokens || 0;
+    const tThink = t.thinkingTokens || 0;
+    const tTot = t.totalTokens || 0;
+    sessionTotals.inputTokens += tIn;
+    sessionTotals.cacheTokens += tCache;
+    sessionTotals.outputTokens += tOut;
+    sessionTotals.thinkingTokens += tThink;
     sessionTotals.responseTokens += t.responseTokens || 0;
-    sessionTotals.totalTokens += t.totalTokens || 0;
+    sessionTotals.totalTokens += tTot;
     if (typeof t.tps === 'number' && t.tps > 0) validTpsValues.push(t.tps);
+
+    const rawDisp = t.hasRecordedModel && t.model && t.model !== '未记录模型'
+      ? String(t.model).trim()
+      : '';
+    const cleanRawDisp = rawDisp ? rawDisp.replace(SESSION_MODEL_SUFFIX_RE, '').trim() : '';
+    const mKey = t.modelKey || null;
+    const groupKey = mKey
+      ? `key:${mKey}`
+      : (cleanRawDisp ? `name:${cleanRawDisp.toLowerCase()}` : 'unrecorded');
+    const displayName = (mKey && MODEL_DISPLAY_NAMES[mKey])
+      ? MODEL_DISPLAY_NAMES[mKey]
+      : (cleanRawDisp || '未记录模型');
+
+    let mAgg = sessionModelAggMap.get(groupKey);
+    if (!mAgg) {
+      mAgg = {
+        groupKey,
+        modelKey: mKey,
+        displayName,
+        turnsCount: 0,
+        inputTokens: 0,
+        cacheTokens: 0,
+        outputTokens: 0,
+        thinkingTokens: 0,
+        totalTokens: 0,
+        costUSD: 0,
+        cacheSavingsUSD: 0,
+        tpsSum: 0,
+        tpsCount: 0,
+        variants: new Set()
+      };
+      sessionModelAggMap.set(groupKey, mAgg);
+    }
+    mAgg.turnsCount += 1;
+    mAgg.inputTokens += tIn;
+    mAgg.cacheTokens += tCache;
+    mAgg.outputTokens += tOut;
+    mAgg.thinkingTokens += tThink;
+    mAgg.totalTokens += tTot;
+    mAgg.costUSD += Number(t.costUSD || 0);
+    mAgg.cacheSavingsUSD += Number(t._cacheSavingsUSD || 0);
+    if (typeof t.tps === 'number' && t.tps > 0) {
+      mAgg.tpsSum += t.tps;
+      mAgg.tpsCount += 1;
+    }
+    if (rawDisp && rawDisp !== displayName) {
+      mAgg.variants.add(rawDisp);
+    }
   }
   const cumPrompt = sessionTotals.inputTokens + sessionTotals.cacheTokens;
   if (cumPrompt > 0) {
@@ -5768,18 +5854,21 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         .filter((item) => item.estTokens > 0)
         .sort((a, b) => (b.estTokens - a.estTokens) || (a.stepIndex - b.stepIndex))
         .slice(0, 10)
-        .map((item, idx) => ({
-          rank: idx + 1,
-          stepIndex: item.stepIndex,
-          kind: item.kind,
-          label: item.label,
-          preview: item.preview,
-          estTokens: item.estTokens,
-          sharePercent: localTotalMid > 0
-            ? Number(((item.estTokens / localTotalMid) * 100).toFixed(1))
-            : 0,
-          chars: item.chars
-        }));
+        .map((item, idx) => {
+          const cleanedRaw = item.kind === 'tool' ? stripToolResultHeader(item.rawText) : item.rawText;
+          return {
+            rank: idx + 1,
+            stepIndex: item.stepIndex,
+            kind: item.kind,
+            label: item.label,
+            preview: sanitizeDiagnosticText(cleanedRaw, 72),
+            estTokens: item.estTokens,
+            sharePercent: localTotalMid > 0
+              ? Number(((item.estTokens / localTotalMid) * 100).toFixed(1))
+              : 0,
+            chars: item.chars
+          };
+        });
 
   const lastRawStep = rawSteps.length ? rawSteps[rawSteps.length - 1] : null;
   const hasTrailingZeroTokError = Boolean(
@@ -5810,6 +5899,35 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     : (modelSourceTurn?.hasRecordedModel
         ? modelSourceTurn.model
         : (activeSettingModel ? formatModelDisplayName(activeSettingModel, currentModelKey) : '未记录模型'));
+  const cleanActiveModelDisp = String(currentModelDisplay || '')
+    .replace(SESSION_MODEL_SUFFIX_RE, '')
+    .trim()
+    .toLowerCase();
+  const sessionModels = [...sessionModelAggMap.values()]
+    .map((m) => {
+      const mPrompt = m.inputTokens + m.cacheTokens;
+      const isCurrent = Boolean(
+        (currentModelKey && m.modelKey && m.modelKey === currentModelKey) ||
+        (!currentModelKey && cleanActiveModelDisp && cleanActiveModelDisp !== '未记录模型' && m.displayName.toLowerCase() === cleanActiveModelDisp)
+      );
+      return {
+        modelKey: m.modelKey,
+        displayName: m.displayName,
+        turnsCount: m.turnsCount,
+        inputTokens: m.inputTokens,
+        cacheTokens: m.cacheTokens,
+        outputTokens: m.outputTokens,
+        thinkingTokens: m.thinkingTokens,
+        totalTokens: m.totalTokens,
+        cacheHitPercent: mPrompt > 0 ? Number(((m.cacheTokens / mPrompt) * 100).toFixed(1)) : null,
+        costUSD: Number(m.costUSD.toFixed(4)),
+        cacheSavingsUSD: Number(m.cacheSavingsUSD.toFixed(4)),
+        avgTps: m.tpsCount > 0 ? Number((m.tpsSum / m.tpsCount).toFixed(1)) : null,
+        variants: [...m.variants].slice(0, 4),
+        isCurrent
+      };
+    })
+    .sort((a, b) => (b.totalTokens - a.totalTokens) || (b.turnsCount - a.turnsCount));
   const errorInfo = classifyRequestError(activeErrorText, {
     currentModel: currentModelDisplay,
     clientModelConfigs: host.modelConfigs,
@@ -5927,6 +6045,21 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       isServerExact: Boolean(latestValidTurn?._isServerExact)
     } : null;
     const latestHostCacheMtimeMs = getFileMtimeSigSafe(getHostStatusCachePath());
+    const latestGenCacheMtimeMs = getFileMtimeSigSafe(getActiveConvGenCachePath());
+    const latestTurnHasExactTiming = Boolean(
+      latestValidTurn && (
+        latestValidTurn._isServerExact ||
+        latestValidTurn.ttft !== null ||
+        latestValidTurn.streamingSec !== null
+      )
+    );
+    const snapSettled = Boolean(
+      metaSettled && (
+        !latestValidTurn ||
+        latestTurnHasExactTiming ||
+        ageMs >= CONV_META_SETTLE_AGE_MS
+      )
+    );
     if (convId) {
       saveStatuslineSnapEntry(convId, {
         targetLogPath,
@@ -5935,8 +6068,10 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         fullSize: fullStatSize,
         fullMtimeMs: fullStatMtime,
         hostCacheMtimeMs: latestHostCacheMtimeMs,
+        convDbSig,
+        genCacheMtimeMs: latestGenCacheMtimeMs,
         lsKeyHash: lsDiskHash,
-        metaSettled,
+        metaSettled: snapSettled,
         savedAt: nowMs,
         quotas: host.quotas || [],
         context: contextPayload,
@@ -6163,7 +6298,8 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     error: errorInfo,
     quota: modelQuota,
     breakdown: contextBreakdown,
-    sessionTotals
+    sessionTotals,
+    sessionModels
   };
   const speedPayload = latestValidTurn ? {
     tps: latestValidTurn.tps,
@@ -6194,6 +6330,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     _arrayIdx: _ai,
     _isServerExact: _ise,
     _budgetFromSqlite: _bfs,
+    _cacheSavingsUSD: _csusd,
     ...rest
   }) => ({
     ...rest,
@@ -6773,10 +6910,12 @@ export async function collectTokenHistory(options = {}) {
     const mName = String(modelName || '未记录模型').trim() || '未记录模型';
     let mEntry = b._byModelMap.get(mName);
     if (!mEntry) {
-      mEntry = { name: mName, tokens: 0, steps: 0, costUSD: 0 };
+      mEntry = { name: mName, tokens: 0, input: 0, cache: 0, steps: 0, costUSD: 0 };
       b._byModelMap.set(mName, mEntry);
     }
     mEntry.tokens += tok;
+    mEntry.input += inp;
+    mEntry.cache += cap;
     mEntry.steps += 1;
     mEntry.costUSD = Number((mEntry.costUSD + pricedCost).toFixed(6));
   };

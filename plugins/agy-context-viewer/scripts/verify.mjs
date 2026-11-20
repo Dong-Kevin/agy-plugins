@@ -452,6 +452,7 @@ async function main() {
     { todayKey: '2026-11-12', firstUseDate: '2026-11-01', planStatus: { monthlyUSD: 19.99 } }
   );
   assert(domText['heat-range-label'] === '2025-11-09 至 2026-11-12', `R2 热力图标题区间异常：${domText['heat-range-label']}`);
+  assert(domPrevBtn.disabled === true, 'R2 起始窗口早于首次记录日期时前一年按钮应禁用');
   assert(/class="heat-cell" data-lvl="[1-4]" data-day="2026-11-12"/.test(domStage.innerHTML), 'R2 今日有记录时热力图单元格未点亮');
   assert(domText['sum-tok'] === '42000', `R2 热力图区间汇总异常：${domText['sum-tok']}`);
 
@@ -1722,12 +1723,12 @@ async function main() {
       t3Harness.getEl('ctx-used').textContent === '101.0K' &&
         t3Harness.getEl('ctx-budget').textContent === '未知' &&
         t3Harness.getEl('ctx-budget-chip').textContent === '上限未记录' &&
-        t3Harness.getEl('ctx-rem').textContent === '--' &&
+        t3Harness.getEl('ctx-session-cache').textContent === '0.0%' &&
         t3Harness.getEl('ctx-pct-big').textContent === '--%' &&
         t3Harness.getEl('ctx-health-pill').textContent === '容量未知' &&
         !t3Harness.getEl('ctx-takeaway').textContent.includes('窗口健康') &&
         !t3Harness.getEl('ctx-takeaway').textContent.includes('对比基准'),
-      `T3 Auto 模式未知容量 UI 渲染异常：pill=${t3Harness.getEl('ctx-health-pill').textContent}, chip=${t3Harness.getEl('ctx-budget-chip').textContent}, budget=${t3Harness.getEl('ctx-budget').textContent}`
+      `T3 Auto 模式未知容量 UI 渲染异常：pill=${t3Harness.getEl('ctx-health-pill').textContent}, chip=${t3Harness.getEl('ctx-budget-chip').textContent}, budget=${t3Harness.getEl('ctx-budget').textContent}, sessCache=${t3Harness.getEl('ctx-session-cache').textContent}`
     );
 
     // T3b: Legacy persisted budgetOverride must be ignored completely (no manual benchmark override)
@@ -1783,6 +1784,7 @@ async function main() {
       t3Harness.vmCtx.renderContextPanel(t3ServerSnap);
       assert(
         t3Harness.getEl('ctx-budget').textContent === '200.0K' &&
+          t3Harness.getEl('ctx-budget-sub').textContent.includes('余 99.0K') &&
           t3Harness.getEl('ctx-budget-chip').textContent === '上限 200.0K' &&
           t3Harness.getEl('ctx-pct-big').textContent === '50.5%' &&
           t3Harness.getEl('ctx-health-pill').textContent === '运行健康',
@@ -5283,6 +5285,7 @@ async function main() {
     await verifyBatch2Features(cvHtmlSource, cvAppSource);
     await verifyStatuslineFastPath();
     await verifyPowertoolsP1P2Features(cvHtmlSource, cvAppSource);
+    await verifyCacheStatsAndCustomRange(cvHtmlSource, cvAppSource);
 
     // macOS Swift native host typecheck
     if (process.platform === 'darwin' && existsSync('/usr/bin/swiftc')) {
@@ -8023,6 +8026,109 @@ async function verifyStatuslineFastPath() {
         latestGen && latestGen.maxContextTokens === 200000 && latestGen.streamingSec === 1.5,
         `readConversationLatestGenSignal 应提取最新一行 gen_metadata：${JSON.stringify(latestGen)}`
       );
+
+      // 4b. When active_conv_gen_cache_v1 only covers older step 1 while step 2 is new, lightweight must read SQLite for step 2 & invalidate snap cache
+      delete process.env.ANTIGRAVITY_LS_ADDRESS;
+      delete process.env.ANTIGRAVITY_CSRF_TOKEN;
+      writeFileSync(
+        join(stateDir, 'active_conv_gen_cache_v1.json'),
+        JSON.stringify({
+          version: 2,
+          convs: {
+            [convId]: {
+              lsKeyHash: '',
+              size: 12,
+              mtimeMs: 12345,
+              fetchedAt: Date.now(),
+              settled: true,
+              empty: false,
+              generatorList: [
+                {
+                  stepIndices: [1],
+                  chatModel: {
+                    model: 'claude-sonnet-4-6',
+                    timeToFirstToken: '0.5s',
+                    streamingDuration: '1.0s',
+                    usage: { inputTokens: 2000, cacheReadTokens: 8000, outputTokens: 400 },
+                    chatStartMetadata: { contextWindowMetadata: { maxContextTokens: 200000 } }
+                  }
+                }
+              ]
+            }
+          }
+        })
+      );
+      const step2Snap = await collectorMod.scanConversation(convId, {
+        force: false,
+        lightweight: true,
+        allowDiskCacheWithoutLs: true,
+        skipRecentList: true,
+        skipWorkspaceLookup: true
+      });
+      assert(
+        step2Snap.speed?.streamingSec === 1.5 && step2Snap.speed?.tps === 333.3,
+        `active_conv_gen_cache 缺少最新 step 2 时 lightweight 应回查 SQLite 精确计时：${JSON.stringify(step2Snap.speed)}`
+      );
+
+      // Updating active_conv_gen_cache_v1 with step 2 exact timing (ttft=4.0s, streaming=1.0s, output=500 -> tps=100, streamingTps=300) invalidates statusline snap & statusline aligns to tps (100t/s, not 300t/s)
+      writeFileSync(
+        join(stateDir, 'active_conv_gen_cache_v1.json'),
+        JSON.stringify({
+          version: 2,
+          convs: {
+            [convId]: {
+              lsKeyHash: '',
+              size: 12,
+              mtimeMs: 12345,
+              fetchedAt: Date.now() + 100,
+              settled: true,
+              empty: false,
+              generatorList: [
+                {
+                  stepIndices: [1],
+                  chatModel: {
+                    model: 'claude-sonnet-4-6',
+                    timeToFirstToken: '0.5s',
+                    streamingDuration: '1.0s',
+                    usage: { inputTokens: 2000, cacheReadTokens: 8000, outputTokens: 400 },
+                    chatStartMetadata: { contextWindowMetadata: { maxContextTokens: 200000 } }
+                  }
+                },
+                {
+                  stepIndices: [2],
+                  chatModel: {
+                    model: 'claude-sonnet-4-6',
+                    timeToFirstToken: '4.0s',
+                    streamingDuration: '1.0s',
+                    usage: { inputTokens: 1000, cacheReadTokens: 12000, outputTokens: 500, thinkingOutputTokens: 200, responseOutputTokens: 300 },
+                    chatStartMetadata: { contextWindowMetadata: { maxContextTokens: 200000 } }
+                  }
+                }
+              ]
+            }
+          }
+        })
+      );
+      const updatedSnap = await collectorMod.scanConversation(convId, {
+        force: false,
+        lightweight: true,
+        allowDiskCacheWithoutLs: true,
+        skipRecentList: true,
+        skipWorkspaceLookup: true
+      });
+      assert(
+        !updatedSnap.fromStatuslineSnap && updatedSnap.speed?.tps === 100 && updatedSnap.speed?.streamingTps === 300,
+        `active_conv_gen_cache_v1 变更后应立即失效 statusline_snap_v1 并刷新速率：${JSON.stringify(updatedSnap)}`
+      );
+      const slSpeedOut = execFileSync(
+        process.execPath,
+        [join(ROOT, 'sidecars', 'dashboard', 'cli.mjs'), 'statusline', convId, '--plain', '--width', '120'],
+        { encoding: 'utf-8', env: { ...process.env } }
+      );
+      assert(
+        slSpeedOut.includes('100t/s') && !slSpeedOut.includes('300t/s'),
+        `statusline 速度应与弹窗综合速度 tps (100t/s) 一致而非 streamingTps (300t/s)：${slSpeedOut}`
+      );
     }
 
     // 5. readStdinBounded early exit on complete JSON object without EOF
@@ -8600,3 +8706,367 @@ main().catch((err) => {
   console.error(err.message || err);
   process.exitCode = 1;
 });
+
+async function verifyCacheStatsAndCustomRange(cvHtmlSource, cvAppSource) {
+  console.log('[verify] 7/7 会话平均缓存命中率、分模型平均缓存率与自定义日期趋势回归测试...');
+  assert(
+    !cvHtmlSource.includes('id="ctx-rem"') &&
+      cvHtmlSource.includes('id="ctx-session-cache"') &&
+      cvHtmlSource.includes('id="ctx-session-models-wrap"') &&
+      cvHtmlSource.includes('id="custom-range-row"') &&
+      cvHtmlSource.includes('id="custom-range-summary"') &&
+      cvHtmlSource.includes('data-chart="custom"'),
+    'HTML 缺少会话平均缓存、模型级缓存或自定义日期趋势控件'
+  );
+
+  const tmpRoot = mkdtempSync(join(tmpdir(), 'ag-cv-custom-'));
+  const agDir = join(tmpRoot, 'ag');
+  const cliDir = join(tmpRoot, 'cli');
+  const ideDir = join(tmpRoot, 'ide');
+  const stateDir = join(tmpRoot, 'state');
+  mkdirSync(agDir, { recursive: true });
+  mkdirSync(cliDir, { recursive: true });
+  mkdirSync(ideDir, { recursive: true });
+  mkdirSync(stateDir, { recursive: true });
+
+  const savedEnv = {
+    AG_DIR: process.env.AG_DIR,
+    AG_CLI_DIR: process.env.AG_CLI_DIR,
+    AG_IDE_DIR: process.env.AG_IDE_DIR,
+    ANTIGRAVITY_APP_DATA_DIR: process.env.ANTIGRAVITY_APP_DATA_DIR,
+    ANTIGRAVITY_CLI_DATA_DIR: process.env.ANTIGRAVITY_CLI_DATA_DIR,
+    ANTIGRAVITY_IDE_DATA_DIR: process.env.ANTIGRAVITY_IDE_DATA_DIR,
+    ANTIGRAVITY_EXECUTABLE_DATA_DIR: process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR,
+    ANTIGRAVITY_LS_ADDRESS: process.env.ANTIGRAVITY_LS_ADDRESS,
+    ANTIGRAVITY_CSRF_TOKEN: process.env.ANTIGRAVITY_CSRF_TOKEN
+  };
+
+  try {
+    process.env.AG_DIR = agDir;
+    process.env.AG_CLI_DIR = cliDir;
+    process.env.AG_IDE_DIR = ideDir;
+    process.env.ANTIGRAVITY_APP_DATA_DIR = agDir;
+    process.env.ANTIGRAVITY_CLI_DATA_DIR = cliDir;
+    process.env.ANTIGRAVITY_IDE_DATA_DIR = ideDir;
+    process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR = stateDir;
+    delete process.env.ANTIGRAVITY_LS_ADDRESS;
+    delete process.env.ANTIGRAVITY_CSRF_TOKEN;
+
+    const { scanConversation, collectTokenHistory } = await import(
+      `${pathToFileURL(join(ROOT, 'sidecars', 'dashboard', 'collector.mjs')).href}?cv_custom=${Date.now()}`
+    );
+
+    const convId = 'c1a2b3c4d5e60009';
+    const logDir = join(agDir, 'brain', convId, '.system_generated', 'logs');
+    mkdirSync(logDir, { recursive: true });
+    const now = new Date();
+    const ymdDaysAgo = (daysAgo) => {
+      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - daysAgo, 10, 0, 0);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return { ymd: `${y}-${m}-${day}`, iso: d.toISOString() };
+    };
+    const d10 = ymdDaysAgo(10);
+    const d03 = ymdDaysAgo(3);
+    const d00 = ymdDaysAgo(0);
+
+    // Multi-model session: Carbon (High + XHigh -> merged) & Neon (current)
+    const steps = [
+      { step_index: 1, type: 'USER_INPUT', created_at: d10.iso, content: 'Start with Carbon' },
+      {
+        step_index: 2,
+        type: 'PLANNER_RESPONSE',
+        created_at: d10.iso,
+        chatModel: { modelDisplayName: 'Gemini 4 Carbon (High)', usage: { inputTokens: 1000, cacheReadTokens: 0, outputTokens: 200 } },
+        content: 'Carbon step 1'
+      },
+      {
+        step_index: 3,
+        type: 'PLANNER_RESPONSE',
+        created_at: d03.iso,
+        chatModel: { modelDisplayName: 'Gemini 4 Carbon (XHigh)', usage: { inputTokens: 1000, cacheReadTokens: 8000, outputTokens: 300 } },
+        content: 'Carbon step 2'
+      },
+      { step_index: 4, type: 'USER_INPUT', created_at: d00.iso, content: 'Model Selection from Gemini 4 Carbon (XHigh) to Gemini 4 Neon.' },
+      {
+        step_index: 5,
+        type: 'PLANNER_RESPONSE',
+        created_at: d00.iso,
+        chatModel: { modelDisplayName: 'Orchestrator (Neon)', usage: { inputTokens: 500, cacheReadTokens: 9500, outputTokens: 400 } },
+        content: 'Neon step 3'
+      }
+    ];
+    writeFileSync(join(logDir, 'transcript.jsonl'), steps.map((s) => JSON.stringify(s)).join('\n') + '\n', 'utf-8');
+
+    const snap = await scanConversation(convId, { force: true });
+    // Session totals: input = 2500, cache = 17500 -> cacheHitPercent = 17500 / 20000 = 87.5%
+    assert(
+      snap.context?.sessionTotals?.cacheHitPercent === 87.5 &&
+        snap.context?.sessionTotals?.turnsCount === 3,
+      `会话平均缓存率计算异常：${JSON.stringify(snap.context?.sessionTotals)}`
+    );
+    const models = snap.context?.sessionModels || [];
+    const carbonM = models.find((m) => m.displayName === 'Gemini 4 Carbon');
+    const neonM = models.find((m) => m.displayName === 'Gemini 4 Neon');
+    // Carbon: input=2000, cache=8000 -> 80.0%; Neon: input=500, cache=9500 -> 95.0%
+    assert(
+      models.length === 2 &&
+        carbonM?.turnsCount === 2 &&
+        carbonM?.cacheHitPercent === 80 &&
+        carbonM?.variants?.includes('Gemini 4 Carbon (High)') &&
+        carbonM?.variants?.includes('Gemini 4 Carbon (XHigh)') &&
+        carbonM?.isCurrent === false &&
+        neonM?.turnsCount === 1 &&
+        neonM?.cacheHitPercent === 95 &&
+        neonM?.isCurrent === true,
+      `分模型平均缓存率归并异常：${JSON.stringify(models)}`
+    );
+
+    const hist = await collectTokenHistory({ force: true });
+    const d03Rec = hist.dailyMapBySource?.all?.[d03.ymd];
+    assert(
+      Array.isArray(d03Rec?.byModel) &&
+        d03Rec.byModel[0]?.input === 1000 &&
+        d03Rec.byModel[0]?.cache === 8000,
+      `collectTokenHistory daily byModel 未携带 input/cache 字段：${JSON.stringify(d03Rec)}`
+    );
+
+    // GUI VM regression: Hero session cache, Session Models card, and Custom Date Range statistics
+    const makeEl = (id = '', initClasses = []) => {
+      const classes = new Set(initClasses);
+      const attrs = new Map();
+      const listeners = new Map();
+      return {
+        id,
+        value: '',
+        max: '',
+        textContent: '',
+        innerHTML: '',
+        scrollTop: 0,
+        dataset: {},
+        style: {},
+        className: initClasses.join(' '),
+        classList: {
+          add: (...names) => names.forEach((n) => classes.add(n)),
+          remove: (...names) => names.forEach((n) => classes.delete(n)),
+          toggle: (n, force) => {
+            const on = force === undefined ? !classes.has(n) : Boolean(force);
+            if (on) classes.add(n);
+            else classes.delete(n);
+            return on;
+          },
+          contains: (n) => classes.has(n)
+        },
+        addEventListener: (type, fn) => {
+          if (!listeners.has(type)) listeners.set(type, []);
+          listeners.get(type).push(fn);
+        },
+        dispatch: (type, ev = {}) => {
+          for (const fn of listeners.get(type) || []) {
+            fn({ target: ev.target || {}, ...ev });
+          }
+        },
+        setAttribute: (k, v) => attrs.set(k, String(v)),
+        getAttribute: (k) => (attrs.has(k) ? attrs.get(k) : null),
+        hasAttribute: (k) => attrs.has(k),
+        removeAttribute: (k) => attrs.delete(k),
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        appendChild: () => {},
+        remove: () => {}
+      };
+    };
+    const uiEls = new Map();
+    const getUiEl = (id) => {
+      if (!uiEls.has(id)) uiEls.set(id, makeEl(id));
+      return uiEls.get(id);
+    };
+    uiEls.set('ctx-session-models-wrap', makeEl('ctx-session-models-wrap', ['session-models-wrap', 'hidden']));
+    uiEls.set('heat-nav-row', makeEl('heat-nav-row', ['heat-nav-row']));
+    uiEls.set('hourly-day-row', makeEl('hourly-day-row', ['hourly-day-row', 'hidden']));
+    uiEls.set('custom-range-row', makeEl('custom-range-row', ['custom-range-row', 'hidden']));
+    uiEls.set('custom-range-summary', makeEl('custom-range-summary', ['custom-range-summary', 'hidden']));
+
+    const btnChartDaily = makeEl('btn-chart-daily', ['seg-btn', 'active']);
+    btnChartDaily.dataset.chart = 'daily';
+    const btnChartCustom = makeEl('btn-chart-custom', ['seg-btn']);
+    btnChartCustom.dataset.chart = 'custom';
+    const chartModeBtns = [btnChartDaily, btnChartCustom];
+
+    const btnPreset7d = makeEl('btn-cp-7d', ['seg-btn']);
+    btnPreset7d.dataset.cpreset = '7d';
+    const btnPreset30d = makeEl('btn-cp-30d', ['seg-btn', 'active']);
+    btnPreset30d.dataset.cpreset = '30d';
+    const customPresetBtns = [btnPreset7d, btnPreset30d];
+
+    const btnGranDay = makeEl('btn-cg-day', ['seg-btn']);
+    btnGranDay.dataset.cgran = 'day';
+    const btnGranWeek = makeEl('btn-cg-week', ['seg-btn']);
+    btnGranWeek.dataset.cgran = 'week';
+    const customGranBtns = [btnGranDay, btnGranWeek];
+
+    const rootAttrs = new Map();
+    const rootStyles = new Map();
+    const uiSandbox = {
+      console, Date, Math, JSON, URL, URLSearchParams, Set, Map, Array, Object, String, Number, Boolean, Promise, Error,
+      NodeFilter: { SHOW_TEXT: 4 },
+      MutationObserver: class { observe() {} disconnect() {} },
+      ResizeObserver: class { observe() {} disconnect() {} },
+      IntersectionObserver: class { observe() {} disconnect() {} },
+      getComputedStyle: () => ({ color: 'rgb(255, 255, 255)', getPropertyValue: () => '' }),
+      setTimeout, clearTimeout, clearInterval,
+      setInterval: () => 1,
+      requestAnimationFrame: (fn) => { fn(); return 1; },
+      localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+      sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+      navigator: { platform: 'MacIntel', userAgent: 'Mozilla/5.0' },
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      document: {
+        readyState: 'complete',
+        hidden: false,
+        visibilityState: 'visible',
+        documentElement: {
+          clientWidth: 480,
+          clientHeight: 760,
+          dataset: {},
+          appendChild: () => {},
+          style: {
+            getPropertyValue: (k) => rootStyles.get(k) || '',
+            setProperty: (k, v) => rootStyles.set(k, String(v)),
+            removeProperty: (k) => rootStyles.delete(k)
+          },
+          getAttribute: (k) => (rootAttrs.has(k) ? rootAttrs.get(k) : null),
+          setAttribute: (k, v) => rootAttrs.set(k, String(v)),
+          hasAttribute: (k) => rootAttrs.has(k),
+          removeAttribute: (k) => rootAttrs.delete(k)
+        },
+        body: makeEl('body'),
+        getElementById: getUiEl,
+        querySelector: () => null,
+        querySelectorAll: (sel) => {
+          if (sel === '#chart-mode-seg .seg-btn') return chartModeBtns;
+          if (sel === '#custom-preset-seg .seg-btn') return customPresetBtns;
+          if (sel === '#custom-gran-seg .seg-btn') return customGranBtns;
+          return [];
+        },
+        createTreeWalker: () => ({ nextNode: () => false, currentNode: null }),
+        addEventListener: () => {},
+        createElement: (tag) => makeEl(tag)
+      },
+      window: null,
+      fetch: async (urlStr) => {
+        const u = new URL(urlStr, 'http://127.0.0.1');
+        if (u.pathname === '/api/settings') {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ ok: true, settings: {}, uiPreferences: {}, shortcut: {}, auxShortcut: {}, menubar: { supported: true, enabled: false } })
+          };
+        }
+        if (u.pathname === '/api/context') return { ok: true, status: 200, json: async () => snap };
+        if (u.pathname === '/api/history') return { ok: true, status: 200, json: async () => hist };
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+    };
+    uiSandbox.window = {
+      location: { origin: 'http://127.0.0.1', href: 'http://127.0.0.1/', pathname: '/' },
+      matchMedia: () => ({ matches: false, addEventListener: () => {} }),
+      getComputedStyle: uiSandbox.getComputedStyle,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      sidecar: { conversationId: convId },
+      self: null,
+      top: null,
+      fetch: uiSandbox.fetch
+    };
+    uiSandbox.window.self = uiSandbox.window;
+    uiSandbox.window.top = uiSandbox.window;
+    uiSandbox.location = uiSandbox.window.location;
+    runInNewContext(cvAppSource, uiSandbox);
+    await new Promise((r) => setTimeout(r, 60));
+
+    // Check Hero Session Average Cache + Session Models list
+    const sessCacheText = getUiEl('ctx-session-cache').textContent;
+    const sessCacheSub = getUiEl('ctx-session-cache-sub').textContent;
+    const modelsWrap = getUiEl('ctx-session-models-wrap');
+    const modelsListHtml = getUiEl('ctx-session-models-list').innerHTML;
+    assert(
+      sessCacheText === '87.5%' &&
+        sessCacheSub.includes('3 轮') &&
+        !modelsWrap.classList.contains('hidden') &&
+        getUiEl('ctx-session-models-count').textContent === '2 个模型' &&
+        modelsListHtml.includes('Gemini 4 Carbon') &&
+        modelsListHtml.includes('80.0%') &&
+        modelsListHtml.includes('Gemini 4 Neon') &&
+        modelsListHtml.includes('95.0%') &&
+        modelsListHtml.includes('当前'),
+      `GUI VM 会话平均缓存或模型级缓存渲染异常：sessCache=${sessCacheText}, sub=${sessCacheSub}, models=${modelsListHtml}`
+    );
+
+    // Switch Tab 2 chart mode to Custom Date Statistics
+    btnChartCustom.dispatch('click', { target: btnChartCustom });
+    const customRow = getUiEl('custom-range-row');
+    const customSummary = getUiEl('custom-range-summary');
+    const stage30dHtml = getUiEl('chart-stage').innerHTML;
+    const bars30d = stage30dHtml.match(/class="bar-col\b/g) || [];
+    assert(
+      !customRow.classList.contains('hidden') &&
+        !customSummary.classList.contains('hidden') &&
+        getUiEl('heat-nav-row').classList.contains('hidden') &&
+        bars30d.length === 30 &&
+        customSummary.innerHTML.includes('区间平均缓存 87.5%') &&
+        customSummary.innerHTML.includes('Gemini 4 Carbon') &&
+        customSummary.innerHTML.includes('Gemini 4 Neon') &&
+        getUiEl('sum-tok').textContent.length > 0,
+      `GUI VM 自定义日期统计默认 30 天渲染异常：bars=${bars30d.length}, summary=${customSummary.innerHTML}`
+    );
+
+    // Switch preset to 7 days -> should exclude d10 (only d03 + d00 -> 1000+8000+300 + 500+9500+400 = 19700)
+    btnPreset7d.dispatch('click', { target: btnPreset7d });
+    const bars7d = (getUiEl('chart-stage').innerHTML.match(/class="bar-col\b/g) || []).length;
+    assert(
+      bars7d === 7 &&
+        getUiEl('sum-tok').textContent === '19.7K' &&
+        customSummary.innerHTML.includes('区间平均缓存 92.1%'),
+      `GUI VM 近 7 天预设统计异常：bars=${bars7d}, sumTok=${getUiEl('sum-tok').textContent}, summary=${customSummary.innerHTML}`
+    );
+
+    // Inverted date input (start > end) -> auto-normalizes without crash
+    const startInput = getUiEl('custom-start-date');
+    const endInput = getUiEl('custom-end-date');
+    startInput.dispatch('change', { target: { value: d00.ymd } });
+    endInput.dispatch('change', { target: { value: d10.ymd } });
+    assert(
+      startInput.value === d10.ymd &&
+        endInput.value === d10.ymd &&
+        (getUiEl('chart-stage').innerHTML.match(/class="bar-col\b/g) || []).length === 1,
+      `GUI VM 倒置日期输入自动纠偏异常：start=${startInput.value}, end=${endInput.value}`
+    );
+
+    // CLI status & json checks for sessionModels + 会话均值
+    const cliEntry = join(ROOT, 'sidecars', 'dashboard', 'cli.mjs');
+    const cliEnv = { ...process.env, NO_COLOR: '1' };
+    const cliJson = JSON.parse(execFileSync(process.execPath, [cliEntry, 'json', convId], { env: cliEnv, encoding: 'utf-8' }));
+    assert(
+      Array.isArray(cliJson.conversation?.sessionModels) &&
+        cliJson.conversation.sessionModels.length === 2 &&
+        cliJson.conversation.sessionTotals?.cacheHitPercent === 87.5,
+      `CLI json 缺少 sessionModels 或 sessionTotals.cacheHitPercent：${JSON.stringify(cliJson.conversation)}`
+    );
+    const cliStatusOut = execFileSync(process.execPath, [cliEntry, 'status', convId], { env: cliEnv, encoding: 'utf-8' });
+    assert(
+      cliStatusOut.includes('会话均值 87.5%') &&
+        cliStatusOut.includes('模型缓存') &&
+        cliStatusOut.includes('Gemini 4 Neon 95%'),
+      `CLI status 未输出会话均值或模型缓存：${cliStatusOut}`
+    );
+  } finally {
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+}

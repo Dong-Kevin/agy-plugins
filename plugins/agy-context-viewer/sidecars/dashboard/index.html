@@ -219,12 +219,12 @@
                 <span id="ctx-budget" class="m-val">--</span>
                 <span id="ctx-budget-sub" class="m-sub">服务端实时阈值</span>
               </div>
-              <div class="metric-cell">
-                <span class="m-label">剩余可用</span>
-                <span id="ctx-rem" class="m-val">--</span>
-                <span id="ctx-rem-sub" class="m-sub">--</span>
+              <div class="metric-cell" id="ctx-session-cache-cell" title="当前会话全部有效轮次的加权平均缓存命中率（累计缓存读取 / 累计提示输入）">
+                <span class="m-label">会话平均缓存</span>
+                <span id="ctx-session-cache" class="m-val accent-text">--</span>
+                <span id="ctx-session-cache-sub" class="m-sub">累计均值</span>
               </div>
-              <div class="metric-cell">
+              <div class="metric-cell" id="ctx-cache-rate-cell" title="最近一轮已完成请求的缓存读取占比">
                 <span class="m-label">单轮缓存命中</span>
                 <span id="ctx-cache-rate" class="m-val accent-text">--</span>
                 <span id="ctx-cache-sub" class="m-sub">缓存读取占比</span>
@@ -252,6 +252,18 @@
           </div>
 
           <div id="ctx-takeaway" class="takeaway-box">正在同步当前对话上下文指标…</div>
+
+          <!-- Session Models & Per-Model Average Cache Hit Rate -->
+          <div id="ctx-session-models-wrap" class="session-models-wrap hidden">
+            <div class="session-models-head">
+              <div class="title-group">
+                <span class="sub-heading no-margin">本会话使用模型</span>
+                <span id="ctx-session-models-count" class="meta-chip num">0 个模型</span>
+              </div>
+              <span id="ctx-session-models-hint" class="muted xs">模型级平均缓存命中率</span>
+            </div>
+            <div id="ctx-session-models-list" class="session-models-list"></div>
+          </div>
 
           <!-- Collapsible Session Cumulative Throughput & Cost Strip -->
           <div class="cum-section">
@@ -533,6 +545,7 @@
               <button type="button" class="seg-btn" data-chart="monthly">每月</button>
               <button type="button" class="seg-btn" data-chart="yearly">今年</button>
               <button type="button" class="seg-btn" data-chart="cumulative">累计</button>
+              <button type="button" class="seg-btn" data-chart="custom">自定义</button>
             </div>
           </div>
 
@@ -549,6 +562,40 @@
             </div>
             <span id="hourly-range-label" class="muted xs num">--</span>
           </div>
+
+          <div id="custom-range-row" class="custom-range-row hidden">
+            <div class="custom-range-top">
+              <div class="custom-date-inputs">
+                <label class="custom-date-field" title="统计开始日期">
+                  <span>从</span>
+                  <input id="custom-start-date" type="date" aria-label="统计开始日期">
+                </label>
+                <span class="muted xs">至</span>
+                <label class="custom-date-field" title="统计结束日期">
+                  <input id="custom-end-date" type="date" aria-label="统计结束日期">
+                </label>
+              </div>
+              <div class="seg-group" id="custom-gran-seg" role="group" aria-label="统计聚合粒度">
+                <button type="button" class="seg-btn active" data-cgran="auto">自动</button>
+                <button type="button" class="seg-btn" data-cgran="day">按天</button>
+                <button type="button" class="seg-btn" data-cgran="week">按周</button>
+                <button type="button" class="seg-btn" data-cgran="month">按月</button>
+              </div>
+            </div>
+            <div class="custom-range-presets">
+              <div class="seg-group" id="custom-preset-seg" role="group" aria-label="快捷日期区间">
+                <button type="button" class="seg-btn" data-cpreset="7d">近 7 天</button>
+                <button type="button" class="seg-btn active" data-cpreset="30d">近 30 天</button>
+                <button type="button" class="seg-btn" data-cpreset="90d">近 90 天</button>
+                <button type="button" class="seg-btn" data-cpreset="mtd">本月</button>
+                <button type="button" class="seg-btn" data-cpreset="prevMonth">上月</button>
+                <button type="button" class="seg-btn" data-cpreset="all">全量</button>
+              </div>
+              <span id="custom-range-meta" class="muted xs num">--</span>
+            </div>
+          </div>
+
+          <div id="custom-range-summary" class="custom-range-summary hidden"></div>
 
           <div id="chart-stage" class="chart-stage"></div>
 

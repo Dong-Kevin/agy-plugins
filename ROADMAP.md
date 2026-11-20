@@ -1,13 +1,14 @@
 # agy-plugins ROADMAP
 
-更新时间：2026-11-19 18:27（Asia/Shanghai）。
+更新时间：2026-11-20 10:02（Asia/Shanghai）。
 
 ## 本次交付目标
 
-1. 完成 `context-viewer` 竞品启发 **P1 + P2 合规整合**（基于 `WhiteBr1ck/agy-powertools` 调研审核，严守零外依、零 CDP、运行期零静默联网与 `statusline` 零退化）：
+1. 完成 `context-viewer` 缓存洞察与趋势统计体验优化（会话平均缓存率、分模型平均缓存率、自定义日期趋势统计、热力图与 KPI 响应式排版及前后端性能优化）。
+2. 完成 `context-viewer` 竞品启发 **P1 + P2 合规整合**（基于 `WhiteBr1ck/agy-powertools` 调研审核，严守零外依、零 CDP、运行期零静默联网与 `statusline` 零退化）：
    - **P1 精细遥测**：`sqlite_reader.mjs` 补全 `usage`（思考/正文）、`context_window_metadata.tokenBreakdown`、`retries` / `retryErrors` / `genError` / `requestId` 解码；`collector.mjs` 独立拆出 `Skills` 上下文分组并用最大余数法对齐实测输入、补齐端到端有效吞吐 `effectiveTps` 与按 `requestId` 去重；CLI (`status`/`turns`/`events`/`json`) 与 GUI 同步呈现。
    - **P2 官方定价查看与显式手动同步**：`pricing.mjs` 新增 `Accept: text/markdown` 官方定价解析（兼容 `{% tab title="Standard" %}` 与 `<tab>` 及 `starting <Month Day, Year>` 分段）、本地原子覆盖快照 `pricing_override_v1.json` 与 `syncOfficialPricing()` / `getEffectivePricingCatalog()`；新增 `agy-context pricing [--sync|--reset|--json]`。
-2. 保留既有基线成果（`statusline` 快速通道、`context-viewer v1.8.0` Batch 1 + Batch 2、`Gemini 4 Neon` 适配与 `agy-finder v0.2.8`）。
+3. 保留既有基线成果（`statusline` 快速通道、`context-viewer v1.8.0` Batch 1 + Batch 2、`Gemini 4 Neon` 适配与 `agy-finder v0.2.8`）。
 
 ## 后置与挂起事项
 
@@ -15,7 +16,14 @@
 
 ## 当前阶段与状态
 
-- **已完成 `context-viewer` P1 + P2 整合实现、代码审查、全仓门禁、打包与本机 `./install.sh context-viewer` 热同步（同步 `main`）**：
+- **已完成 `context-viewer` 缓存洞察、分模型缓存率与自定义日期趋势优化，并通过全仓严格校验、打包与本机 `./install.sh context-viewer` 热同步（尚未 Git 提交，待 boss 确认）**：
+  - **Hero 指标重组与无截断优化**（[index.html](./plugins/agy-context-viewer/sidecars/dashboard/index.html)、[app.js](./plugins/agy-context-viewer/sidecars/dashboard/app.js)、[styles.css](./plugins/agy-context-viewer/sidecars/dashboard/styles.css)）：将首屏「剩余可用」单元格替换为「会话平均缓存」（`#ctx-session-cache` / `#ctx-session-cache-sub`，按总缓存读取 / 总提示输入加权计算，并与单轮命中率统一采用分级语义着色），同步将剩余额度收纳至「预算上限」副说明（`余 XX (YY%)`）并保留后端 `context.remaining` 兼容字段；`.metric-cell .m-sub` 改为最多 2 行优雅换行，消除窄屏下关键数字被 `...` 截断。
+  - **本会话使用模型与模型级平均缓存率**（[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs)、[cli.mjs](./plugins/agy-context-viewer/sidecars/dashboard/cli.mjs)、[index.html](./plugins/agy-context-viewer/sidecars/dashboard/index.html)、[app.js](./plugins/agy-context-viewer/sidecars/dashboard/app.js)）：`scanConversation()` 在单遍轮次遍历中按归一化模型族归并计算 `sessionModels`（含各模型轮次、加权平均缓存率、命中/总提示 Token、均速、折算费用、缓存省钱、档位变体与 `isCurrent` 标记）；GUI 在 Hero 卡总结栏下方新增 `#ctx-session-models-wrap`（带当前徽标、比例微进度条与完整 tooltip），「按模型步」明细补充模型芯片；CLI `status` / `json` 同步输出「会话均值」与「模型缓存」。
+  - **Token 活跃趋势「自定义」日期统计与热力图自适应**（[index.html](./plugins/agy-context-viewer/sidecars/dashboard/index.html)、[app.js](./plugins/agy-context-viewer/sidecars/dashboard/app.js)、[styles.css](./plugins/agy-context-viewer/sidecars/dashboard/styles.css)、[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs)）：Tab 2 周期切换新增 `自定义` 模式（`#custom-range-row`），支持任意起止日期选择器、6 个一键预设（`近 7 天 / 近 30 天 / 近 90 天 / 本月 / 上月 / 全量`）、自动/按天/按周/按月粒度切换、倒置日期自动纠偏与 `#custom-range-summary` 区间汇总（含区间平均缓存率与分模型芯片）；`addDaily` `byModel` 补充 `input`/`cache` 字段；修复 53 周热力图在窄侧栏下的横向溢出及早于首次记录时「前一年」按钮未禁用问题。
+  - **CLI 状态栏 / `watch` 生成速度与弹窗口径对齐及轻量 SQLite 刷新修复**（[cli.mjs](./plugins/agy-context-viewer/sidecars/dashboard/cli.mjs)、[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs)、[sqlite_reader.mjs](./plugins/agy-context-viewer/sidecars/dashboard/sqlite_reader.mjs)、[context-viewer/scripts/verify.mjs](./plugins/agy-context-viewer/scripts/verify.mjs)）：统一 `statusline` 与 `watch` 优先读取与弹窗主卡/每轮明细一致的综合速度 `sp.tps ?? sp.streamingTps`（并在 `statusline` 保留最多 1 位小数如 `98.4t/s`），取代此前优先展示 `streamingTps` 导致的倍差跳变；修复 CLI 无 LS 环境变量时 `lightweight` 因历史 `active_conv_gen_cache_v1.json` 含旧轮次 timing 而跳过 SQLite `gen_metadata`、旧步误绑定及 `statusline_snap_v1.json` 误标 `metaSettled: true` 锁死 15s 且未校验 `convDbSig`（含 `-wal`）与 `genCacheMtimeMs` 导致回退估算偏差的问题；`readConversationLatestGenSignal()` 扩展至最近 6 条（保留首条顶级字段、含 `usage` 且不解析 `breakdown`），`verifyStatuslineFastPath` 新增对应回归验证。
+  - **性能优化与回归校验**（[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs)、[app.js](./plugins/agy-context-viewer/sidecars/dashboard/app.js)、[context-viewer/scripts/verify.mjs](./plugins/agy-context-viewer/scripts/verify.mjs)）：`scanConversation()` 消除重复 `existsSync`/`statSync`，并将 `heavyCandidates` 文本剥离与正则脱敏延迟至 Top 10 截断之后；前端 `#chart-stage` 改用单点事件委托取代数百个单元格/柱条独立监听器；修复 CLI `sessionTotals.turnsCount` 在超过 40 轮会话中被最近 40 轮切片截断的问题；更新 `T3`/`R2` 断言并新增 `verifyCacheStatsAndCustomRange` 覆盖后端、VM 前端与 CLI 全链路回归；已运行 `node scripts/verify.mjs --strict-git-identity`、`node scripts/package-all.mjs` 与本机 `./install.sh context-viewer` 热同步全部通过（未在 Windows/Linux 桌面端与 Node.js 18 环境实测）。
+
+- **已完成 `context-viewer` 竞品启发 P1 + P2 合规整合、代码审查、全仓门禁、打包与本机 `./install.sh context-viewer` 热同步（同步 `main`）**：
   - **官方定价解析与显式手动同步**（[pricing.mjs](./plugins/agy-context-viewer/sidecars/dashboard/pricing.mjs)、[cli.mjs](./plugins/agy-context-viewer/sidecars/dashboard/cli.mjs)）：核实内置表已具备 `2026-12-01`（Carbon / Argon）与 `2027-01-01`（Flash）分段规则；新增 `parseOfficialGeminiPricingMarkdown()`（兼容 `{% tab title="Standard" %}` 跨行列表块与 `<tab>` 表格，跳过多档 `>200K` / `image` / `embedding`）、本地原子快照 `pricing_override_v1.json` 存取、`syncOfficialPricing()`（0 条解析保护）与 `getEffectivePricingCatalog()`，`matchPricingRule()` 兼容可选第 4 参数 `overrides`；新增 `agy-context pricing [--sync|--reset|--json]`（默认纯离线展示费率与调价倒计时，仅 `--sync` 手动联网）。
   - **精细 Protobuf 解码、Skills 拆出校准与端到端吞吐**（[sqlite_reader.mjs](./plugins/agy-context-viewer/sidecars/dashboard/sqlite_reader.mjs)、[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs)）：补全 `gen_metadata` 的 `usage`（`thinkingTokens`/`responseTokens`）、`context_window_metadata.tokenBreakdown`（仅 `includeLatestGenDetail: true` 或小行开启，`readConversationLatestGenSignal()` 零额外开销）、`retries`/`retryErrors`/`genError`/`requestId` 解码与脱敏；`extractContextBreakdown()` 独立拆出 `Skills` 分组并用最大余数法校准总和严格等于实测输入，无 LS 时自动回退 SQLite breakdown；新增 `resolveThinkingAndResponse()` 修复 SQLite 补齐思考 tokens 后 `responseTokens` 未扣减的边界问题，新增 `effectiveTps` 与按 `requestId` 去重；同步增强 CLI `status`/`turns`/`events`/`json`、GUI（[app.js](./plugins/agy-context-viewer/sidecars/dashboard/app.js)、[styles.css](./plugins/agy-context-viewer/sidecars/dashboard/styles.css)）与文档（[SKILL.md](./plugins/agy-context-viewer/skills/context-viewer/SKILL.md)、[plugins/agy-context-viewer/README.md](./plugins/agy-context-viewer/README.md)、[plugins/agy-context-viewer/README_EN.md](./plugins/agy-context-viewer/README_EN.md)）。
   - **新增专项回归**（[context-viewer/scripts/verify.mjs](./plugins/agy-context-viewer/scripts/verify.mjs)）：新增 `verifyPowertoolsP1P2Features()` 全链路覆盖 `sqlite_reader`、`collector`、`pricing`、GUI VM 与 CLI 子进程回归。
