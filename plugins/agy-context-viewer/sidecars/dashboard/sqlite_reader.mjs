@@ -136,7 +136,7 @@ async function openReadOnlyDb(dbPath, timeoutMs = 1500, options = {}) {
     return null;
   }
   if (!(await isSqliteAvailable())) return null;
-  const safeTimeout = Math.max(50, Number(timeoutMs) || 1500);
+  const safeTimeout = Math.max(20, Number(timeoutMs) || 1500);
   let db = null;
   try {
     db = new cachedDatabaseSync(dbPath, { readOnly: true, timeout: safeTimeout });
@@ -1482,7 +1482,7 @@ export async function readConversationLatestGenSignal(convDbPath, options = {}) 
     return cached.value;
   }
 
-  const timeoutMs = Math.max(50, Number(options.timeoutMs) || 200);
+  const timeoutMs = Math.max(20, Number(options.timeoutMs) || 200);
   const db = await openReadOnlyDb(convDbPath, timeoutMs);
   if (!db) return null;
 

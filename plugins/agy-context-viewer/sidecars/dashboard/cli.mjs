@@ -15,35 +15,412 @@
  *   node cli.mjs web [--port N]   # Launch standalone Web UI in default browser
  */
 
+const PROCESS_START_MS = Date.now();
+
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync, statSync, watch } from 'node:fs';
+import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import {
-  collectTokenHistory,
-  findAppDataDir,
-  findCliDataDir,
-  getAuxShortcutConfig,
-  getCliStatusLineConfig,
-  getMenubarMode,
-  getPluginStateDir,
-  getShortcutConfig,
-  getSidebarEntryStatus,
-  isCliRuntimeEnv,
-  MENUBAR_MODES,
-  noteCliActiveHint,
-  scanConversation,
-  setCliStatusLineConfig,
-  setSidebarEntrypoint,
-  syncSidebarManifestFromSettings
-} from './collector.mjs';
-import {
-  clearLocalPricingOverrides,
-  formatModelDisplayName,
-  getEffectivePricingCatalog,
-  syncOfficialPricing
-} from './pricing.mjs';
+let collectorMod = null;
+async function loadCollectorMod() {
+  if (!collectorMod) {
+    collectorMod = await import('./collector.mjs');
+  }
+  return collectorMod;
+}
+
+let pricingMod = null;
+async function loadPricingMod() {
+  if (!pricingMod) {
+    pricingMod = await import('./pricing.mjs');
+  }
+  return pricingMod;
+}
+
+const CONV_ID_RE = /^[0-9a-f-]{8,64}$/i;
+const FAST_MODEL_DISPLAY_NAMES = {
+  'gemini-4-carbon': 'Gemini 4 Carbon',
+  'gemini-4-argon': 'Gemini 4 Argon',
+  'gemini-4-neon': 'Gemini 4 Neon',
+  'gemini-4-hydrogen': 'Gemini 4 Hydrogen',
+  'gemini-3.8-flash': 'Gemini 3.8 Flash',
+  'claude-opus-5-5': 'Claude Opus 5.5',
+  'claude-sonnet-5-5': 'Claude Sonnet 5.5',
+  'gpt-oss-120b': 'GPT-OSS 120B',
+  'gemini-3.1-pro-preview': 'Gemini 3.1 Pro Preview',
+  'gemini-3.5-flash-lite': 'Gemini 3.5 Flash-Lite',
+  'gemini-2.5-pro': 'Gemini 2.5 Pro'
+};
+const FAST_PLACEHOLDER_MODEL_MAP = {
+  model_placeholder_m427: 'gemini-4-carbon',
+  model_placeholder_m437: 'gemini-4-carbon',
+  model_placeholder_m438: 'gemini-4-carbon',
+  model_placeholder_m667: 'gemini-4-carbon',
+  model_placeholder_m417: 'gemini-4-argon',
+  model_placeholder_m418: 'gemini-4-argon',
+  model_placeholder_m419: 'gemini-4-argon',
+  model_placeholder_m681: 'gemini-4-argon',
+  model_placeholder_m532: 'gemini-4-neon',
+  model_placeholder_m533: 'gemini-4-neon',
+  model_placeholder_m534: 'gemini-4-neon',
+  model_placeholder_m535: 'gemini-4-neon',
+  model_placeholder_m537: 'gemini-4-neon',
+  model_placeholder_m525: 'gemini-4-hydrogen',
+  model_placeholder_m526: 'gemini-4-hydrogen',
+  model_placeholder_m527: 'gemini-4-hydrogen',
+  model_placeholder_m528: 'gemini-4-hydrogen',
+  model_placeholder_m318: 'gemini-3.8-flash',
+  model_placeholder_m319: 'gemini-3.8-flash',
+  model_placeholder_m320: 'gemini-3.8-flash',
+  model_placeholder_m322: 'gemini-3.8-flash',
+  model_placeholder_m400: 'claude-opus-5-5',
+  model_placeholder_m401: 'claude-opus-5-5',
+  model_placeholder_m402: 'claude-opus-5-5',
+  model_placeholder_m403: 'claude-sonnet-5-5',
+  model_placeholder_m404: 'claude-sonnet-5-5',
+  model_placeholder_m405: 'claude-sonnet-5-5',
+  model_openai_gpt_oss_120b_medium: 'gpt-oss-120b'
+};
+
+function normalizeModelIdFast(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  const s = raw.trim().toLowerCase();
+  if (!s || s === 'none') return null;
+  if (FAST_PLACEHOLDER_MODEL_MAP[s]) return FAST_PLACEHOLDER_MODEL_MAP[s];
+  if (Object.prototype.hasOwnProperty.call(FAST_MODEL_DISPLAY_NAMES, s)) return s;
+  if (/(?:^|[\s/_-])(?:gemini[-_\s]*)?4[-_\s]*carbon(?:$|[^a-z0-9])/.test(s) || /\borchestrator\s*[\s/_(-]*\bcarbon\b/.test(s)) return 'gemini-4-carbon';
+  if (/(?:^|[\s/_-])(?:gemini[-_\s]*)?4[-_\s]*argon(?:$|[^a-z0-9])/.test(s) || /\borchestrator\s*[\s/_(-]*\bargon\b/.test(s)) return 'gemini-4-argon';
+  if (/(?:^|[\s/_-])(?:gemini[-_\s]*)?4[-_\s]*neon(?:$|[^a-z0-9])/.test(s) || /\borchestrator\s*[\s/_(-]*\bneon\b/.test(s)) return 'gemini-4-neon';
+  if (/(?:^|[\s/_-])(?:gemini[-_\s]*)?4[-_\s]*hydrogen(?:$|[^a-z0-9])/.test(s) || /\borchestrator\s*[\s/_(-]*\bhydrogen\b/.test(s)) return 'gemini-4-hydrogen';
+  if (/(?:^|[\s/_-])(?:gemini[-_\s]*)?3[._-]5[-_\s]*flash[-_\s]*lite(?:$|[^a-z0-9])/.test(s)) return 'gemini-3.5-flash-lite';
+  if (/(?:^|[\s/_-])(?:gemini[-_\s]*)?3[._-]8[-_\s]*flash(?:$|[^a-z0-9])/.test(s) && !/flash[-_\s]*lite/.test(s)) return 'gemini-3.8-flash';
+  if (/\bclaude\b/.test(s) && /(?:opus[-_\s]*5[._-]5|5[._-]5[-_\s]*opus)(?:$|[^0-9])/.test(s)) return 'claude-opus-5-5';
+  if (/\bclaude\b/.test(s) && /(?:sonnet[-_\s]*5[._-]5|5[._-]5[-_\s]*sonnet)(?:$|[^0-9])/.test(s)) return 'claude-sonnet-5-5';
+  if (/(?:^|[\s/_-])gpt[-_\s]*oss[-_\s]*120b(?:$|[^a-z0-9])/.test(s)) return 'gpt-oss-120b';
+  if (/(?:^|[\s/_-])(?:gemini[-_\s]*3[._-]1|3\.1)[-_\s]*pro(?:$|[^a-z0-9])/.test(s)) return 'gemini-3.1-pro-preview';
+  if (/(?:^|[\s/_-])(?:gemini[-_\s]*2[._-]5|2\.5)[-_\s]*pro(?:$|[^a-z0-9])/.test(s)) return 'gemini-2.5-pro';
+  return null;
+}
+
+function formatModelDisplayNameFast(rawModel) {
+  if (pricingMod?.formatModelDisplayName) {
+    return pricingMod.formatModelDisplayName(rawModel);
+  }
+  const key = normalizeModelIdFast(rawModel);
+  if (rawModel && !/^MODEL_PLACEHOLDER_/i.test(rawModel) && !/^MODEL_/i.test(rawModel)) {
+    const clean = String(rawModel).trim();
+    if (/^[a-z0-9._-]+$/i.test(clean) && key && FAST_MODEL_DISPLAY_NAMES[key]) {
+      return FAST_MODEL_DISPLAY_NAMES[key];
+    }
+    return clean;
+  }
+  if (key && FAST_MODEL_DISPLAY_NAMES[key]) return FAST_MODEL_DISPLAY_NAMES[key];
+  return rawModel || '未记录模型';
+}
+
+function readJsonSafeFast(filePath, fallback = null) {
+  try {
+    if (!existsSync(filePath)) return fallback;
+    const raw = readFileSync(filePath, 'utf-8');
+    if (!raw.trim()) return fallback;
+    return JSON.parse(raw);
+  } catch {
+    const bak = `${filePath}.bak`;
+    try {
+      if (existsSync(bak)) return JSON.parse(readFileSync(bak, 'utf-8'));
+    } catch {}
+    return fallback;
+  }
+}
+
+function findAppDataDirFast() {
+  const execDataDir = process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR;
+  if (execDataDir) {
+    for (let d = execDataDir; d !== dirname(d); d = dirname(d)) {
+      if (basename(d) === 'sidecar_data') {
+        const candidate = dirname(d);
+        if (existsSync(candidate)) return candidate;
+      }
+    }
+  }
+  return process.env.AG_DIR || join(homedir(), '.gemini', 'antigravity');
+}
+
+function findCliDataDirFast() {
+  if (process.env.AG_CLI_DIR) return process.env.AG_CLI_DIR;
+  const appDataDir = String(process.env.ANTIGRAVITY_APP_DATA_DIR || '').trim();
+  if (appDataDir && basename(appDataDir).toLowerCase() === 'antigravity-cli') {
+    return appDataDir;
+  }
+  return join(homedir(), '.gemini', 'antigravity-cli');
+}
+
+function findIdeDataDirFast() {
+  if (process.env.AG_IDE_DIR) return process.env.AG_IDE_DIR;
+  if (process.env.AG_DIR) {
+    const defaultAgDir = join(homedir(), '.gemini', 'antigravity');
+    if (resolve(process.env.AG_DIR) !== resolve(defaultAgDir)) {
+      return join(dirname(process.env.AG_DIR), 'antigravity-ide');
+    }
+  }
+  return join(homedir(), '.gemini', 'antigravity-ide');
+}
+
+function isCliRuntimeEnvFast() {
+  const lsVer = String(process.env.ANTIGRAVITY_LS_VERSION || '').trim().toLowerCase();
+  if (lsVer.startsWith('cli')) return true;
+  const appDataBase = basename(String(process.env.ANTIGRAVITY_APP_DATA_DIR || '').trim()).toLowerCase();
+  if (appDataBase === 'antigravity-cli') return true;
+  if (!process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR) {
+    const exeBase = basename(String(process.env.ANTIGRAVITY_AGENTAPI_EXE || '').trim()).toLowerCase();
+    if (exeBase === 'agy' || exeBase === 'agy.exe') return true;
+  }
+  return false;
+}
+
+function getPluginStateDirFast() {
+  if (process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR) {
+    return process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR;
+  }
+  return join(findAppDataDirFast(), 'sidecar_data', 'context-viewer', 'dashboard', 'data');
+}
+
+function getSidebarEntryStatusFast() {
+  const manifestPath = join(__dirname, 'sidecar.json');
+  const manifest = readJsonSafeFast(manifestPath, null);
+  const views = Array.isArray(manifest?.ui_config?.views) ? manifest.ui_config.views : [];
+  const sidebarEnabled = views.some((v) => v?.entrypoint === 'SIDECAR_UI_ENTRYPOINT_SIDEBAR');
+  return { sidebarEnabled };
+}
+
+function resolveConvDbPathFast(convId, source, agDir, cliDir, ideDir) {
+  if (!convId || !CONV_ID_RE.test(convId)) return '';
+  const dirs = source === 'cli' ? [cliDir, agDir, ideDir] : [agDir, ideDir, cliDir];
+  const seen = new Set();
+  for (const d of dirs) {
+    if (!d || seen.has(d)) continue;
+    seen.add(d);
+    const p = join(d, 'conversations', `${convId}.db`);
+    try {
+      if (existsSync(p)) return p;
+    } catch {}
+  }
+  return '';
+}
+
+function getFileMtimeSigSafeFast(filePath) {
+  try {
+    if (!filePath || !existsSync(filePath)) return '0';
+    const st = statSync(filePath);
+    return `${st.size}:${st.mtimeMs}`;
+  } catch {
+    return '0';
+  }
+}
+
+function getSqliteFileSigSafeFast(dbPath) {
+  const base = getFileMtimeSigSafeFast(dbPath);
+  if (base === '0') return '0';
+  const wal = getFileMtimeSigSafeFast(`${dbPath}-wal`);
+  return wal === '0' ? base : `${base}|${wal}`;
+}
+
+function normalizeLsAddrFast(rawAddr) {
+  const trimmed = String(rawAddr || '').trim();
+  if (!trimmed) return '';
+  try {
+    const withProto = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+    const u = new URL(withProto);
+    const host = u.hostname.toLowerCase() === 'localhost' ? '127.0.0.1' : u.hostname.toLowerCase();
+    return u.port ? `${host}:${u.port}` : host;
+  } catch {
+    return trimmed
+      .toLowerCase()
+      .replace(/^https?:\/\//, '')
+      .replace(/\/+$/, '')
+      .replace(/^localhost(?=:|$)/, '127.0.0.1');
+  }
+}
+
+function hashLsAddrFast(rawAddr) {
+  const norm = normalizeLsAddrFast(rawAddr);
+  if (!norm) return '';
+  return 'ls_' + createHash('sha256').update(norm).digest('hex').slice(0, 16);
+}
+
+function loadStatuslineSnapCacheFast(stateDir) {
+  const raw = readJsonSafeFast(join(stateDir, 'statusline_snap_v1.json'), null);
+  const convs = {};
+  if (raw?.version === 1 && raw.convs && typeof raw.convs === 'object') {
+    for (const [cid, v] of Object.entries(raw.convs)) {
+      if (CONV_ID_RE.test(cid) && v && typeof v === 'object') {
+        convs[cid] = v;
+      }
+    }
+  }
+  return { version: 1, convs };
+}
+
+function hasCrossedQuotaResetBoundaryFast(quotas, cachedAtMs, nowMs) {
+  if (!Array.isArray(quotas) || !quotas.length || !cachedAtMs) return false;
+  for (const pool of quotas) {
+    if (!pool || typeof pool !== 'object') continue;
+    for (const rawIso of [pool.resetTime, pool.fiveHour?.resetTime, pool.weekly?.resetTime]) {
+      if (!rawIso || typeof rawIso !== 'string') continue;
+      const ms = Date.parse(rawIso);
+      if (Number.isFinite(ms) && ms > cachedAtMs && ms <= nowMs) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function readDiskQuotasFallbackFast(stateDir, lsDiskHash = '', nowMs = Date.now()) {
+  const raw = readJsonSafeFast(join(stateDir, 'host_status_cache_v1.json'), null);
+  if (raw?.version !== 1 || !raw.entries || typeof raw.entries !== 'object') return [];
+  let entry = (lsDiskHash && raw.entries[lsDiskHash] && typeof raw.entries[lsDiskHash] === 'object')
+    ? raw.entries[lsDiskHash]
+    : null;
+  if (!entry) {
+    const entries = Object.values(raw.entries)
+      .filter((e) => e && typeof e === 'object' && e.at)
+      .sort((a, b) => Number(b.at || 0) - Number(a.at || 0));
+    entry = entries[0] || null;
+  }
+  if (!entry || !Array.isArray(entry.quotas) || !entry.quotas.length) return [];
+  const ageMs = Math.max(0, nowMs - Number(entry.at || 0));
+  if (ageMs > 30 * 60_000 || hasCrossedQuotaResetBoundaryFast(entry.quotas, entry.at, nowMs)) {
+    return [];
+  }
+  return entry.quotas;
+}
+
+/**
+ * Zero-heavy-import fast check against statusline_snap_v1.json (identical signature rules to collector.mjs).
+ */
+function tryFastStatuslineSnapHit(convId, nowMs = Date.now()) {
+  const stateDir = getPluginStateDirFast();
+  const lsAddr = process.env.ANTIGRAVITY_LS_ADDRESS || '';
+  const lsCsrf = process.env.ANTIGRAVITY_CSRF_TOKEN || '';
+  const lsDiskHash = (lsAddr && lsCsrf) ? hashLsAddrFast(lsAddr) : '';
+  if (!convId || !CONV_ID_RE.test(convId)) {
+    return { hit: false, staleSnap: null, stateDir, lsDiskHash };
+  }
+
+  const snapCache = loadStatuslineSnapCacheFast(stateDir);
+  const snap = snapCache.convs[convId] || null;
+  if (!snap) {
+    return { hit: false, staleSnap: null, stateDir, lsDiskHash };
+  }
+
+  const agDir = findAppDataDirFast();
+  const ideDataDir = findIdeDataDirFast();
+  const cliDataDir = findCliDataDirFast();
+  const cliMode = isCliRuntimeEnvFast();
+
+  const desktopLogsDir = join(agDir, 'brain', convId, '.system_generated', 'logs');
+  const ideLogsDir = join(ideDataDir, 'brain', convId, '.system_generated', 'logs');
+  const cliLogsDir = join(cliDataDir, 'brain', convId, '.system_generated', 'logs');
+  const cliDirectLog = join(cliDataDir, 'brain', convId, 'transcript.jsonl');
+  const hasDesktopLogs = existsSync(desktopLogsDir);
+  const hasIdeLogs = !hasDesktopLogs && ideDataDir !== agDir && existsSync(ideLogsDir);
+  const hasAnyDesktopLogs = hasDesktopLogs || hasIdeLogs;
+  const hasCliLogs = existsSync(cliLogsDir) || existsSync(cliDirectLog);
+  const useCliLogs = (cliMode && hasCliLogs) || (!hasAnyDesktopLogs && hasCliLogs);
+  const conversationSource = useCliLogs ? 'cli' : (cliMode && !hasAnyDesktopLogs ? 'cli' : 'desktop');
+  const brainBase = useCliLogs
+    ? cliLogsDir
+    : (hasDesktopLogs ? desktopLogsDir : (hasIdeLogs ? ideLogsDir : cliLogsDir));
+  const fullPath = join(brainBase, 'transcript_full.jsonl');
+  const compactPath = join(brainBase, 'transcript.jsonl');
+
+  let fullStatMtime = 0;
+  let fullStatSize = 0;
+  if (existsSync(fullPath)) {
+    try {
+      const fst = statSync(fullPath);
+      fullStatMtime = fst.mtimeMs;
+      fullStatSize = fst.size;
+    } catch {}
+  }
+  let compactStatMtime = 0;
+  let compactStatSize = 0;
+  if (existsSync(compactPath)) {
+    try {
+      const cst = statSync(compactPath);
+      compactStatMtime = cst.mtimeMs;
+      compactStatSize = cst.size;
+    } catch {}
+  }
+
+  const targetLogPath = (compactStatSize > 0 || existsSync(compactPath))
+    ? compactPath
+    : ((fullStatMtime > 0 && fullStatSize <= 4 * 1024 * 1024) ? fullPath : cliDirectLog);
+
+  let logStatMtime = 0;
+  let logStatSize = 0;
+  if (targetLogPath === fullPath && fullStatMtime > 0) {
+    logStatMtime = fullStatMtime;
+    logStatSize = fullStatSize;
+  } else if (targetLogPath === compactPath && compactStatMtime > 0) {
+    logStatMtime = compactStatMtime;
+    logStatSize = compactStatSize;
+  } else if (existsSync(targetLogPath)) {
+    try {
+      const st = statSync(targetLogPath);
+      logStatMtime = st.mtimeMs;
+      logStatSize = st.size;
+    } catch {}
+  }
+
+  const hostCacheMtimeMs = getFileMtimeSigSafeFast(join(stateDir, 'host_status_cache_v1.json'));
+  const convDbPath = resolveConvDbPathFast(convId, conversationSource, agDir, cliDataDir, ideDataDir);
+  const convDbSig = getSqliteFileSigSafeFast(convDbPath);
+  const genCacheMtimeMs = getFileMtimeSigSafeFast(join(stateDir, 'active_conv_gen_cache_v1.json'));
+
+  const age = Math.max(0, nowMs - Number(snap.savedAt || 0));
+  const ttl = snap.metaSettled ? 15_000 : 2_000;
+  const sigMatches = (
+    snap.targetLogPath === targetLogPath &&
+    snap.logSize === logStatSize &&
+    snap.logMtimeMs === logStatMtime &&
+    snap.fullSize === fullStatSize &&
+    snap.fullMtimeMs === fullStatMtime &&
+    snap.hostCacheMtimeMs === hostCacheMtimeMs &&
+    snap.convDbSig === convDbSig &&
+    snap.genCacheMtimeMs === genCacheMtimeMs &&
+    snap.lsKeyHash === lsDiskHash &&
+    age < ttl
+  );
+
+  if (!sigMatches) {
+    return { hit: false, staleSnap: snap, stateDir, lsDiskHash };
+  }
+
+  return {
+    hit: true,
+    staleSnap: snap,
+    stateDir,
+    lsDiskHash,
+    ctx: {
+      ok: true,
+      fromStatuslineSnap: true,
+      transcriptProgressed: false,
+      scannedAt: Number(snap.savedAt || nowMs),
+      conversationId: convId,
+      conversationSource,
+      quotas: snap.quotas || [],
+      context: snap.context || {},
+      speed: snap.speed || null,
+      turnsCount: Number(snap.turnsCount || 0),
+      turns: []
+    }
+  };
+}
 
 let floatWindowMod = null;
 async function loadFloatWindowMod() {
@@ -307,6 +684,7 @@ function printHelp() {
 }
 
 async function runMenubarCommand(rawArgs) {
+  const { getMenubarMode, MENUBAR_MODES } = await loadCollectorMod();
   const { controlFloatWindow, getFloatWindowStatus } = await loadFloatWindowMod();
   const sub = (rawArgs.filter((a) => !a.startsWith('-'))[1] || 'toggle').toLowerCase();
   if (rawArgs.includes('--status') || sub === 'status') {
@@ -369,7 +747,8 @@ async function runMenubarCommand(rawArgs) {
   console.log(formatZh(`${c.green}✓${c.reset} ${res.message}`));
 }
 
-function runSidebarCommand(rawArgs) {
+async function runSidebarCommand(rawArgs) {
+  const { getSidebarEntryStatus, setSidebarEntrypoint } = await loadCollectorMod();
   const sub = (rawArgs.filter((a) => !a.startsWith('-'))[1] || 'toggle').toLowerCase();
   if (rawArgs.includes('--status') || sub === 'status') {
     const st = getSidebarEntryStatus();
@@ -486,6 +865,7 @@ async function runShortcutCommand(rawArgs, { isAux = false } = {}) {
     (!rawSub && !hasGlobalFlag && !hasAppFlag && !hasResetFlag && !hasOffFlag && !hasOnFlag);
 
   if (isPureStatus) {
+    const { getAuxShortcutConfig, getShortcutConfig } = await loadCollectorMod();
     const { getFloatWindowStatus } = await loadFloatWindowMod();
     const fw = getFloatWindowStatus();
     const sc = isAux ? (fw.auxShortcut || getAuxShortcutConfig()) : (fw.shortcut || getShortcutConfig());
@@ -578,7 +958,7 @@ function buildCompactSummary(ctx = {}, hist = {}) {
   const costAll = safeHist.analyticsBySource?.all?.costs?.allTime?.hybrid || {};
   const plan = safeHist.planStatus || {};
   const activeConvMeta = (safeCtx.recentConversations || []).find((item) => item.id === safeCtx.conversationId);
-  const runtimeEnv = isCliRuntimeEnv() ? 'cli' : 'desktop';
+  const runtimeEnv = isCliRuntimeEnvFast() ? 'cli' : 'desktop';
   const convSource = activeConvMeta?.source || safeCtx.conversationSource || runtimeEnv;
 
   const compactAgentTree = rawAgentTree
@@ -618,7 +998,7 @@ function buildCompactSummary(ctx = {}, hist = {}) {
     entrypoints: {
       sidecarAuxPane: `sidecar://${PLUGIN_DIR_ID}/dashboard/`,
       sidebarFullPane: `sidecar://${PLUGIN_DIR_ID}/dashboard/sidebar`,
-      sidebarTabEnabled: getSidebarEntryStatus().sidebarEnabled,
+      sidebarTabEnabled: getSidebarEntryStatusFast().sidebarEnabled,
       customizationSettings: `customization://${PLUGIN_DIR_ID}`
     },
     floatWindow: floatWindowMod ? floatWindowMod.getFloatWindowStatus() : null,
@@ -1336,6 +1716,7 @@ async function readStdinBounded(timeoutMs = 150) {
     const onEnd = () => finish();
     const onErr = () => finish();
     const timer = setTimeout(finish, timeoutMs);
+    timer.unref?.();
     process.stdin.on('data', onData);
     process.stdin.on('end', onEnd);
     process.stdin.on('error', onErr);
@@ -1429,7 +1810,7 @@ function buildStatuslineText(ctx, stdinPayload = {}, { format = 'ansi', terminal
   const rawStdinModel = stdinPayload?.model?.display_name || stdinPayload?.model?.id || '';
   const modelDisplay = (cx.model && cx.model !== '未记录模型')
     ? cx.model
-    : (rawStdinModel ? formatModelDisplayName(rawStdinModel) : '');
+    : (rawStdinModel ? formatModelDisplayNameFast(rawStdinModel) : '');
   const shortModel = formatShortModel(modelDisplay);
 
   const curInput = Number(stdinCur.input_tokens || 0);
@@ -1548,6 +1929,7 @@ async function runStatuslineCommand(rawArgs) {
   const wantJson = rawArgs.includes('--json');
 
   if (['install', 'enable', 'on', 'off', 'disable', 'uninstall', 'remove', 'delete', 'status'].includes(sub)) {
+    const { getCliStatusLineConfig, setCliStatusLineConfig } = await loadCollectorMod();
     const cliEntryPath = resolve(__dirname, 'cli.mjs');
     const res = sub === 'status'
       ? getCliStatusLineConfig()
@@ -1580,7 +1962,7 @@ async function runStatuslineCommand(rawArgs) {
     return;
   }
 
-  const stdinRaw = await readStdinBounded(50);
+  const stdinRaw = await readStdinBounded(35);
   let stdinPayload = {};
   let hasStdinJson = false;
   if (stdinRaw && stdinRaw.trim()) {
@@ -1606,23 +1988,94 @@ async function runStatuslineCommand(rawArgs) {
     : ((rawArgs.includes('--tmux') || fmtFlag === 'tmux') ? 'tmux' : 'ansi');
   const terminalWidth = Number(stdinPayload.terminal_width || getFlagValue(rawArgs, '--width') || process.stdout.columns || 104);
 
-  const ctx = await scanConversation(convArg, {
-    force: false,
-    lightweight: true,
-    background: true,
-    rpcTimeoutMs: 350,
-    sqliteTimeoutMs: 200,
-    allowDiskCacheWithoutLs: true,
-    skipRecentList: Boolean(convArg),
-    noFallbackToRecent: hasStdinJson && !stdinConvId,
-    skipWorkspaceLookup: true
-  });
+  const rawBudgetEnv = Number(process.env.AGY_STATUSLINE_BUDGET_MS);
+  const totalBudgetMs = (Number.isFinite(rawBudgetEnv) && rawBudgetEnv > 0)
+    ? Math.max(80, Math.min(5000, Math.round(rawBudgetEnv)))
+    : 260;
+  const deadlineAt = PROCESS_START_MS + totalBudgetMs;
 
-  if (stdinConvId && ctx?.transcriptProgressed) {
-    noteCliActiveHint(stdinConvId, Date.now());
+  const fastCheck = tryFastStatuslineSnapHit(convArg);
+  if (fastCheck.hit) {
+    const line = buildStatuslineText(fastCheck.ctx, stdinPayload, { format, terminalWidth });
+    if (isDirectRun) {
+      process.stdout.write(`${line}\n`, () => process.exit(0));
+      return;
+    }
+    process.stdout.write(`${line}\n`);
+    return;
+  }
+
+  let ctx = null;
+  let timedOut = false;
+  const remainingBeforeScan = deadlineAt - Date.now();
+  if (remainingBeforeScan <= 20) {
+    timedOut = true;
+  } else {
+    const abortCtrl = new AbortController();
+    let raceTimer = null;
+    const scanPromise = (async () => {
+      const mod = await loadCollectorMod();
+      if (abortCtrl.signal.aborted) return null;
+      const scanned = await mod.scanConversation(convArg, {
+        force: false,
+        lightweight: true,
+        background: true,
+        rpcTimeoutMs: 120,
+        sqliteTimeoutMs: 45,
+        deadlineAt,
+        signal: abortCtrl.signal,
+        allowDiskCacheWithoutLs: true,
+        skipRecentList: Boolean(convArg),
+        noFallbackToRecent: hasStdinJson && !stdinConvId,
+        skipWorkspaceLookup: true
+      });
+      return { scanned, noteCliActiveHint: mod.noteCliActiveHint };
+    })();
+    // Swallow any delayed rejection if the hard deadline fuse resolves first.
+    scanPromise.catch(() => {});
+
+    const timeoutPromise = new Promise((resolveTimeout) => {
+      raceTimer = setTimeout(() => {
+        timedOut = true;
+        try { abortCtrl.abort(); } catch {}
+        resolveTimeout(null);
+      }, Math.max(20, deadlineAt - Date.now()));
+    });
+
+    const raced = await Promise.race([scanPromise, timeoutPromise]);
+    if (raceTimer) clearTimeout(raceTimer);
+
+    if (!timedOut && raced && raced.scanned) {
+      ctx = raced.scanned;
+      if (stdinConvId && ctx?.transcriptProgressed) {
+        raced.noteCliActiveHint(stdinConvId, Date.now());
+      }
+    } else {
+      timedOut = true;
+      try { abortCtrl.abort(); } catch {}
+    }
+  }
+
+  if (timedOut || !ctx) {
+    const staleSnap = fastCheck.staleSnap;
+    const diskQuotas = readDiskQuotasFallbackFast(fastCheck.stateDir, fastCheck.lsDiskHash);
+    ctx = {
+      ok: true,
+      timedOutFallback: true,
+      conversationId: convArg || null,
+      quotas: (Array.isArray(staleSnap?.quotas) && staleSnap.quotas.length) ? staleSnap.quotas : diskQuotas,
+      context: staleSnap?.context || {},
+      speed: staleSnap?.speed || null,
+      turnsCount: Number(staleSnap?.turnsCount || 0),
+      turns: []
+    };
   }
 
   const line = buildStatuslineText(ctx, stdinPayload, { format, terminalWidth });
+  if (isDirectRun) {
+    process.stdout.write(`${line}\n`, () => process.exit(0));
+    return;
+  }
   process.stdout.write(`${line}\n`);
 }
 
@@ -1716,6 +2169,7 @@ function renderWatchPanel(ctx, width = 60, intervalMs = 1500) {
 }
 
 async function runWatchCommand(rawArgs) {
+  const { findAppDataDir, findCliDataDir, scanConversation } = await loadCollectorMod();
   const positionals = rawArgs.filter((a) => !a.startsWith('-'));
   const convArg = (positionals[1] || process.env.ANTIGRAVITY_CONVERSATION_ID || '').trim();
   const once = rawArgs.includes('--once');
@@ -1830,6 +2284,10 @@ function printPricingCatalogTable(catalog) {
 }
 
 async function runPricingCommand(rawArgs) {
+  const [{ getPluginStateDir }, { clearLocalPricingOverrides, getEffectivePricingCatalog, syncOfficialPricing }] = await Promise.all([
+    loadCollectorMod(),
+    loadPricingMod()
+  ]);
   const cacheDir = getPluginStateDir();
   const wantJson = rawArgs.includes('--json');
   const wantSync = rawArgs.includes('--sync');
@@ -1888,6 +2346,7 @@ async function runPricingCommand(rawArgs) {
 async function main() {
   const rawArgs = process.argv.slice(2);
   if (rawArgs.includes('--sync-manifest')) {
+    const { syncSidebarManifestFromSettings } = await loadCollectorMod();
     syncSidebarManifestFromSettings();
     return;
   }
@@ -1941,7 +2400,7 @@ async function main() {
   }
 
   if (cmd === 'sidebar') {
-    runSidebarCommand(rawArgs);
+    await runSidebarCommand(rawArgs);
     return;
   }
 
@@ -1978,6 +2437,7 @@ async function main() {
 
   const needContext = wantJson || !isEventsCmd;
   const needHistory = wantJson || isEventsCmd || (cmd !== 'turns' && cmd !== 'heavy' && cmd !== 'tree' && cmd !== 'compact');
+  const { collectTokenHistory, scanConversation } = await loadCollectorMod();
   const [ctx, hist] = await Promise.all([
     needContext ? scanConversation(convArg, { force: true, allowDiskCacheWithoutLs: true }) : Promise.resolve({}),
     needHistory ? collectTokenHistory({ force: true, convId: convArg, allowDiskCacheWithoutLs: true }) : Promise.resolve({})

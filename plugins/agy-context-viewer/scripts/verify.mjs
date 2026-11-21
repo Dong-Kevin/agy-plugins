@@ -7842,10 +7842,15 @@ async function verifyStatuslineFastPath() {
     ANTIGRAVITY_IDE_DATA_DIR: process.env.ANTIGRAVITY_IDE_DATA_DIR,
     ANTIGRAVITY_LS_ADDRESS: process.env.ANTIGRAVITY_LS_ADDRESS,
     ANTIGRAVITY_CSRF_TOKEN: process.env.ANTIGRAVITY_CSRF_TOKEN,
-    ANTIGRAVITY_CONVERSATION_ID: process.env.ANTIGRAVITY_CONVERSATION_ID
+    ANTIGRAVITY_CONVERSATION_ID: process.env.ANTIGRAVITY_CONVERSATION_ID,
+    AGY_STATUSLINE_BUDGET_MS: process.env.AGY_STATUSLINE_BUDGET_MS
   };
 
   let slowServer = null;
+  let trickleServer = null;
+  let hangServer = null;
+  const trickleSockets = new Set();
+  const hangSockets = new Set();
   try {
     const agDir = join(tmpSlRoot, 'ag');
     const cliDir = join(tmpSlRoot, 'cli');
@@ -8188,7 +8193,7 @@ async function verifyStatuslineFastPath() {
       }, 3000);
       child.stdout.on('data', (d) => { out += d.toString('utf8'); });
       child.stderr.on('data', (d) => { err += d.toString('utf8'); });
-      child.on('exit', (code) => {
+      child.on('close', (code) => {
         clearTimeout(killer);
         resolveChild({ code, out, err, elapsed: Date.now() - t0 });
       });
@@ -8199,9 +8204,235 @@ async function verifyStatuslineFastPath() {
       stdinResult.code === 0 && stdinResult.out.includes('13.5K') && stdinResult.elapsed < 2500,
       `未关闭 stdin 发送完整 JSON 后 statusline 应立即退出并输出：code=${stdinResult.code}, elapsed=${stdinResult.elapsed}ms, out=${stdinResult.out}`
     );
+
+    // 6. Trickle RPC server (40ms/byte): wall-clock hard timeout must interrupt callLanguageServerWithStatus & cli statusline
+    trickleServer = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.write('{');
+      const iv = setInterval(() => {
+        if (res.writableEnded || res.destroyed) {
+          clearInterval(iv);
+          return;
+        }
+        try { res.write(' '); } catch { clearInterval(iv); }
+      }, 40);
+      res.on('close', () => clearInterval(iv));
+    });
+    trickleServer.on('connection', (sock) => {
+      trickleSockets.add(sock);
+      sock.on('close', () => trickleSockets.delete(sock));
+    });
+    await new Promise((resolveListen) => trickleServer.listen(0, '127.0.0.1', resolveListen));
+    const tricklePort = trickleServer.address().port;
+    process.env.ANTIGRAVITY_LS_ADDRESS = `127.0.0.1:${tricklePort}`;
+    process.env.ANTIGRAVITY_CSRF_TOKEN = 'trickle-csrf-token';
+
+    const tTrickle0 = Date.now();
+    const trickleRpcRes = await collectorMod.callLanguageServerWithStatus(
+      'GetUserStatus',
+      {},
+      120,
+      { unrefSocket: true, noKeepAlive: true }
+    );
+    const trickleRpcElapsed = Date.now() - tTrickle0;
+    assert(
+      trickleRpcRes?.data === null && trickleRpcRes?.errorCode === 'ETIMEDOUT' && trickleRpcElapsed < 400,
+      `滴漏分块 RPC 应触发 wall-clock 硬超时 (ETIMEDOUT, <400ms)，实际：${JSON.stringify(trickleRpcRes)} (${trickleRpcElapsed}ms)`
+    );
+
+    const runCliStatuslineTimed = (args, stdinObj, extraEnv = {}) => new Promise((resolveChild, rejectChild) => {
+      const t0 = Date.now();
+      const child = spawn(process.execPath, [cliEntry, 'statusline', ...args], {
+        env: { ...process.env, ...extraEnv },
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+      let out = '';
+      let err = '';
+      const killer = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch {}
+        rejectChild(new Error(`statusline 子进程超时 (>3000ms)`));
+      }, 3000);
+      child.stdout.on('data', (d) => { out += d.toString('utf8'); });
+      child.stderr.on('data', (d) => { err += d.toString('utf8'); });
+      child.on('close', (code) => {
+        clearTimeout(killer);
+        resolveChild({ code, out, err, elapsed: Date.now() - t0 });
+      });
+      if (stdinObj !== null) {
+        child.stdin.end(JSON.stringify(stdinObj));
+      } else {
+        child.stdin.end();
+      }
+    });
+
+    const trickleCliRes = await runCliStatuslineTimed(
+      ['--plain', '--width', '120'],
+      { conversation_id: convId },
+      { AGY_STATUSLINE_BUDGET_MS: '250' }
+    );
+    assert(
+      trickleCliRes.code === 0 && trickleCliRes.elapsed < 700 && trickleCliRes.out.includes('13.5K'),
+      `滴漏 RPC + BUDGET=250ms 下 statusline 应在 <700ms 内返回 rc=0 并输出有效状态栏：code=${trickleCliRes.code}, elapsed=${trickleCliRes.elapsed}ms, out=${trickleCliRes.out}`
+    );
+
+    // 7. Hard deadline fuse (BUDGET=150ms) + hanging RPC: fast rc=0 fallback without polluting statusline_snap_v1.json
+    hangServer = http.createServer((_req, _res) => {
+      // Intentionally never responds to simulate a hung Language Server
+    });
+    hangServer.on('connection', (sock) => {
+      hangSockets.add(sock);
+      sock.on('close', () => hangSockets.delete(sock));
+    });
+    await new Promise((resolveListen) => hangServer.listen(0, '127.0.0.1', resolveListen));
+    const hangPort = hangServer.address().port;
+
+    const snapObjBeforeHang = JSON.parse(readFileSync(snapCacheFile, 'utf-8'));
+    assert(snapObjBeforeHang?.convs?.[convId], '挂死测试前应已存在 statusline_snap_v1.json 快照');
+    snapObjBeforeHang.convs[convId].savedAt = Date.now() - 30_000;
+    writeFileSync(snapCacheFile, JSON.stringify(snapObjBeforeHang, null, 2));
+    const beforeHangSnapRaw = readFileSync(snapCacheFile, 'utf-8');
+
+    const hangCliRes = await runCliStatuslineTimed(
+      ['--plain', '--width', '120'],
+      {
+        conversation_id: convId,
+        model: { display_name: 'Claude Sonnet 4.6' },
+        context_window: { context_window_size: 200000 }
+      },
+      {
+        ANTIGRAVITY_LS_ADDRESS: `127.0.0.1:${hangPort}`,
+        ANTIGRAVITY_CSRF_TOKEN: 'hang-csrf-token',
+        AGY_STATUSLINE_BUDGET_MS: '150'
+      }
+    );
+    const afterHangSnapObj = JSON.parse(readFileSync(snapCacheFile, 'utf-8'));
+    const afterHangSnap = afterHangSnapObj?.convs?.[convId];
+    assert(
+      hangCliRes.code === 0 && hangCliRes.elapsed < 600 && hangCliRes.out.includes('13.5K'),
+      `挂死 RPC + BUDGET=150ms 下应快速回退并输出上一帧快照：code=${hangCliRes.code}, elapsed=${hangCliRes.elapsed}ms, out=${hangCliRes.out}`
+    );
+    assert(
+      afterHangSnap &&
+        afterHangSnap.context?.used === snapObjBeforeHang.convs[convId].context?.used &&
+        afterHangSnap.speed?.tps === snapObjBeforeHang.convs[convId].speed?.tps,
+      `挂死 RPC 回退不得污染既有快照指标：${JSON.stringify(afterHangSnap)}`
+    );
+    // Subsequent tick right after RPC timeout must hit fast cooldown cache instead of storming the hung LS
+    const hangCooldownHitRes = await runCliStatuslineTimed(
+      ['--plain', '--width', '120'],
+      {
+        conversation_id: convId,
+        model: { display_name: 'Claude Sonnet 4.6' },
+        context_window: { context_window_size: 200000 }
+      },
+      {
+        ANTIGRAVITY_LS_ADDRESS: `127.0.0.1:${hangPort}`,
+        ANTIGRAVITY_CSRF_TOKEN: 'hang-csrf-token',
+        AGY_STATUSLINE_BUDGET_MS: '150'
+      }
+    );
+    assert(
+      hangCooldownHitRes.code === 0 && hangCooldownHitRes.elapsed < 250 && hangCooldownHitRes.out.includes('13.5K'),
+      `RPC 超时刷新冷却后下一次 tick 应直接命中极速缓存避免未命中风暴：code=${hangCooldownHitRes.code}, elapsed=${hangCooldownHitRes.elapsed}ms, out=${hangCooldownHitRes.out}`
+    );
+
+    // Expire snap again and verify tight hard-fuse (BUDGET=80ms) aborts without touching snap file
+    const snapObjBeforeTight = JSON.parse(readFileSync(snapCacheFile, 'utf-8'));
+    snapObjBeforeTight.convs[convId].savedAt = Date.now() - 30_000;
+    writeFileSync(snapCacheFile, JSON.stringify(snapObjBeforeTight, null, 2));
+    const beforeTightSnapRaw = readFileSync(snapCacheFile, 'utf-8');
+
+    const tightFuseCliRes = await runCliStatuslineTimed(
+      ['--plain', '--width', '120'],
+      {
+        conversation_id: convId,
+        model: { display_name: 'Claude Sonnet 4.6' },
+        context_window: { context_window_size: 200000 }
+      },
+      {
+        ANTIGRAVITY_LS_ADDRESS: `127.0.0.1:${hangPort}`,
+        ANTIGRAVITY_CSRF_TOKEN: 'hang-csrf-token',
+        AGY_STATUSLINE_BUDGET_MS: '80'
+      }
+    );
+    assert(
+      tightFuseCliRes.code === 0 && tightFuseCliRes.elapsed < 500 && tightFuseCliRes.out.includes('13.5K'),
+      `极紧预算 (BUDGET=80ms) 下硬截止保险丝应直接兜底退出：code=${tightFuseCliRes.code}, elapsed=${tightFuseCliRes.elapsed}ms, out=${tightFuseCliRes.out}`
+    );
+    assert(
+      readFileSync(snapCacheFile, 'utf-8') === beforeTightSnapRaw ||
+        JSON.parse(readFileSync(snapCacheFile, 'utf-8'))?.convs?.[convId]?.context?.used === snapObjBeforeTight.convs[convId].context?.used,
+      '极紧预算 (BUDGET=80ms) 熔断后不得污染 statusline_snap_v1.json 指标'
+    );
+
+    // 8. CLI fast snap cache hit & transcript invalidation consistency
+    delete process.env.ANTIGRAVITY_LS_ADDRESS;
+    delete process.env.ANTIGRAVITY_CSRF_TOKEN;
+    const warmMissRes = await runCliStatuslineTimed(['--plain', '--width', '120'], { conversation_id: convId });
+    const fastHitRes = await runCliStatuslineTimed(['--plain', '--width', '120'], { conversation_id: convId });
+    assert(
+      warmMissRes.code === 0 && fastHitRes.code === 0 &&
+        fastHitRes.out.trim() === warmMissRes.out.trim() &&
+        fastHitRes.out.includes('13.5K'),
+      `重复调用应命中极速快照路径并输出一致状态栏：miss=${warmMissRes.out}, hit=${fastHitRes.out}`
+    );
+
+    writeFileSync(
+      compactPath,
+      [
+        JSON.stringify({ step_index: 0, type: 'USER_INPUT', created_at: '2026-11-19T06:00:00Z', content: 'Fast path test' }),
+        JSON.stringify({
+          step_index: 1,
+          type: 'PLANNER_RESPONSE',
+          created_at: '2026-11-19T06:00:05Z',
+          model: 'claude-sonnet-4-6',
+          input_tokens: 2000,
+          cache_read_tokens: 8000,
+          output_tokens: 400,
+          content: 'Compact answer'
+        }),
+        JSON.stringify({
+          step_index: 2,
+          type: 'PLANNER_RESPONSE',
+          created_at: '2026-11-19T06:00:10Z',
+          model: 'claude-sonnet-4-6',
+          input_tokens: 1000,
+          cache_read_tokens: 12000,
+          output_tokens: 500,
+          content: 'Updated answer'
+        }),
+        JSON.stringify({
+          step_index: 3,
+          type: 'PLANNER_RESPONSE',
+          created_at: '2026-11-19T06:00:15Z',
+          model: 'claude-sonnet-4-6',
+          input_tokens: 1000,
+          cache_read_tokens: 15000,
+          output_tokens: 600,
+          content: 'Refreshed answer'
+        })
+      ].join('\n') + '\n'
+    );
+    const invalidatedRes = await runCliStatuslineTimed(['--plain', '--width', '120'], { conversation_id: convId });
+    assert(
+      invalidatedRes.code === 0 && invalidatedRes.out.includes('16.6K'),
+      `transcript.jsonl 变更后 cli 极速快照应正确失效刷新为 16.6K：${invalidatedRes.out}`
+    );
   } finally {
     if (slowServer) {
       await new Promise((r) => slowServer.close(r));
+    }
+    if (trickleServer) {
+      for (const s of trickleSockets) {
+        try { s.destroy(); } catch {}
+      }
+      await new Promise((r) => trickleServer.close(r));
+    }
+    if (hangServer) {
+      for (const s of hangSockets) {
+        try { s.destroy(); } catch {}
+      }
+      await new Promise((r) => hangServer.close(r));
     }
     for (const [k, v] of Object.entries(savedEnv)) {
       if (v === undefined) delete process.env[k];

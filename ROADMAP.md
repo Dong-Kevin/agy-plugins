@@ -1,17 +1,22 @@
 # agy-plugins ROADMAP
 
-更新时间：2026-11-21 11:20（Asia/Shanghai）。
+更新时间：2026-11-21 16:20（Asia/Shanghai）。
 
 ## 本次交付目标
 
-1. 完成 `context-viewer` 遥测深度与产品设计升级（合规吸收 `antigravity-session-metrics v1.1.0` 精华，拒绝 CDP 注入，融合既有能力并保持零性能退化）：10 类上下文细粒度光谱拆解、模型 vs 工具时间构成、重试去重与 `SQLITE_BUSY` 防闪烁回退、顶部 3 胶囊悬停预览/点击钉住浮层与窄栏紧凑视觉打磨。
-2. 保留并兼容既有成果（缓存洞察、分模型缓存率、自定义日期趋势、P1 + P2 精细遥测与官方定价同步、`statusline` 快速通道、`context-viewer v1.8.0` Batch 1 + Batch 2、`Gemini 4 Neon` 适配与 `agy-finder v0.2.8`）。
+1. 彻底根治 `context-viewer` 中 `agy-context statusline` 偶发 `signal: killed` 超时强杀问题（零重依赖极速快照短路、真实墙钟 RPC 超时与断池、消除 RPC→SQLite 超时瀑布、全链路硬截止保险丝与即时退出），并补齐回归验证。
+2. 保留并兼容既有成果（10 类上下文光谱拆解、模型/工具耗时拆分、顶部胶囊透视浮层、缓存洞察、分模型缓存率、自定义日期趋势、P1 + P2 精细遥测与官方定价同步、`context-viewer v1.8.0`、`Gemini 4 Neon` 适配与 `agy-finder v0.2.8`）。
 
 ## 后置与挂起事项
 
 - **挂起：`agy-fork` / `agy-session`（`agy` CLI 无损会话分叉插件）**：调研确认底层依赖宿主 `ForkConversation` / `UpdateConversationAnnotations` RPC（需处理 `invoke_subagent` 前轮回退），但经 boss 确认当前非刚需且预计官方原生推出，暂挂起不立项。
 
 ## 当前阶段与状态
+
+- **已完成 `context-viewer` `statusline` 超时强杀（`signal: killed`）根治修复、全仓门禁/打包验证与本机 `./install.sh context-viewer` 热同步（同步 `main`）**：
+  - **零重加载极速短路与硬截止保险丝**（[cli.mjs](./plugins/agy-context-viewer/sidecars/dashboard/cli.mjs)）：记录 `PROCESS_START_MS`，将 `collector.mjs`（316 KB）与 `pricing.mjs`（72 KB）改为按需动态加载（保持全部 7 个具名导出同步兼容）；`statusline` 渲染分支先走纯标准库 `tryFastStatuslineSnapHit()` 校验 `statusline_snap_v1.json` 全部 10 项签名与 TTL，命中即跳过 450 KB 重模块直接输出并 `process.exit(0)`；未命中时按 `AGY_STATUSLINE_BUDGET_MS`（默认 `260 ms`）加外层 `Promise.race` 硬截止保险丝，超预算即 abort 并用旧快照 + 磁盘配额 + `stdinPayload` 零闪烁兜底，不污染快照也不误写 `cliActiveConvId`。
+  - **真实墙钟超时、断池、冷却防风暴与消除超时瀑布**（[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs)、[sqlite_reader.mjs](./plugins/agy-context-viewer/sidecars/dashboard/sqlite_reader.mjs)）：`callLanguageServerWithStatus()` 新增独立 wall-clock `hardTimer`（防分块滴漏重置 `req.setTimeout`）、`res.on('error')` 防挂起及 `agent: false` 禁用 keep-alive 池；`scanConversation()`（`lightweight: true`）全程按 `deadlineAt` 扣减剩余预算（RPC `<= 120 ms`，剩余不足 `35 ms` 直接 `skipLiveRpc` 走磁盘缓存）、将 `transcript_full.jsonl` 兜底上限收紧至 `4 MB`、且当 RPC 超时或剩余预算 `< 65 ms` 时禁止串行触发同步 SQLite 查询（`sqlite_reader.mjs` 最小超时下限降至 `20 ms`）；RPC 超时/跳过且同日志签名时保留原有效指标/配额并刷新短冷却签名（`metaSettled: false`），彻底消除连续未命中风暴。
+  - **新增回归用例**（[context-viewer/scripts/verify.mjs](./plugins/agy-context-viewer/scripts/verify.mjs)）：在 `verifyStatuslineFastPath` 补齐 40ms/byte 滴漏 RPC 墙钟中断、挂死 RPC 保留指标并刷新冷却防风暴（下一拍极速命中）、极紧预算（`80 ms`）硬熔断及极速命中/追加失效回归验证。
 
 - **已完成 `context-viewer` 遥测深度与产品视觉/微交互优化，并通过全仓严格校验、打包与本机 `./install.sh context-viewer` 热同步（同步 `main`）**：
   - **后端遥测与稳健性升级**（[sqlite_reader.mjs](./plugins/agy-context-viewer/sidecars/dashboard/sqlite_reader.mjs)、[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs)、[cli.mjs](./plugins/agy-context-viewer/sidecars/dashboard/cli.mjs)）：新增 10 类 `TOKEN_CATEGORIES`（系统提示词/工具定义/规则/MCP 工具/技能/子代理/对话消息/工作流/插件/流程）解码与最大余数法比例校准（LS 缺细类时自动用 SQLite 补齐，保留原有 `groups`/`Skills` 100% 兼容）；新增 `fn=17` 重试去重用量与 `cacheWriteTokens`（`f4`）、`steps.metadata` 工具耗时 `toolTimeSec`、会话累计 `modelTimeSec` / `avgTtftSec` / `rounds` / `steps` / `calls`；文件缓存签名升级为 `ino:size:mtimeMs` 且 `SQLITE_BUSY` 锁库时回退旧缓存（`stale: true`）防闪烁；保持 `readConversationLatestGenSignal`（`statusline` 快速通道）零额外开销；CLI `status` / `json` 同步输出耗时拆分与缓存写入/重试明细。
@@ -132,6 +137,8 @@
 - 已迁移插件：[plugins/agy-finder](./plugins/agy-finder) 、[plugins/agy-context-viewer](./plugins/agy-context-viewer)
 
 ## 最近验证
+
+- `context-viewer` `statusline` 超时强杀根治修复验收：`node scripts/verify.mjs --strict-git-identity` 全仓门禁全部通过（放行沙箱绑定本地回环端口后完整跑通 `context-viewer` 9/9 共 31 个源码文件含新增滴漏/挂死 RPC、防未命中风暴冷却与硬截止熔断回归、`agy-finder` 全部断言、隐私/PNG/Git 身份门禁与跨插件 8 进程锁压测）；`node scripts/package-all.mjs` 通过，产出 `dist/context-viewer-v1.8.0.zip`（`284.9 KB` / 21 个文件 / SHA-256 `c7d3b621b1fd1a34f16d1fa23f3146b7f01e8fb8c21703c7a17f90c5c0693f99`）与 `dist/agy-finder-v0.2.8.zip`（`95.4 KB` / 20 个文件）；`bash ./install.sh context-viewer` 已完成本机热同步，`diff -q` 核对已安装 `cli.mjs`、`collector.mjs`、`sqlite_reader.mjs` 3/3 与仓库源码一致；实盘 210K 长会话直测 `node .../cli.mjs statusline --plain` 冷未命中 `177.7 ms`、随后极速命中降至 `30.3–32.6 ms`（`rc=0`，全量指标正常；Windows PowerShell、Linux 桌面端与 Node.js 18 未在本机实测）。时间：`2026-11-21 16:20`（Asia/Shanghai）。
 
 - `context-viewer` 遥测深度与产品视觉/微交互升级验收：`node scripts/verify.mjs --strict-git-identity` 全仓门禁全部通过（覆盖 `context-viewer` 9/9 共 31 个源码文件含新增 `verifyTelemetryCategoriesAndPopover`、`agy-finder` 全部断言、隐私/PNG/Git 身份门禁与跨插件 8 进程锁压测）；`node scripts/package-all.mjs` 通过，产出 `dist/context-viewer-v1.8.0.zip`（`279.2 KB` / 21 个文件 / SHA-256 `c3fd0ac2dc925b4933118bdb7e20c65fa1d87a6a2159938ef4ddc88ada331eb3`）与 `dist/agy-finder-v0.2.8.zip`（`95.4 KB` / 20 个文件）；`cli.mjs statusline` 冷启动实测 `54.0 ms`（退出码 `0`，无性能回退）；`bash ./install.sh context-viewer` 已完成本机热同步，`diff -q` 核对已安装 `sqlite_reader.mjs`、`collector.mjs`、`cli.mjs`、`index.html`、`styles.css`、`app.js` 6/6 与仓库源码完全一致（Windows PowerShell、Linux 桌面端与 Node.js 18 未在本机实测）。时间：`2026-11-21 11:20`（Asia/Shanghai）。
 

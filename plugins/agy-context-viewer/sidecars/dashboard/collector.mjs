@@ -631,7 +631,7 @@ function getObservedActivityMs() {
 // Official Language Server Connect RPC (uses env vars injected by Sidecar SDK)
 // ---------------------------------------------------------------------------
 
-function callLanguageServerWithStatus(method, payload = {}, timeoutMs = 4500, options = {}) {
+export function callLanguageServerWithStatus(method, payload = {}, timeoutMs = 4500, options = {}) {
   const lsAddr = process.env.ANTIGRAVITY_LS_ADDRESS;
   const csrf = process.env.ANTIGRAVITY_CSRF_TOKEN;
   const signal = options?.signal || null;
@@ -639,9 +639,13 @@ function callLanguageServerWithStatus(method, payload = {}, timeoutMs = 4500, op
     return Promise.resolve({ data: null, errorCode: signal?.aborted ? 'ABORTED' : 'NO_CONFIG' });
   }
 
+  const safeTimeoutMs = Math.max(1, Number(timeoutMs) || 4500);
+  const useNoKeepAlive = Boolean(options?.unrefSocket || options?.noKeepAlive);
+
   return new Promise((resolvePromise) => {
     let settled = false;
     let req = null;
+    let hardTimer = null;
     const onAbort = () => {
       try { req?.destroy(); } catch {}
       finish({ data: null, errorCode: 'ABORTED' });
@@ -649,6 +653,10 @@ function callLanguageServerWithStatus(method, payload = {}, timeoutMs = 4500, op
     const finish = (val) => {
       if (!settled) {
         settled = true;
+        if (hardTimer) {
+          clearTimeout(hardTimer);
+          hardTimer = null;
+        }
         if (signal) {
           try { signal.removeEventListener('abort', onAbort); } catch {}
         }
@@ -659,6 +667,12 @@ function callLanguageServerWithStatus(method, payload = {}, timeoutMs = 4500, op
       signal.addEventListener('abort', onAbort, { once: true });
     }
 
+    hardTimer = setTimeout(() => {
+      try { req?.destroy(); } catch {}
+      finish({ data: null, errorCode: 'ETIMEDOUT' });
+    }, safeTimeoutMs);
+    hardTimer.unref?.();
+
     try {
       const targetUrl = new URL(`http://${lsAddr}/exa.language_server_pb.LanguageServerService/${method}`);
       const bodyStr = JSON.stringify(payload);
@@ -668,6 +682,7 @@ function callLanguageServerWithStatus(method, payload = {}, timeoutMs = 4500, op
           port: targetUrl.port,
           path: targetUrl.pathname,
           method: 'POST',
+          ...(useNoKeepAlive ? { agent: false } : {}),
           headers: {
             'Content-Type': 'application/json',
             'x-codeium-csrf-token': csrf,
@@ -685,6 +700,9 @@ function callLanguageServerWithStatus(method, payload = {}, timeoutMs = 4500, op
               return;
             }
             chunks.push(chunk);
+          });
+          res.on('error', (err) => {
+            finish({ data: null, errorCode: String(err?.code || 'ERR_RESPONSE') });
           });
           res.on('end', () => {
             if (res.statusCode !== 200) {
@@ -704,7 +722,7 @@ function callLanguageServerWithStatus(method, payload = {}, timeoutMs = 4500, op
           sock.unref?.();
         });
       }
-      req.setTimeout(timeoutMs, () => {
+      req.setTimeout(safeTimeoutMs, () => {
         req.destroy();
         finish({ data: null, errorCode: 'ETIMEDOUT' });
       });
@@ -1112,12 +1130,68 @@ async function getHostUserStatus(force = false, options = {}) {
     }
   }
 
+  if (options.skipLiveRpc === true) {
+    const cachedGood = (lastGoodHostData?.lsKey === lsKey ? lastGoodHostData : null) || diskGoodFallback;
+    if (cachedGood) {
+      return buildOutageFallbackHostStatus({
+        lsKey,
+        fetchedAtMs: nowMs,
+        snapshot: cachedGood,
+        source: lastGoodHostData?.lsKey === lsKey ? 'cache' : 'disk_cache',
+        summaryStale: true,
+        errCode: 'BUDGET_SKIPPED',
+        isSandboxBlocked: false
+      });
+    }
+    if (options.allowDiskCacheWithoutLs) {
+      const fb = readLatestDiskHostFallback(nowMs);
+      if (fb) {
+        const { diskEntry: fbEntry, hydrated: fbHydrated } = fb;
+        return buildOutageFallbackHostStatus({
+          lsKey,
+          fetchedAtMs: nowMs,
+          snapshot: {
+            ...fbHydrated,
+            fetchedAt: fbEntry.fetchedAt || null,
+            summaryFetchedAt: fbEntry.summaryFetchedAt || null
+          },
+          source: 'disk_cache',
+          summaryStale: Boolean(fbEntry.quotaStatus?.summaryStale),
+          errCode: 'BUDGET_SKIPPED',
+          isSandboxBlocked: false
+        });
+      }
+    }
+    const plan = parseUserPlanStatus(null);
+    const quotaStatus = makeQuotaStatus('unavailable', {
+      source: 'none',
+      reason: '预算不足已跳过实时语言服务查询'
+    });
+    const sig = computeContentEtag('host', { quotaState: toStableQuotaState(quotaStatus) });
+    return {
+      at: nowMs,
+      lsKey,
+      sig,
+      raw: null,
+      plan,
+      quotas: [],
+      modelConfigs: [],
+      quotaSummaryGroups: [],
+      dynamicModelMap: {},
+      quotaStatus
+    };
+  }
+
   if (!force && inFlightHostStatus && !inFlightHostStatus.force && inFlightHostStatus.lsKey === lsKey) {
     return inFlightHostStatus.promise;
   }
 
   const rpcTimeoutMs = Number(options.rpcTimeoutMs) > 0 ? Number(options.rpcTimeoutMs) : 4500;
-  const rpcOpts = options.unrefSocket ? { unrefSocket: true } : {};
+  const rpcOpts = {
+    ...(options.signal ? { signal: options.signal } : {}),
+    ...(options.unrefSocket ? { unrefSocket: true } : {}),
+    ...(options.noKeepAlive ? { noKeepAlive: true } : {})
+  };
   const runFetch = (async () => {
     const [statusResp, summaryResp] = await Promise.all([
       callLanguageServerWithStatus('GetUserStatus', {}, rpcTimeoutMs, rpcOpts),
@@ -3868,6 +3942,23 @@ async function fetchGeneratorMetadataForConv(convId, force = false, options = {}
     return [];
   };
 
+  if (options.skipLiveRpc === true) {
+    const baseList = resolveBaseList(true);
+    if (baseList.length > 0) {
+      return {
+        at: nowMs,
+        lsKey,
+        generatorList: baseList,
+        callsByStep: buildCallsByStepFromList(baseList),
+        ...(hasLogSig ? { logSize: options.logSize, logMtimeMs: options.logMtimeMs } : {}),
+        fromFallbackCache: true,
+        rpcFailed: true,
+        rpcTimedOut: true
+      };
+    }
+    return { at: nowMs, lsKey, generatorList: [], callsByStep: new Map(), rpcFailed: true, rpcTimedOut: true };
+  }
+
   const flightKey = `${lsKey}|${convId}|${hasLogSig ? `${options.logSize}:${options.logMtimeMs}` : ''}`;
   const canCoalesce = !force && !options.signal && !bypassMemTtl;
   if (canCoalesce && inFlightGenMeta.has(flightKey)) {
@@ -3876,7 +3967,7 @@ async function fetchGeneratorMetadataForConv(convId, force = false, options = {}
 
   const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 4500;
   const run = (async () => {
-    const res = await callLanguageServer(
+    const rpcResp = await callLanguageServerWithStatus(
       'GetCascadeTrajectoryGeneratorMetadata',
       {
         cascadeId: convId,
@@ -3886,9 +3977,12 @@ async function fetchGeneratorMetadataForConv(convId, force = false, options = {}
       timeoutMs,
       {
         signal: options.signal || null,
-        unrefSocket: Boolean(options.unrefSocket)
+        unrefSocket: Boolean(options.unrefSocket),
+        noKeepAlive: Boolean(options.noKeepAlive)
       }
     );
+    const res = rpcResp.data;
+    const rpcTimedOut = rpcResp.errorCode === 'ETIMEDOUT' || rpcResp.errorCode === 'ABORTED';
     const baseList = resolveBaseList(res === null);
     if (res === null) {
       if (baseList.length > 0) {
@@ -3899,10 +3993,11 @@ async function fetchGeneratorMetadataForConv(convId, force = false, options = {}
           callsByStep: buildCallsByStepFromList(baseList),
           ...(hasLogSig ? { logSize: options.logSize, logMtimeMs: options.logMtimeMs } : {}),
           fromFallbackCache: true,
-          rpcFailed: true
+          rpcFailed: true,
+          rpcTimedOut
         };
       }
-      return { at: nowMs, lsKey, generatorList: [], callsByStep: new Map(), rpcFailed: true };
+      return { at: nowMs, lsKey, generatorList: [], callsByStep: new Map(), rpcFailed: true, rpcTimedOut };
     }
     if (!Array.isArray(res.generatorMetadata) || res.generatorMetadata.length === 0) {
       if (baseList.length > 0) {
@@ -3917,9 +4012,9 @@ async function fetchGeneratorMetadataForConv(convId, force = false, options = {}
         if (callsByStep.size > 0) {
           convGenMetaCache.set(convId, value);
         }
-        return { ...value, fromFallbackCache: true, rpcFailed: false };
+        return { ...value, fromFallbackCache: true, rpcFailed: false, rpcTimedOut: false };
       }
-      return { at: nowMs, lsKey, generatorList: [], callsByStep: new Map(), emptyFromHost: true, rpcFailed: false };
+      return { at: nowMs, lsKey, generatorList: [], callsByStep: new Map(), emptyFromHost: true, rpcFailed: false, rpcTimedOut: false };
     }
 
     const generatorList = mergeGeneratorMetadataLists(baseList, res.generatorMetadata);
@@ -3934,7 +4029,7 @@ async function fetchGeneratorMetadataForConv(convId, force = false, options = {}
     if (callsByStep.size > 0) {
       convGenMetaCache.set(convId, value);
     }
-    return { ...value, rpcFailed: false };
+    return { ...value, rpcFailed: false, rpcTimedOut: false };
   })();
 
   if (canCoalesce) {
@@ -5204,6 +5299,9 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   const lightweight = Boolean(options.lightweight);
   const rpcTimeoutMs = Number(options.rpcTimeoutMs) > 0 ? Number(options.rpcTimeoutMs) : 4500;
   const sqliteTimeoutMs = Number(options.sqliteTimeoutMs) > 0 ? Number(options.sqliteTimeoutMs) : 1500;
+  const deadlineAt = Number(options.deadlineAt) > 0 ? Number(options.deadlineAt) : 0;
+  const getRemainingBudgetMs = () => (deadlineAt > 0 ? Math.max(0, deadlineAt - Date.now()) : Infinity);
+  const rpcSignal = options.signal || null;
   const nowMs = Number(options.nowMs) || Date.now();
   const background = Boolean(options.background);
   const menubarMode = String(options.menubarMode || 'context');
@@ -5253,8 +5351,20 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   }
 
   if (!convId) {
+    const effEmptyRpcTimeoutMs = lightweight
+      ? Math.min(rpcTimeoutMs, Math.floor(getRemainingBudgetMs() - 70))
+      : rpcTimeoutMs;
     const emptyHost = allowDiskCacheWithoutLs
-      ? await getHostUserStatus(false, { background: true, nowMs, allowDiskCacheWithoutLs: true })
+      ? await getHostUserStatus(false, {
+          background: true,
+          nowMs,
+          allowDiskCacheWithoutLs: true,
+          ...(lightweight
+            ? (effEmptyRpcTimeoutMs < 35
+                ? { skipLiveRpc: true }
+                : { rpcTimeoutMs: effEmptyRpcTimeoutMs, unrefSocket: true, noKeepAlive: true, ...(rpcSignal ? { signal: rpcSignal } : {}) })
+            : {})
+        })
       : null;
     return {
       ok: true,
@@ -5307,7 +5417,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   const targetLogPath = lightweight
     ? (compactStatSize > 0 || existsSync(compactPath)
         ? compactPath
-        : ((fullStatMtime > 0 && fullStatSize <= 32 * 1024 * 1024) ? fullPath : cliDirectLog))
+        : ((fullStatMtime > 0 && fullStatSize <= 4 * 1024 * 1024) ? fullPath : cliDirectLog))
     : ((fullStatMtime > 0 && fullStatSize <= 32 * 1024 * 1024)
         ? fullPath
         : (existsSync(compactPath) ? compactPath : cliDirectLog));
@@ -5371,13 +5481,25 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     }
   }
 
+  const effHostRpcTimeoutMs = lightweight
+    ? Math.min(rpcTimeoutMs, Math.floor(getRemainingBudgetMs() - 50))
+    : rpcTimeoutMs;
   const hostPromise = getHostUserStatus(force, {
     background,
     menubarMode,
     nowMs,
     latestTranscriptMtimeMs: logStatMtime,
     allowDiskCacheWithoutLs,
-    ...(lightweight ? { rpcTimeoutMs, unrefSocket: true } : {})
+    ...(lightweight
+      ? (effHostRpcTimeoutMs < 35
+          ? { skipLiveRpc: true }
+          : {
+              rpcTimeoutMs: effHostRpcTimeoutMs,
+              unrefSocket: true,
+              noKeepAlive: true,
+              ...(rpcSignal ? { signal: rpcSignal } : {})
+            })
+      : {})
   });
   let host = lightweight ? null : await hostPromise;
 
@@ -5731,13 +5853,27 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   }
 
   if (!genFromCache && hasLsConfig && (rawSteps.length > 0 || force)) {
-    const genPromise = fetchGeneratorMetadataForConv(convId, force, {
+    const effGenRpcTimeoutMs = lightweight
+      ? Math.min(rpcTimeoutMs, Math.floor(getRemainingBudgetMs() - 50))
+      : rpcTimeoutMs;
+    const genOpts = {
       bypassMemTtl: isRetryCheck,
       nowMs,
       logSize: logStatSize,
       logMtimeMs: logStatMtime,
-      ...(lightweight ? { timeoutMs: rpcTimeoutMs, unrefSocket: true, allowStaleDiskFallback: true } : {})
-    });
+      ...(lightweight
+        ? (effGenRpcTimeoutMs < 35
+            ? { skipLiveRpc: true, allowStaleDiskFallback: true }
+            : {
+                timeoutMs: effGenRpcTimeoutMs,
+                unrefSocket: true,
+                noKeepAlive: true,
+                allowStaleDiskFallback: true,
+                ...(rpcSignal ? { signal: rpcSignal } : {})
+              })
+        : {})
+    };
+    const genPromise = fetchGeneratorMetadataForConv(convId, force, genOpts);
     if (lightweight) {
       [host, genMetaBundle] = await Promise.all([hostPromise, genPromise]);
     } else {
@@ -5831,8 +5967,12 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         parseDurationSec(latestCm.streamingDuration) !== null
       )
     );
-    if (convDbPath && (!hasBundleBudget || !hasLatestTiming)) {
-      const latestSqlGen = await readConversationLatestGenSignal(convDbPath, { timeoutMs: sqliteTimeoutMs });
+    const remForSqliteMs = getRemainingBudgetMs();
+    if (convDbPath && (!hasBundleBudget || !hasLatestTiming) && !genMetaBundle?.rpcTimedOut && remForSqliteMs >= 65) {
+      const effSqliteTimeoutMs = deadlineAt > 0
+        ? Math.min(sqliteTimeoutMs, Math.max(20, Math.floor(remForSqliteMs - 30)))
+        : sqliteTimeoutMs;
+      const latestSqlGen = await readConversationLatestGenSignal(convDbPath, { timeoutMs: effSqliteTimeoutMs });
       if (latestSqlGen) {
         const genByStep = new Map();
         const sqlEntries = Array.isArray(latestSqlGen.recentEntries) && latestSqlGen.recentEntries.length
@@ -6720,24 +6860,55 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         transcriptProgressed = latestStatMtime > 0 && (nowMs - latestStatMtime) <= 30_000;
       }
     }
-    if (convId) {
-      saveStatuslineSnapEntry(convId, {
-        targetLogPath,
-        logSize: logStatSize,
-        logMtimeMs: logStatMtime,
-        fullSize: fullStatSize,
-        fullMtimeMs: fullStatMtime,
-        hostCacheMtimeMs: latestHostCacheMtimeMs,
-        convDbSig,
-        genCacheMtimeMs: latestGenCacheMtimeMs,
-        lsKeyHash: lsDiskHash,
-        metaSettled: snapSettled,
-        savedAt: nowMs,
-        quotas: host.quotas || [],
-        context: contextPayload,
-        speed: speedPayload,
-        turnsCount: turns.length
-      });
+    const rpcTimedOutOrSkipped = Boolean(
+      genMetaBundle?.rpcTimedOut ||
+      host?.quotaStatus?.errorCode === 'ETIMEDOUT' ||
+      host?.quotaStatus?.errorCode === 'ABORTED' ||
+      host?.quotaStatus?.errorCode === 'BUDGET_SKIPPED'
+    );
+    const samePrevLogSig = Boolean(
+      prevStatuslineSnap &&
+      prevStatuslineSnap.targetLogPath === targetLogPath &&
+      prevStatuslineSnap.logSize === logStatSize &&
+      prevStatuslineSnap.logMtimeMs === logStatMtime
+    );
+    if (convId && !rpcSignal?.aborted) {
+      if (rpcTimedOutOrSkipped && samePrevLogSig) {
+        // Preserve previous good metrics/quotas while refreshing signature & short cooldown
+        // so slow/unreachable LS never causes an infinite cache-miss storm on every tick.
+        saveStatuslineSnapEntry(convId, {
+          ...prevStatuslineSnap,
+          targetLogPath,
+          logSize: logStatSize,
+          logMtimeMs: logStatMtime,
+          fullSize: fullStatSize,
+          fullMtimeMs: fullStatMtime,
+          hostCacheMtimeMs: latestHostCacheMtimeMs,
+          convDbSig,
+          genCacheMtimeMs: latestGenCacheMtimeMs,
+          lsKeyHash: lsDiskHash,
+          metaSettled: false,
+          savedAt: nowMs
+        });
+      } else {
+        saveStatuslineSnapEntry(convId, {
+          targetLogPath,
+          logSize: logStatSize,
+          logMtimeMs: logStatMtime,
+          fullSize: fullStatSize,
+          fullMtimeMs: fullStatMtime,
+          hostCacheMtimeMs: latestHostCacheMtimeMs,
+          convDbSig,
+          genCacheMtimeMs: latestGenCacheMtimeMs,
+          lsKeyHash: lsDiskHash,
+          metaSettled: snapSettled,
+          savedAt: nowMs,
+          quotas: host.quotas || [],
+          context: contextPayload,
+          speed: speedPayload,
+          turnsCount: turns.length
+        });
+      }
     }
     return {
       ok: true,
