@@ -5324,6 +5324,7 @@ async function main() {
     await verifyPowertoolsP1P2Features(cvHtmlSource, cvAppSource);
     await verifyCacheStatsAndCustomRange(cvHtmlSource, cvAppSource);
     await verifyCliFollowAndProjectGrouping(cvHtmlSource, cvAppSource);
+    await verifyTelemetryCategoriesAndPopover(cvHtmlSource, cvAppSource);
 
     // macOS Swift native host typecheck
     if (process.platform === 'darwin' && existsSync('/usr/bin/swiftc')) {
@@ -9808,6 +9809,460 @@ async function verifyCliFollowAndProjectGrouping(cvHtmlSource, cvAppSource) {
         scC.getEl('btn-follow-current').classList.contains('hidden') &&
         scC.contextQueries.every((q) => q.conversationId === scC.convHot),
       `Desktop Aux Pane 不得被后台 pinnedConvId 劫持：sel=${scC.getEl('conv-select').value}, queries=${JSON.stringify(scC.contextQueries)}`
+    );
+  } finally {
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+}
+
+async function verifyTelemetryCategoriesAndPopover(cvHtmlSource, cvAppSource) {
+  console.log('[verify] 9/9 10 类上下文细分、重试去重、SQLITE_BUSY 缓存与前端 Popover/光谱条回归测试...');
+  assert(
+    cvHtmlSource.includes('id="cap-popover"') &&
+      cvHtmlSource.includes('id="time-split-wrap"') &&
+      cvHtmlSource.includes('id="ctx-sqlite-badge"'),
+    'index.html 缺少 cap-popover / time-split-wrap / ctx-sqlite-badge 关键 DOM ID'
+  );
+
+  const tmpRoot = mkdtempSync(join(tmpdir(), 'ag-cv-telemetry-'));
+  const agDir = join(tmpRoot, 'ag');
+  const cliDir = join(tmpRoot, 'cli');
+  const ideDir = join(tmpRoot, 'ide');
+  const stateDir = join(tmpRoot, 'state');
+  mkdirSync(join(agDir, 'conversations'), { recursive: true });
+  mkdirSync(cliDir, { recursive: true });
+  mkdirSync(ideDir, { recursive: true });
+  mkdirSync(stateDir, { recursive: true });
+
+  const savedEnv = {
+    AG_DIR: process.env.AG_DIR,
+    AG_IDE_DIR: process.env.AG_IDE_DIR,
+    AG_CLI_DIR: process.env.AG_CLI_DIR,
+    ANTIGRAVITY_APP_DATA_DIR: process.env.ANTIGRAVITY_APP_DATA_DIR,
+    ANTIGRAVITY_EXECUTABLE_DATA_DIR: process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR,
+    ANTIGRAVITY_CLI_DATA_DIR: process.env.ANTIGRAVITY_CLI_DATA_DIR,
+    ANTIGRAVITY_IDE_DATA_DIR: process.env.ANTIGRAVITY_IDE_DATA_DIR,
+    ANTIGRAVITY_LS_ADDRESS: process.env.ANTIGRAVITY_LS_ADDRESS,
+    ANTIGRAVITY_CSRF_TOKEN: process.env.ANTIGRAVITY_CSRF_TOKEN
+  };
+
+  try {
+    const sqliteReaderUrl = `${pathToFileURL(join(ROOT, 'sidecars', 'dashboard', 'sqlite_reader.mjs')).href}?t9=${Date.now()}`;
+    const collectorUrl = `${pathToFileURL(join(ROOT, 'sidecars', 'dashboard', 'collector.mjs')).href}?t9=${Date.now()}`;
+    const {
+      TOKEN_CATEGORIES,
+      isSqliteAvailable,
+      readConversationSqliteSignals,
+      readConversationLatestGenSignal
+    } = await import(sqliteReaderUrl);
+    const { scanConversation } = await import(collectorUrl);
+
+    assert(Object.keys(TOKEN_CATEGORIES).length === 10 && TOKEN_CATEGORIES[5]?.key === 'skills', 'TOKEN_CATEGORIES 应导出完整 10 类枚举');
+
+    let vmSnap = null;
+    if (await isSqliteAvailable()) {
+      const { DatabaseSync } = await import('node:sqlite');
+      const encVarint = (n) => {
+        const out = [];
+        let v = BigInt(n);
+        do {
+          let b = Number(v & 0x7fn);
+          v >>= 7n;
+          if (v > 0n) b |= 0x80;
+          out.push(b);
+        } while (v > 0n);
+        return Buffer.from(out);
+      };
+      const encTag = (fn, wt) => encVarint((fn << 3) | wt);
+      const encLd = (fn, buf) => Buffer.concat([encTag(fn, 2), encVarint(buf.length), buf]);
+      const encVi = (fn, val) => Buffer.concat([encTag(fn, 0), encVarint(val)]);
+      const encStr = (fn, s) => encLd(fn, Buffer.from(s, 'utf8'));
+
+      const convId = 'beef-cafe-9001-9009';
+      const dbPath = join(agDir, 'conversations', `${convId}.db`);
+
+      const catItems = [
+        [1, 1000], [2, 800], [3, 400], [4, 300], [5, 500],
+        [6, 200], [7, 1200], [8, 150], [9, 100], [10, 50], [99, 300]
+      ].map(([t, tok]) => encLd(1, Buffer.concat([encVi(2, t), encVi(3, 1), encVi(4, tok)])));
+      const bdMsg = Buffer.concat(catItems);
+      const ctxWin = Buffer.concat([encVi(1, 5000), encVi(4, 1000000), encLd(3, bdMsg)]);
+      const chatStart = Buffer.concat([encVi(1, 1318), encStr(28, 'gemini-3-flash'), encLd(10, ctxWin)]);
+
+      const usageMain = Buffer.concat([
+        encVi(2, 2000), encVi(3, 0), encVi(4, 600), encVi(5, 2400),
+        encVi(9, 150), encVi(10, 250), encStr(11, 'call_dedup_1')
+      ]);
+      const retryUsage1 = Buffer.concat([encVi(2, 500), encVi(3, 100), encVi(4, 50), encStr(12, 'retry_dedup_1')]);
+      const retryUsageDup = Buffer.concat([encVi(2, 999), encVi(3, 999), encStr(12, 'retry_dedup_1')]);
+      const retryMsg1 = Buffer.concat([encLd(2, retryUsage1), encStr(3, '429 retry')]);
+      const retryMsgDup = Buffer.concat([encLd(2, retryUsageDup)]);
+      const dur1 = Buffer.concat([encVi(1, 1), encVi(2, 200_000_000)]);
+      const dur2 = Buffer.concat([encVi(1, 2), encVi(2, 800_000_000)]);
+      const f1 = Buffer.concat([
+        encLd(4, usageMain),
+        encLd(9, chatStart),
+        encLd(11, dur1),
+        encLd(12, dur2),
+        encVi(14, 1),
+        encLd(17, retryMsg1),
+        encLd(17, retryMsgDup)
+      ]);
+      const top1 = Buffer.concat([encLd(1, f1), encVi(2, 1)]);
+      const topDup = Buffer.concat([encLd(1, f1), encVi(2, 2)]);
+
+      const tsStart = Buffer.concat([encVi(1, 1760000000), encVi(2, 250_000_000)]);
+      const tsEnd = Buffer.concat([encVi(1, 1760000002), encVi(2, 750_000_000)]);
+      const toolMeta = Buffer.concat([encLd(4, Buffer.from('ok')), encLd(32, tsStart), encLd(8, tsEnd)]);
+
+      const db = new DatabaseSync(dbPath);
+      try {
+        db.exec('CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)');
+        db.exec('CREATE TABLE steps (step_index INTEGER PRIMARY KEY, step_type INTEGER, metadata BLOB)');
+        db.prepare('INSERT INTO gen_metadata (idx, data) VALUES (?, ?)').run(1, top1);
+        db.prepare('INSERT INTO gen_metadata (idx, data) VALUES (?, ?)').run(2, topDup);
+        db.prepare('INSERT INTO steps (step_index, step_type, metadata) VALUES (?, ?, ?)').run(0, 14, null);
+        db.prepare('INSERT INTO steps (step_index, step_type, metadata) VALUES (?, ?, ?)').run(1, 5, toolMeta);
+        db.prepare('INSERT INTO steps (step_index, step_type, metadata) VALUES (?, ?, ?)').run(2, 15, toolMeta);
+      } finally {
+        db.close();
+      }
+
+      const sig = await readConversationSqliteSignals(dbPath, { includeLatestGenDetail: true });
+      assert(
+        sig?.sessionMetrics?.rounds === 1 &&
+          sig.sessionMetrics.steps === 3 &&
+          sig.sessionMetrics.calls === 1 &&
+          sig.sessionMetrics.modelTimeSec === 4 &&
+          sig.sessionMetrics.toolTimeSec === 2.5 &&
+          sig.sessionMetrics.avgTtftSec === 1.2 &&
+          sig.sessionMetrics.cacheWrittenTokens === 650 &&
+          sig.sessionMetrics.retryCalls === 1 &&
+          sig.sessionMetrics.retryTokens === 650 &&
+          sig.sessionMetrics.stale === false &&
+          sig.sessionMetrics.partial === false &&
+          sig.latestContextWindowMetadata?.tokenBreakdown?.categories?.length === 11 &&
+          sig.latestContextWindowMetadata.tokenBreakdown.categories[10]?.key === 'other_99',
+        `10 类 breakdown 或 sessionMetrics 解码/去重异常：${JSON.stringify(sig?.sessionMetrics)}`
+      );
+
+      const fast = await readConversationLatestGenSignal(dbPath, { timeoutMs: 200 });
+      assert(
+        fast && fast.contextWindowMetadata === undefined && fast.usage?.cacheWriteTokens === 600 && fast.usage?.outputTokens === 400,
+        `快速通道 cacheWriteTokens / outputTokens / 无 breakdown 异常：${JSON.stringify(fast)}`
+      );
+
+      // SQLITE_BUSY stale fallback test
+      const lockDb = new DatabaseSync(dbPath);
+      let staleSig = null;
+      try {
+        lockDb.exec('PRAGMA journal_mode=DELETE');
+        lockDb.exec('BEGIN EXCLUSIVE');
+        const nextSec = Date.now() / 1000 + 10;
+        const { utimesSync } = await import('node:fs');
+        utimesSync(dbPath, nextSec, nextSec);
+        staleSig = await readConversationSqliteSignals(dbPath, { includeLatestGenDetail: true });
+        lockDb.exec('ROLLBACK');
+      } finally {
+        lockDb.close();
+      }
+      assert(
+        staleSig?.stale === true && staleSig?.sessionMetrics?.stale === true && staleSig?.sessionMetrics?.calls === 1,
+        `SQLITE_BUSY 应返回旧缓存并标记 stale: true：${JSON.stringify(staleSig?.sessionMetrics)}`
+      );
+
+      const logDir = join(agDir, 'brain', convId, '.system_generated', 'logs');
+      mkdirSync(logDir, { recursive: true });
+      const nowIso = new Date().toISOString();
+      writeFileSync(
+        join(logDir, 'transcript.jsonl'),
+        [
+          JSON.stringify({ step_index: 0, type: 'USER_INPUT', content: 'hello 10cat', created_at: nowIso }),
+          JSON.stringify({
+            step_index: 1,
+            type: 'PLANNER_RESPONSE',
+            model: 'gemini-3-flash',
+            usage: { inputTokens: 2000, cacheReadTokens: 2400, outputTokens: 400 },
+            created_at: nowIso
+          })
+        ].join('\n') + '\n'
+      );
+
+      process.env.AG_DIR = agDir;
+      process.env.AG_CLI_DIR = cliDir;
+      process.env.AG_IDE_DIR = ideDir;
+      process.env.ANTIGRAVITY_APP_DATA_DIR = agDir;
+      process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR = stateDir;
+      process.env.ANTIGRAVITY_CLI_DATA_DIR = cliDir;
+      process.env.ANTIGRAVITY_IDE_DATA_DIR = ideDir;
+      delete process.env.ANTIGRAVITY_LS_ADDRESS;
+      delete process.env.ANTIGRAVITY_CSRF_TOKEN;
+
+      vmSnap = await scanConversation(convId, { force: true, skipWorkspaceLookup: true });
+      const catSum = (vmSnap?.context?.breakdown?.categories || []).reduce((s, c) => s + (c.tokens || 0), 0);
+      assert(
+        vmSnap?.context?.breakdown?.calibrated === true &&
+          catSum === 4400 &&
+          vmSnap.context.sessionTotals?.cacheWrittenTokens === 650 &&
+          vmSnap.context.sessionTotals?.retryTokens === 650 &&
+          vmSnap.context.sessionTotals?.retryCalls === 1 &&
+          vmSnap.context.sessionTiming?.toolTimeSec === 2.5 &&
+          vmSnap.context.sessionTiming?.modelSharePercent === 61.5 &&
+          vmSnap.context.sessionTiming?.toolSharePercent === 38.5,
+        `collector 10 类校准或 sessionTiming 聚合失败：${JSON.stringify(vmSnap?.context)}`
+      );
+      vmSnap = {
+        ...vmSnap,
+        context: {
+          ...vmSnap.context,
+          sessionTiming: { ...vmSnap.context.sessionTiming, sqliteStale: true },
+          breakdown: {
+            ...vmSnap.context.breakdown,
+            groups: [
+              { key: 'System Prompt', name: 'System Prompt', label: '系统提示与规则', tokens: 1200, reportedTokens: 1000, calibrated: true, children: [] },
+              { key: 'skills', name: 'Skills', label: 'Skills 技能指令', tokens: 500, reportedTokens: 500, calibrated: true, children: [{ name: 'skills', tokens: 500 }] },
+              { key: 'Tools', name: 'Tools', label: '工具定义 Schema', tokens: 1200, reportedTokens: 1100, calibrated: true, children: [] },
+              { key: 'Chat Messages', name: 'Chat Messages', label: '对话与工具历史', tokens: 1500, reportedTokens: 1400, calibrated: true, children: [] }
+            ]
+          }
+        }
+      };
+    }
+
+    const fallbackVmSnap = vmSnap || {
+      ok: true,
+      etag: 'vm-t9',
+      conversationId: 'beef-cafe-9001-9009',
+      conversationTitle: 'Telemetry 10-Cat Test',
+      quotas: [],
+      turns: [{ turnIndex: 1, stepIndex: 1, totalTokens: 4800, inputTokens: 2000, cacheTokens: 2400, outputTokens: 400, thinkingTokens: 150, responseTokens: 250, tps: 142.9 }],
+      context: {
+        model: 'Gemini 3 Flash',
+        used: 4800,
+        budget: 1000000,
+        skillsTokens: 500,
+        sessionTotals: { inputTokens: 2000, cacheTokens: 2400, cacheWrittenTokens: 650, outputTokens: 400, thinkingTokens: 150, responseTokens: 250, retryTokens: 650, retryCalls: 1, totalTokens: 4800, cacheHitPercent: 54.5 },
+        sessionTiming: { rounds: 1, steps: 3, calls: 1, modelTimeSec: 4, toolTimeSec: 2.5, totalActiveSec: 6.5, modelSharePercent: 61.5, toolSharePercent: 38.5, avgTtftSec: 1.2, sessionStreamTps: 142.9, sqliteStale: true, sqlitePartial: false },
+        breakdown: {
+          calibrated: true,
+          reportedTotalTokens: 5000,
+          totalTokens: 4400,
+          groups: [
+            { key: 'System Prompt', name: 'System Prompt', label: '系统提示与规则', tokens: 1200, reportedTokens: 1000, calibrated: true, children: [] },
+            { key: 'skills', name: 'Skills', label: 'Skills 技能指令', tokens: 500, reportedTokens: 500, calibrated: true, children: [{ name: 'skills', tokens: 500 }] },
+            { key: 'Tools', name: 'Tools', label: '工具定义 Schema', tokens: 1200, reportedTokens: 1100, calibrated: true, children: [] },
+            { key: 'Chat Messages', name: 'Chat Messages', label: '对话与工具历史', tokens: 1500, reportedTokens: 1400, calibrated: true, children: [] }
+          ],
+          categories: [
+            { type: 1, key: 'system', label: '系统提示词', color: '#94a3b8', tokens: 880, percent: 20 },
+            { type: 2, key: 'tools', label: '工具定义', color: '#a78bfa', tokens: 704, percent: 16 },
+            { type: 3, key: 'rules', label: '规则', color: '#f472b6', tokens: 352, percent: 8 },
+            { type: 4, key: 'mcp', label: 'MCP 工具', color: '#2dd4bf', tokens: 264, percent: 6 },
+            { type: 5, key: 'skills', label: '技能', color: '#f59e0b', tokens: 440, percent: 10 },
+            { type: 6, key: 'subagents', label: '子代理', color: '#fb923c', tokens: 176, percent: 4 },
+            { type: 7, key: 'messages', label: '对话消息', color: '#3b82f6', tokens: 1056, percent: 24 },
+            { type: 8, key: 'workflows', label: '工作流', color: '#10b981', tokens: 132, percent: 3 },
+            { type: 9, key: 'plugins', label: '插件', color: '#c084fc', tokens: 88, percent: 2 },
+            { type: 10, key: 'flows', label: '流程', color: '#38bdf8', tokens: 44, percent: 1 },
+            { type: 99, key: 'other_99', label: '类别 99', color: '#6b7280', tokens: 264, percent: 6 }
+          ]
+        }
+      },
+      speed: { tps: 142.9, streamingTps: 142.9, effectiveTps: 100, duration: 4, ttft: 1.2, streamingSec: 2.8, outputTokens: 400, thinkingTokens: 150, responseTokens: 250, isServerExact: true },
+      audit: { totalSteps: 3, turnsCount: 1, groups: {} }
+    };
+
+    const makeEl = (id = '', initClasses = []) => {
+      const classes = new Set(initClasses);
+      const attrs = new Map();
+      const listeners = new Map();
+      return {
+        id,
+        value: '',
+        textContent: '',
+        innerHTML: '',
+        offsetWidth: 292,
+        offsetHeight: 220,
+        dataset: {},
+        style: {},
+        className: initClasses.join(' '),
+        classList: {
+          add: (...n) => n.forEach((x) => classes.add(x)),
+          remove: (...n) => n.forEach((x) => classes.delete(x)),
+          toggle: (n, f) => ((f === undefined ? !classes.has(n) : Boolean(f)) ? (classes.add(n), true) : (classes.delete(n), false)),
+          contains: (n) => classes.has(n)
+        },
+        addEventListener: (t, fn) => {
+          if (!listeners.has(t)) listeners.set(t, []);
+          listeners.get(t).push(fn);
+        },
+        dispatch: (t, ev = {}) => {
+          for (const fn of listeners.get(t) || []) {
+            fn({ target: ev.target || {}, stopPropagation: () => {}, preventDefault: () => {}, ...ev });
+          }
+        },
+        getBoundingClientRect: () => ({ left: 20, right: 90, top: 8, bottom: 34 }),
+        contains: () => false,
+        setAttribute: (k, v) => attrs.set(k, String(v)),
+        getAttribute: (k) => (attrs.has(k) ? attrs.get(k) : null),
+        hasAttribute: (k) => attrs.has(k),
+        removeAttribute: (k) => attrs.delete(k),
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        appendChild: () => {},
+        remove: () => {}
+      };
+    };
+    const uiEls = new Map();
+    const getUiEl = (id) => {
+      if (!uiEls.has(id)) uiEls.set(id, makeEl(id));
+      return uiEls.get(id);
+    };
+    const capCtx = getUiEl('cap-context');
+    capCtx.dataset = { gotoTab: 'context', capKey: 'context' };
+    const capSpeed = getUiEl('cap-speed');
+    capSpeed.dataset = { gotoTab: 'context', capKey: 'speed' };
+    const capTokens = getUiEl('cap-tokens');
+    capTokens.dataset = { gotoTab: 'history', capKey: 'tokens' };
+    uiEls.set('cap-popover', makeEl('cap-popover', ['cap-popover', 'hidden']));
+    uiEls.set('time-split-wrap', makeEl('time-split-wrap', ['time-split-wrap', 'hidden']));
+    uiEls.set('ctx-sqlite-badge', makeEl('ctx-sqlite-badge', ['meta-chip', 'hidden']));
+
+    const winListeners = new Map();
+    const rootAttrs = new Map();
+    const rootStyles = new Map();
+    const uiSandbox = {
+      console, Date, Math, JSON, URL, URLSearchParams, Set, Map, Array, Object, String, Number, Boolean, Promise, Error,
+      NodeFilter: { SHOW_TEXT: 4 },
+      MutationObserver: class { observe() {} disconnect() {} },
+      ResizeObserver: class { observe() {} disconnect() {} },
+      IntersectionObserver: class { observe() {} disconnect() {} },
+      getComputedStyle: () => ({ color: 'rgb(255, 255, 255)', getPropertyValue: () => '' }),
+      setTimeout, clearTimeout, clearInterval,
+      setInterval: () => 1,
+      requestAnimationFrame: (fn) => { fn(); return 1; },
+      localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+      sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+      navigator: { platform: 'MacIntel', userAgent: 'Mozilla/5.0' },
+      addEventListener: (t, fn) => {
+        if (!winListeners.has(t)) winListeners.set(t, []);
+        winListeners.get(t).push(fn);
+      },
+      removeEventListener: () => {},
+      document: {
+        readyState: 'complete',
+        hidden: false,
+        visibilityState: 'visible',
+        documentElement: {
+          clientWidth: 360,
+          clientHeight: 720,
+          dataset: {},
+          appendChild: () => {},
+          style: {
+            getPropertyValue: (k) => rootStyles.get(k) || '',
+            setProperty: (k, v) => rootStyles.set(k, String(v)),
+            removeProperty: (k) => rootStyles.delete(k)
+          },
+          getAttribute: (k) => (rootAttrs.has(k) ? rootAttrs.get(k) : null),
+          setAttribute: (k, v) => rootAttrs.set(k, String(v)),
+          hasAttribute: (k) => rootAttrs.has(k),
+          removeAttribute: (k) => rootAttrs.delete(k)
+        },
+        body: makeEl('body'),
+        getElementById: getUiEl,
+        querySelector: () => null,
+        querySelectorAll: (sel) => (sel === '[data-goto-tab]' ? [capCtx, capSpeed, capTokens] : []),
+        addEventListener: () => {},
+        createTreeWalker: () => ({ nextNode: () => null }),
+        createElement: (tag) => makeEl(tag)
+      },
+      window: null,
+      fetch: async (urlStr) => {
+        const u = new URL(urlStr, 'http://127.0.0.1');
+        if (u.pathname === '/api/settings') {
+          return { ok: true, status: 200, json: async () => ({ ok: true, settings: {}, uiPreferences: {}, shortcut: {}, auxShortcut: {}, menubar: { supported: true, enabled: false } }) };
+        }
+        if (u.pathname === '/api/context') return { ok: true, status: 200, json: async () => fallbackVmSnap };
+        if (u.pathname === '/api/history') return { ok: true, status: 200, json: async () => ({ ok: true, etag: 'h-t9', analyticsBySource: { all: { summary: { grandTotalTokens: 12000 } } } }) };
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+    };
+    uiSandbox.window = {
+      innerWidth: 360,
+      innerHeight: 720,
+      location: { origin: 'http://127.0.0.1', href: 'http://127.0.0.1/', pathname: '/' },
+      matchMedia: () => ({ matches: false, addEventListener: () => {} }),
+      getComputedStyle: uiSandbox.getComputedStyle,
+      addEventListener: uiSandbox.addEventListener,
+      removeEventListener: () => {},
+      sidecar: { conversationId: fallbackVmSnap.conversationId },
+      self: null,
+      top: null,
+      fetch: uiSandbox.fetch
+    };
+    uiSandbox.window.self = uiSandbox.window;
+    uiSandbox.window.top = uiSandbox.window;
+    uiSandbox.innerWidth = 360;
+    uiSandbox.innerHeight = 720;
+    uiSandbox.location = uiSandbox.window.location;
+    runInNewContext(cvAppSource, uiSandbox);
+    await new Promise((r) => setTimeout(r, 80));
+
+    assert(uiSandbox.document.body.classList.contains('cv-compact'), '窄屏 (360px) 应自动启用 body.cv-compact');
+    uiSandbox.window.innerWidth = 640;
+    uiSandbox.innerWidth = 640;
+    for (const fn of winListeners.get('resize') || []) fn({});
+    assert(!uiSandbox.document.body.classList.contains('cv-compact'), '宽屏 (640px) resize 后应退出 body.cv-compact');
+
+    const segBarHtml = getUiEl('ctx-seg-bar').innerHTML;
+    const segCount = (segBarHtml.match(/class="seg-piece"/g) || []).length;
+    const timeWrapEl = getUiEl('time-split-wrap');
+    const sqliteBadgeEl = getUiEl('ctx-sqlite-badge');
+    const bdHtml = getUiEl('breakdown-groups').innerHTML;
+    assert(
+      segCount >= 10 &&
+        !timeWrapEl.classList.contains('hidden') &&
+        timeWrapEl.innerHTML.includes('模型 4.00s (62%)') &&
+        timeWrapEl.innerHTML.includes('工具 2.50s (38%)') &&
+        !sqliteBadgeEl.classList.contains('hidden') &&
+        sqliteBadgeEl.textContent.includes('遥测略滞后') &&
+        bdHtml.includes('10 类上下文细分占比') &&
+        bdHtml.includes('Skills 技能指令'),
+      `VM 10 类光谱条/时间构成/SQLite徽章渲染异常：segCount=${segCount}, time=${timeWrapEl.innerHTML}, badge=${sqliteBadgeEl.textContent}`
+    );
+
+    // Popover hover + click-pin checks
+    const popEl = getUiEl('cap-popover');
+    capCtx.dispatch('pointerenter');
+    assert(
+      !popEl.classList.contains('hidden') &&
+        popEl.innerHTML.includes('上下文透视') &&
+        popEl.innerHTML.includes('MCP 工具'),
+      `cap-context 悬停浮层未渲染 10 类明细：${popEl.innerHTML}`
+    );
+    capTokens.dispatch('pointerenter');
+    assert(
+      popEl.innerHTML.includes('Token 与缓存经济学') &&
+        popEl.innerHTML.includes('缓存写入') &&
+        popEl.innerHTML.includes('重试消耗'),
+      `cap-tokens 悬停浮层缺少缓存写入或重试消耗：${popEl.innerHTML}`
+    );
+    capSpeed.dispatch('click');
+    assert(
+      capSpeed.getAttribute('aria-expanded') === 'true' &&
+        popEl.innerHTML.includes('效率与耗时拆分') &&
+        popEl.innerHTML.includes('is-pinned') &&
+        popEl.innerHTML.includes('工具 2.50s (38%)'),
+      `cap-speed 点击钉住浮层异常：${popEl.innerHTML}`
+    );
+    capSpeed.dispatch('click');
+    assert(
+      popEl.classList.contains('hidden') && capSpeed.getAttribute('aria-expanded') === 'false',
+      '再次点击已钉住胶囊应关闭 #cap-popover'
     );
   } finally {
     for (const [k, v] of Object.entries(savedEnv)) {

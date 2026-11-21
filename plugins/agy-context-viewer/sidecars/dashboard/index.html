@@ -13,20 +13,20 @@
     <!-- Top Sticky Capsule Bar -->
     <header class="top-bar">
       <div class="capsule-strip" role="group" aria-label="核心状态速览">
-        <button id="cap-context" type="button" class="capsule-pill active" data-goto-tab="context" title="点击查看当前会话上下文详情">
+        <button id="cap-context" type="button" class="capsule-pill active" data-goto-tab="context" data-cap-key="context" aria-controls="cap-popover" aria-expanded="false" title="点击查看或钉住当前会话上下文透视">
           <svg class="mini-ring" width="18" height="18" viewBox="0 0 20 20" aria-hidden="true">
             <circle class="mini-ring-track" cx="10" cy="10" r="7.2"></circle>
-            <circle id="mini-ring-fill" class="mini-ring-fill" cx="10" cy="10" r="7.2" stroke-dasharray="0 46" transform="rotate(-90 10 10)"></circle>
+            <circle id="mini-ring-fill" class="mini-ring-fill" cx="10" cy="10" r="7.2" stroke-dasharray="45.24" stroke-dashoffset="45.24" transform="rotate(-90 10 10)"></circle>
           </svg>
           <span id="cap-ctx-pct" class="num-strong">--%</span>
         </button>
 
-        <button id="cap-speed" type="button" class="capsule-pill" data-goto-tab="context" title="最新模型生成速度">
+        <button id="cap-speed" type="button" class="capsule-pill" data-goto-tab="context" data-cap-key="speed" aria-controls="cap-popover" aria-expanded="false" title="悬停查看效率与耗时拆分，点击跳转或钉住">
           <svg class="svg-ic ic-bolt" viewBox="0 0 16 16" aria-hidden="true"><path d="M9.2 1.5 3.8 9h4.1l-.9 5.5L12.4 7H8.3l.9-5.5Z"/></svg>
           <span id="cap-speed-val" class="num">-- tok/s</span>
         </button>
 
-        <button id="cap-tokens" type="button" class="capsule-pill" data-goto-tab="history" title="本机累计 Token 用量">
+        <button id="cap-tokens" type="button" class="capsule-pill" data-goto-tab="history" data-cap-key="tokens" aria-controls="cap-popover" aria-expanded="false" title="悬停查看 Token 与缓存经济学，点击跳转用量趋势或钉住">
           <svg class="svg-ic ic-bars" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 13V8.5M8 13V3.5M13 13V6"/></svg>
           <span id="cap-tok-val" class="num">--</span>
         </button>
@@ -50,6 +50,9 @@
         </button>
       </div>
     </header>
+
+    <!-- Telemetry Capsule Popover -->
+    <section id="cap-popover" class="cap-popover hidden" role="region" aria-label="核心遥测速览详情"></section>
 
     <!-- Slide-down Appearance & Palette Customizer Drawer -->
     <section id="palette-drawer" class="palette-drawer hidden" aria-label="快捷入口与外观自定义">
@@ -196,6 +199,7 @@
               <h2 class="card-title">上下文窗口占用</h2>
               <span id="ctx-model-badge" class="meta-chip">读取中…</span>
               <span id="ctx-pending-badge" class="status-pill warn hidden" title="上一轮响应后新增的待发送步骤预估 Token">+待发 0</span>
+              <span id="ctx-sqlite-badge" class="meta-chip cv-subtle-badge hidden"></span>
             </div>
             <div class="row-gap">
               <span id="ctx-budget-chip" class="meta-chip num" title="实时跟随服务端下发的当前模型上下文窗口上限">上限 --</span>
@@ -363,7 +367,7 @@
         </article>
 
         <!-- Card 2: Generation Speed & Latency -->
-        <article class="card">
+        <article id="speed-card" class="card">
           <div class="card-head wrap-gap">
             <div class="title-group">
               <h2 class="card-title">最新生成速度与耗时</h2>
@@ -395,6 +399,8 @@
               <span id="sp-think-sub" class="m-sub">思考 -- / 正文 --</span>
             </div>
           </div>
+
+          <div id="time-split-wrap" class="time-split-wrap hidden"></div>
 
           <div id="sp-takeaway" class="takeaway-box compact">等待模型返回生成耗时统计…</div>
 

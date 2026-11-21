@@ -654,13 +654,17 @@ function buildCompactSummary(ctx = {}, hist = {}) {
       sessionTotals: {
         cacheReadTokens: st.cacheTokens ?? 0,
         freshInputTokens: st.inputTokens ?? 0,
+        cacheWrittenTokens: st.cacheWrittenTokens ?? 0,
         outputTokens: st.outputTokens ?? 0,
         thinkingTokens: st.thinkingTokens ?? 0,
         responseTokens: st.responseTokens ?? 0,
+        retryTokens: st.retryTokens ?? 0,
+        retryCalls: st.retryCalls ?? 0,
         grossTokens: st.totalTokens ?? 0,
         cacheHitPercent: st.cacheHitPercent ?? null,
         turnsCount: st.turnsCount || activeConvMeta?.turnsCount || turns.length || 0
       },
+      sessionTiming: cx.sessionTiming || null,
       sessionModels: Array.isArray(cx.sessionModels) ? cx.sessionModels : [],
       roundApiCostUSD: Number((cx.roundCostUSD || 0).toFixed(4)),
       sessionApiCostUSD: Number((cx.sessionCostUSD || 0).toFixed(4)),
@@ -834,6 +838,27 @@ function printPrettyStatus(ctx, hist) {
     const respTok = Number(cv.sessionTotals.responseTokens || 0) || Math.max(0, Number(cv.sessionTotals.outputTokens || 0) - thinkTok);
     const thinkSplitPart = thinkTok > 0 ? ` (含思考 ${fmtTok(thinkTok)} / 正文 ${fmtTok(respTok)})` : '';
     out.push(`会话吞吐  共 ${cv.sessionTotals.turnsCount} 轮  ·  累计总吞吐 ${c.bold}${fmtTok(cv.sessionTotals.grossTokens)}${c.reset} (缓存 ${fmtTok(cv.sessionTotals.cacheReadTokens)} · 新增输入 ${fmtTok(cv.sessionTotals.freshInputTokens)} · 输出 ${fmtTok(cv.sessionTotals.outputTokens)}${thinkSplitPart})`);
+    const timing = cv.sessionTiming;
+    if (timing && (timing.modelTimeSec != null || timing.toolTimeSec != null)) {
+      const timingParts = [];
+      if (timing.rounds > 0 || timing.calls > 0) {
+        timingParts.push(`${timing.rounds || 0} 轮 / ${timing.calls || 0} 次调用`);
+      }
+      if (timing.modelTimeSec != null) {
+        const mShare = timing.modelSharePercent != null ? ` (${timing.modelSharePercent}%)` : '';
+        timingParts.push(`模型 ${timing.modelTimeSec}s${mShare}`);
+      }
+      if (timing.toolTimeSec != null) {
+        const tShare = timing.toolSharePercent != null ? ` (${timing.toolSharePercent}%)` : '';
+        timingParts.push(`工具 ${timing.toolTimeSec}s${tShare}`);
+      }
+      if (timing.avgTtftSec != null) {
+        timingParts.push(`均值 TTFT ${timing.avgTtftSec}s`);
+      }
+      if (timingParts.length > 0) {
+        out.push(`耗时拆分  ${timingParts.join(' · ')}`);
+      }
+    }
     const sessionSavingsStr = cv.sessionCacheSavingsUSD > 0
       ? (cv.sessionCacheSavingsUSD < 0.01 ? fmtUsd(cv.sessionCacheSavingsUSD, 4) : fmtUsd(cv.sessionCacheSavingsUSD, 2))
       : '';

@@ -20,9 +20,24 @@ import {
 } from './pricing.mjs';
 
 const CACHE_MAX_ENTRIES = 256;
+const MAX_STAT_VALUE = 100_000_000;
+const MAX_TOOL_DURATION_SECS = 31_536_000_000;
 const UUID_RE = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 const CANARY_RESPONSE_RE = /canary|experiment|exp-|abtest|shadow/i;
 const ORCHESTRATOR_OR_PLAN_RE = /\b(?:plan|planner|orchestrator)\b/i;
+
+export const TOKEN_CATEGORIES = Object.freeze({
+  1: { type: 1, key: 'system', label: '系统提示词', color: '#94a3b8' },
+  2: { type: 2, key: 'tools', label: '工具定义', color: '#a78bfa' },
+  3: { type: 3, key: 'rules', label: '规则', color: '#f472b6' },
+  4: { type: 4, key: 'mcp', label: 'MCP 工具', color: '#2dd4bf' },
+  5: { type: 5, key: 'skills', label: '技能', color: '#f59e0b' },
+  6: { type: 6, key: 'subagents', label: '子代理', color: '#fb923c' },
+  7: { type: 7, key: 'messages', label: '对话消息', color: '#3b82f6' },
+  8: { type: 8, key: 'workflows', label: '工作流', color: '#10b981' },
+  9: { type: 9, key: 'plugins', label: '插件', color: '#c084fc' },
+  10: { type: 10, key: 'flows', label: '流程', color: '#38bdf8' }
+});
 
 const EVENT_PATTERNS = [
   {
@@ -66,18 +81,23 @@ function setBoundedCache(map, key, entry) {
 function getFileCacheSig(dbPath) {
   try {
     const st = statSync(dbPath);
-    let sig = `${st.size}:${st.mtimeMs}`;
+    let sig = `${st.ino}:${st.size}:${st.mtimeMs}`;
     const walPath = `${dbPath}-wal`;
     try {
       if (existsSync(walPath)) {
         const wst = statSync(walPath);
-        sig += `|${wst.size}:${wst.mtimeMs}`;
+        sig += `|${wst.ino}:${wst.size}:${wst.mtimeMs}`;
       }
     } catch {}
     return sig;
   } catch {
     return null;
   }
+}
+
+function isBusyError(err) {
+  const msg = String(err?.message || err?.errstr || '');
+  return (err?.code === 'ERR_SQLITE_ERROR' && /locked|busy/i.test(msg)) || /database is locked|SQLITE_BUSY/i.test(msg);
 }
 
 export async function isSqliteAvailable() {
@@ -108,7 +128,7 @@ export async function isSqliteAvailable() {
   return sqliteLoadPromise;
 }
 
-async function openReadOnlyDb(dbPath, timeoutMs = 1500) {
+async function openReadOnlyDb(dbPath, timeoutMs = 1500, options = {}) {
   if (!dbPath || typeof dbPath !== 'string') return null;
   try {
     if (!existsSync(dbPath)) return null;
@@ -122,8 +142,11 @@ async function openReadOnlyDb(dbPath, timeoutMs = 1500) {
     db = new cachedDatabaseSync(dbPath, { readOnly: true, timeout: safeTimeout });
     db.prepare('SELECT 1 FROM sqlite_master LIMIT 1').get();
     return db;
-  } catch {
+  } catch (err) {
     try { db?.close(); } catch {}
+    if (options?.rethrowBusy && isBusyError(err)) {
+      throw err;
+    }
     return null;
   }
 }
@@ -432,6 +455,45 @@ function decodeDuration(buf) {
   return Number((sec + nanos / 1e9).toFixed(3));
 }
 
+function decodeToolTimestamp(buf) {
+  if (!buf || buf.length === 0 || buf.length > 32) return null;
+  const { fields, truncated } = parseProtobufFields(buf, 0, buf.length, 8);
+  if (truncated || !fields.length) return null;
+  let sec = 0;
+  let nanos = 0;
+  let sawAny = false;
+  for (const f of fields) {
+    if (f.wt !== 0) continue;
+    if (f.fn === 1) { sec = f.val; sawAny = true; }
+    else if (f.fn === 2) { nanos = f.val; sawAny = true; }
+  }
+  if (!sawAny || sec < 0 || sec >= MAX_TOOL_DURATION_SECS || nanos < 0 || nanos >= 1e9) return null;
+  return sec + nanos / 1e9;
+}
+
+function buildCategoriesFromTypeTotals(typeTotals) {
+  const ordered = [];
+  for (const cat of Object.values(TOKEN_CATEGORIES)) {
+    const tokens = typeTotals[cat.type] || 0;
+    if (tokens > 0) {
+      ordered.push({ ...cat, tokens });
+    }
+  }
+  for (const [typeStr, tokens] of Object.entries(typeTotals)) {
+    const typeNum = Number(typeStr);
+    if (!TOKEN_CATEGORIES[typeNum] && tokens > 0) {
+      ordered.push({
+        type: typeNum,
+        key: `other_${typeNum}`,
+        label: `类别 ${typeNum}`,
+        color: '#6b7280',
+        tokens
+      });
+    }
+  }
+  return ordered;
+}
+
 function isPrintableAscii(buf, allowSpace = true) {
   if (!buf || !buf.length) return false;
   for (let i = 0; i < buf.length; i++) {
@@ -485,26 +547,35 @@ function extractContextWindowMetadata(buf, fallbackMaxCtx = null) {
   if (!buf || !buf.length) return null;
   const { fields } = parseProtobufFields(buf, 0, buf.length, 64);
   let usedTokens = 0;
+  let bdFallbackUsed = 0;
   let maxTokens = 0;
   const groups = [];
+  const typeTotals = Object.create(null);
 
   for (const f of fields) {
-    if (f.fn === 1 && f.wt === 0 && f.val >= 0 && f.val <= 50_000_000) {
+    if (f.fn === 1 && f.wt === 0 && f.val >= 0 && f.val <= MAX_STAT_VALUE) {
       usedTokens = f.val;
     } else if (f.fn === 4 && f.wt === 0 && f.val >= 8192 && f.val <= 10_000_000) {
       maxTokens = f.val;
     } else if (f.fn === 3 && f.wt === 2 && !f.truncated) {
       const bdParsed = parseProtobufFields(f.buf, 0, f.buf.length, 64);
       for (const gf of bdParsed.fields) {
+        if (gf.fn === 2 && gf.wt === 0 && gf.val > 0 && gf.val <= MAX_STAT_VALUE) {
+          bdFallbackUsed = gf.val;
+          continue;
+        }
         if (gf.fn !== 1 || gf.wt !== 2 || gf.truncated) continue;
         const gParsed = parseProtobufFields(gf.buf, 0, gf.buf.length, 128);
         let groupName = '';
+        let categoryType = 0;
         let groupNumTokens = 0;
         const children = [];
         for (const cf of gParsed.fields) {
           if (cf.fn === 1 && cf.wt === 2 && !cf.truncated && isReasonableUtf8Text(cf.buf)) {
             groupName = sanitizeSqliteText(cf.buf.toString('utf-8'), 64);
-          } else if (cf.fn === 4 && cf.wt === 0 && cf.val >= 0 && cf.val <= 50_000_000) {
+          } else if (cf.fn === 2 && cf.wt === 0 && cf.val > 0 && cf.val < 1000) {
+            categoryType = cf.val;
+          } else if (cf.fn === 4 && cf.wt === 0 && cf.val >= 0 && cf.val <= MAX_STAT_VALUE) {
             groupNumTokens = cf.val;
           } else if (cf.fn === 5 && cf.wt === 2 && !cf.truncated) {
             const cParsed = parseProtobufFields(cf.buf, 0, cf.buf.length, 32);
@@ -513,7 +584,7 @@ function extractContextWindowMetadata(buf, fallbackMaxCtx = null) {
             for (const sub of cParsed.fields) {
               if (sub.fn === 1 && sub.wt === 2 && !sub.truncated && isReasonableUtf8Text(sub.buf)) {
                 childName = sanitizeSqliteText(sub.buf.toString('utf-8'), 64);
-              } else if (sub.fn === 3 && sub.wt === 0 && sub.val >= 0 && sub.val <= 50_000_000) {
+              } else if (sub.fn === 3 && sub.wt === 0 && sub.val >= 0 && sub.val <= MAX_STAT_VALUE) {
                 childTokens = sub.val;
               }
             }
@@ -525,9 +596,13 @@ function extractContextWindowMetadata(buf, fallbackMaxCtx = null) {
             }
           }
         }
+        if (categoryType > 0 && groupNumTokens > 0 && groupNumTokens <= MAX_STAT_VALUE) {
+          typeTotals[categoryType] = (typeTotals[categoryType] || 0) + groupNumTokens;
+        }
         if (groupName || groupNumTokens > 0 || children.length > 0) {
+          const catMeta = categoryType > 0 ? TOKEN_CATEGORIES[categoryType] : null;
           groups.push({
-            name: groupName || '未命名分组',
+            name: groupName || catMeta?.label || '未命名分组',
             numTokens: groupNumTokens,
             children
           });
@@ -537,11 +612,12 @@ function extractContextWindowMetadata(buf, fallbackMaxCtx = null) {
   }
 
   if (!groups.length) return null;
+  const categories = buildCategoriesFromTypeTotals(typeTotals);
   const groupSum = groups.reduce((acc, g) => acc + (g.numTokens > 0 ? g.numTokens : 0), 0);
   return {
-    totalTokens: usedTokens > 0 ? usedTokens : groupSum,
+    totalTokens: usedTokens > 0 ? usedTokens : (bdFallbackUsed > 0 ? bdFallbackUsed : groupSum),
     maxContextTokens: maxTokens || fallbackMaxCtx || null,
-    tokenBreakdown: { groups }
+    tokenBreakdown: { groups, categories }
   };
 }
 
@@ -592,20 +668,42 @@ function parseUsageSubmessage(buf) {
   let inputTokens = 0;
   let outputTokens = 0;
   let cacheReadTokens = 0;
+  let cacheWriteTokens = 0;
   let thinkingTokens = 0;
   let responseTokens = 0;
+  let id11 = null;
+  let id12 = null;
+  let id7 = null;
   let hasPositive = false;
   for (const f of fields) {
-    if (f.wt !== 0 || f.val < 0 || f.val > 50_000_000) continue;
-    if (f.fn === 2) { inputTokens = f.val; if (f.val > 0) hasPositive = true; }
-    else if (f.fn === 3) { outputTokens = f.val; if (f.val > 0) hasPositive = true; }
-    else if (f.fn === 5) { cacheReadTokens = f.val; if (f.val > 0) hasPositive = true; }
-    else if (f.fn === 9) { thinkingTokens = f.val; if (f.val > 0) hasPositive = true; }
-    else if (f.fn === 10) { responseTokens = f.val; if (f.val > 0) hasPositive = true; }
+    if (f.wt === 0 && f.val >= 0 && f.val <= MAX_STAT_VALUE) {
+      if (f.fn === 2) { inputTokens = f.val; if (f.val > 0) hasPositive = true; }
+      else if (f.fn === 3) { outputTokens = f.val; if (f.val > 0) hasPositive = true; }
+      else if (f.fn === 4) { cacheWriteTokens = f.val; if (f.val > 0) hasPositive = true; }
+      else if (f.fn === 5) { cacheReadTokens = f.val; if (f.val > 0) hasPositive = true; }
+      else if (f.fn === 9) { thinkingTokens = f.val; if (f.val > 0) hasPositive = true; }
+      else if (f.fn === 10) { responseTokens = f.val; if (f.val > 0) hasPositive = true; }
+    } else if (f.wt === 2 && !f.truncated && f.buf.length > 0 && f.buf.length <= 512) {
+      if (f.fn === 11) id11 = f.buf;
+      else if (f.fn === 12) id12 = f.buf;
+      else if (f.fn === 7) id7 = f.buf;
+    }
   }
-  return hasPositive
-    ? { inputTokens, outputTokens, cacheReadTokens, thinkingTokens, responseTokens }
-    : null;
+  const effectiveOutput = Math.max(outputTokens, thinkingTokens + responseTokens);
+  if (effectiveOutput > 0) hasPositive = true;
+  if (!hasPositive) return null;
+  const idBuf = id11 ?? id12 ?? id7;
+  return {
+    usage: {
+      inputTokens,
+      outputTokens: effectiveOutput,
+      cacheReadTokens,
+      cacheWriteTokens,
+      thinkingTokens,
+      responseTokens
+    },
+    dedupId: idBuf ? idBuf.toString('hex') : null
+  };
 }
 
 function applyF1Fields(fields, target) {
@@ -613,8 +711,11 @@ function applyF1Fields(fields, target) {
     if (f.fn === 3 && f.wt === 0 && f.val > 1000 && f.val < 100000) {
       if (!target.respondedModelEnum) target.respondedModelEnum = f.val;
     } else if (f.fn === 4 && f.wt === 2 && !f.truncated) {
-      const usage = parseUsageSubmessage(f.buf);
-      if (usage && !target.usage) target.usage = usage;
+      const parsedUsage = parseUsageSubmessage(f.buf);
+      if (parsedUsage && !target.usage) {
+        target.usage = parsedUsage.usage;
+        target.usageDedupId = parsedUsage.dedupId;
+      }
     } else if (f.fn === 9 && f.wt === 2 && !f.truncated) {
       parseChatStartMetadata(f.buf, target);
     } else if (f.fn === 11 && f.wt === 2 && !f.truncated) {
@@ -628,7 +729,12 @@ function applyF1Fields(fields, target) {
     } else if (f.fn === 17 && f.wt === 2 && !f.truncated) {
       const sub = parseProtobufFields(f.buf, 0, f.buf.length, 32);
       for (const sf of sub.fields) {
-        if (sf.fn === 3 && sf.wt === 2 && !sf.truncated && isReasonableUtf8Text(sf.buf)) {
+        if (sf.fn === 2 && sf.wt === 2 && !sf.truncated) {
+          const rParsed = parseUsageSubmessage(sf.buf);
+          if (rParsed) {
+            target.retryUsages.push(rParsed);
+          }
+        } else if (sf.fn === 3 && sf.wt === 2 && !sf.truncated && isReasonableUtf8Text(sf.buf)) {
           const errText = sanitizeSqliteText(sf.buf.toString('utf-8'), 220);
           if (errText && !target.retryErrors.includes(errText) && target.retryErrors.length < 8) {
             target.retryErrors.push(errText);
@@ -800,15 +906,23 @@ function decodeGenMetadataRow(headRaw, tailRaw, extraTailRaw = null, options = {
     parseBreakdown: Boolean(options?.parseBreakdown),
     contextWindowMetadata: null,
     usage: null,
+    usageDedupId: null,
+    retryUsages: [],
     retries: 0,
     retryErrors: [],
     genError: '',
-    kvMap: {}
+    kvMap: {},
+    partial: false
   };
 
   if (headBuf && headBuf.length > 0) {
     const topParsed = parseProtobufFields(headBuf, 0, headBuf.length, 512);
+    if (options?.rowLen > 0 && options.rowLen <= 16384 && topParsed.truncated) {
+      target.partial = true;
+    }
     applyTopFields(topParsed.fields, target);
+  } else {
+    target.partial = true;
   }
   if (extraTailBuf && extraTailBuf.length > 0) {
     scanLargeTailBuffer(extraTailBuf, target);
@@ -858,10 +972,13 @@ function decodeGenMetadataRow(headRaw, tailRaw, extraTailRaw = null, options = {
     maxContextTokens: target.maxContextTokens,
     contextWindowMetadata: target.contextWindowMetadata || null,
     usage: target.usage || null,
+    usageDedupId: target.usageDedupId || null,
+    retryUsages: target.retryUsages,
     requestId,
     retries: target.retries,
     retryErrors: target.retryErrors,
-    genError: target.genError || ''
+    genError: target.genError || '',
+    partial: target.partial
   };
 }
 
@@ -900,10 +1017,11 @@ export async function readConversationSqliteSignals(convDbPath, { includeLatestG
     return hit.value;
   }
 
-  const db = await openReadOnlyDb(convDbPath);
-  if (!db) return null;
-
+  let db = null;
   try {
+    db = await openReadOnlyDb(convDbPath, 1500, { rethrowBusy: true });
+    if (!db) return null;
+
     let trajectoryType = 0;
     let parentConvId = null;
     let forkStepIndex = 0;
@@ -915,6 +1033,23 @@ export async function readConversationSqliteSignals(convDbPath, { includeLatestG
     let latestMaxContextTokens = null;
     let latestContextWindowMetadata = null;
 
+    // Session metrics accumulators
+    let stepsCount = 0;
+    let roundsCount = 0;
+    let callsCount = 0;
+    let modelTimeSum = 0;
+    let hasModelTime = false;
+    let toolTimeSum = 0;
+    let hasToolTime = false;
+    let ttftTotal = 0;
+    let ttftCount = 0;
+    let streamTimeSum = 0;
+    let streamedOutputSum = 0;
+    let cacheWrittenTokens = 0;
+    let retryTokens = 0;
+    let retryCalls = 0;
+    let partial = false;
+
     // 1. trajectory_meta
     const metaCols = getTableColumns(db, 'trajectory_meta');
     if (metaCols.has('trajectory_type')) {
@@ -923,7 +1058,9 @@ export async function readConversationSqliteSignals(convDbPath, { includeLatestG
         if (row && Number.isFinite(Number(row.trajectory_type))) {
           trajectoryType = Number(row.trajectory_type);
         }
-      } catch {}
+      } catch (err) {
+        if (isBusyError(err)) throw err;
+      }
     }
 
     // 2. parent_references
@@ -961,10 +1098,12 @@ export async function readConversationSqliteSignals(convDbPath, { includeLatestG
             }
           }
         }
-      } catch {}
+      } catch (err) {
+        if (isBusyError(err)) throw err;
+      }
     }
 
-    // 3. steps (compactions & error events)
+    // 3. steps (counts, tool timing, compactions & error events)
     const stepCols = getTableColumns(db, 'steps');
     if (stepCols.size > 0) {
       const idxCol = stepCols.has('step_index')
@@ -973,6 +1112,50 @@ export async function readConversationSqliteSignals(convDbPath, { includeLatestG
       const hasStepType = stepCols.has('step_type');
       const hasErrorDetails = stepCols.has('error_details');
       const hasData = stepCols.has('data');
+      const hasMetadata = stepCols.has('metadata');
+
+      try {
+        const countSql = hasStepType
+          ? 'SELECT count(*) AS total, coalesce(sum(step_type = 14), 0) AS rounds FROM steps'
+          : 'SELECT count(*) AS total, 0 AS rounds FROM steps';
+        const stepSummary = db.prepare(countSql).get();
+        stepsCount = Number(stepSummary?.total ?? 0);
+        roundsCount = Number(stepSummary?.rounds ?? 0);
+      } catch (err) {
+        if (isBusyError(err)) throw err;
+      }
+
+      if (hasMetadata) {
+        try {
+          const toolSql = hasStepType
+            ? 'SELECT metadata FROM steps WHERE metadata IS NOT NULL AND length(metadata) > 0 AND length(metadata) <= 65536 AND step_type NOT IN (14, 15)'
+            : 'SELECT metadata FROM steps WHERE metadata IS NOT NULL AND length(metadata) > 0 AND length(metadata) <= 65536';
+          const toolRows = db.prepare(toolSql).all();
+          for (const tr of toolRows) {
+            const buf = toBuffer(tr?.metadata);
+            if (!buf || !buf.length) continue;
+            const { fields } = parseProtobufFields(buf, 0, buf.length, 128);
+            let hasFn4Block = false;
+            let fn32Buf = null;
+            let fn8Buf = null;
+            for (const f of fields) {
+              if (f.wt !== 2 || f.truncated) continue;
+              if (f.fn === 4) hasFn4Block = true;
+              else if (f.fn === 32) fn32Buf = f.buf;
+              else if (f.fn === 8) fn8Buf = f.buf;
+            }
+            if (!hasFn4Block || !fn32Buf || !fn8Buf) continue;
+            const start = decodeToolTimestamp(fn32Buf);
+            const end = decodeToolTimestamp(fn8Buf);
+            if (start !== null && end !== null && start > 0 && end >= start) {
+              toolTimeSum += (end - start);
+              hasToolTime = true;
+            }
+          }
+        } catch (err) {
+          if (isBusyError(err)) throw err;
+        }
+      }
 
       if (hasStepType) {
         try {
@@ -987,7 +1170,9 @@ export async function readConversationSqliteSignals(convDbPath, { includeLatestG
               compactionSteps.push(n);
             }
           }
-        } catch {}
+        } catch (err) {
+          if (isBusyError(err)) throw err;
+        }
       }
 
       if (hasStepType || hasErrorDetails) {
@@ -1019,7 +1204,9 @@ export async function readConversationSqliteSignals(convDbPath, { includeLatestG
               detail: sanitizeSqliteText(combined, 120)
             });
           }
-        } catch {}
+        } catch (err) {
+          if (isBusyError(err)) throw err;
+        }
       }
     }
 
@@ -1043,21 +1230,87 @@ export async function readConversationSqliteSignals(convDbPath, { includeLatestG
               .prepare('SELECT substr(data, -65536) AS tail64 FROM gen_metadata WHERE idx = ?')
               .get(lastRow.idx);
             latestExtraTail = extra?.tail64 || null;
-          } catch {}
+          } catch (err) {
+            if (isBusyError(err)) throw err;
+          }
         }
 
+        const seenIds = new Set();
         const seenRouting = new Set();
         const seenGenEvByReq = new Set();
         for (let i = 0; i < rows.length; i++) {
           const row = rows[i];
           const extraTail = (i === rows.length - 1) ? latestExtraTail : null;
           const parseBreakdown = Boolean(includeLatestGenDetail) && (i === rows.length - 1 || Number(row.len) <= 16384);
-          const decoded = decodeGenMetadataRow(row.head, row.tail, extraTail, { parseBreakdown });
+          let decoded;
+          try {
+            decoded = decodeGenMetadataRow(row.head, row.tail, extraTail, {
+              parseBreakdown,
+              rowLen: Number(row.len || 0)
+            });
+          } catch {
+            partial = true;
+            continue;
+          }
+          if (decoded.partial) partial = true;
+
           if (decoded.maxContextTokens) {
             latestMaxContextTokens = decoded.maxContextTokens;
           }
           if (includeLatestGenDetail && decoded.contextWindowMetadata) {
             latestContextWindowMetadata = decoded.contextWindowMetadata;
+          }
+
+          // Deduplicated session-level call & retry metrics
+          const u = decoded.usage;
+          const mainTotal = u
+            ? ((u.inputTokens || 0) + (u.cacheReadTokens || 0) + (u.cacheWriteTokens || 0) + (u.outputTokens || 0))
+            : 0;
+          let isDuplicateMain = false;
+          if (u && mainTotal > 0) {
+            if (decoded.usageDedupId) {
+              if (seenIds.has(decoded.usageDedupId)) {
+                isDuplicateMain = true;
+              } else {
+                seenIds.add(decoded.usageDedupId);
+              }
+            }
+            if (!isDuplicateMain) {
+              callsCount += 1;
+              cacheWrittenTokens += u.cacheWriteTokens || 0;
+              const first = decoded.ttft;
+              const stream = decoded.streamingSec;
+              if (first !== null && first > 0) {
+                ttftTotal += first;
+                ttftCount += 1;
+              }
+              if (first !== null && stream !== null && first + stream > 0) {
+                modelTimeSum += first + stream;
+                hasModelTime = true;
+              } else if (stream === null && first !== null && first > 0) {
+                modelTimeSum += first;
+                hasModelTime = true;
+              }
+              if (stream !== null && stream > 0 && u.outputTokens > 0) {
+                streamTimeSum += stream;
+                streamedOutputSum += u.outputTokens;
+              }
+            }
+          }
+          if (!isDuplicateMain && Array.isArray(decoded.retryUsages) && decoded.retryUsages.length > 0) {
+            for (const rItem of decoded.retryUsages) {
+              const ru = rItem?.usage;
+              if (!ru) continue;
+              const ruTotal = (ru.inputTokens || 0) + (ru.cacheReadTokens || 0) + (ru.cacheWriteTokens || 0) + (ru.outputTokens || 0);
+              if (ruTotal <= 0) continue;
+              if (rItem.dedupId) {
+                if (seenIds.has(rItem.dedupId)) continue;
+                seenIds.add(rItem.dedupId);
+              }
+              retryCalls += 1;
+              retryTokens += ruTotal;
+              cacheWrittenTokens += ru.cacheWriteTokens || 0;
+            }
           }
 
           const stepEntry = {
@@ -1162,8 +1415,27 @@ export async function readConversationSqliteSignals(convDbPath, { includeLatestG
             }
           }
         }
-      } catch {}
+      } catch (err) {
+        if (isBusyError(err)) throw err;
+      }
     }
+
+    const sessionMetrics = {
+      rounds: roundsCount,
+      steps: stepsCount,
+      calls: callsCount,
+      modelTimeSec: hasModelTime ? Number(modelTimeSum.toFixed(2)) : null,
+      toolTimeSec: hasToolTime ? Number(toolTimeSum.toFixed(2)) : null,
+      avgTtftSec: ttftCount > 0 ? Number((ttftTotal / ttftCount).toFixed(2)) : null,
+      sessionStreamTps: (streamTimeSum > 0 && streamedOutputSum > 0)
+        ? Number((streamedOutputSum / streamTimeSum).toFixed(1))
+        : null,
+      cacheWrittenTokens,
+      retryTokens,
+      retryCalls,
+      partial,
+      stale: false
+    };
 
     const result = {
       trajectoryType,
@@ -1176,14 +1448,22 @@ export async function readConversationSqliteSignals(convDbPath, { includeLatestG
       genUsageByStep,
       routingEvents,
       latestMaxContextTokens,
-      latestContextWindowMetadata
+      latestContextWindowMetadata,
+      sessionMetrics
     };
     setBoundedCache(convSignalsCache, cacheKey, { sig, value: result });
     return result;
-  } catch {
+  } catch (err) {
+    if (isBusyError(err) && hit?.value) {
+      return {
+        ...hit.value,
+        stale: true,
+        ...(hit.value.sessionMetrics ? { sessionMetrics: { ...hit.value.sessionMetrics, stale: true } } : {})
+      };
+    }
     return null;
   } finally {
-    try { db.close(); } catch {}
+    try { db?.close(); } catch {}
   }
 }
 

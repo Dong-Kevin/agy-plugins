@@ -64,7 +64,8 @@ import {
   readConversationLatestGenSignal,
   readConversationSqliteSignals,
   readConversationSummariesIndex,
-  sanitizeSqliteText
+  sanitizeSqliteText,
+  TOKEN_CATEGORIES
 } from './sqlite_reader.mjs';
 
 const CONV_ID_RE = /^[0-9a-f-]{8,64}$/i;
@@ -4434,7 +4435,112 @@ function saveActiveConvGenDiskEntry(convId, entry, targetPath = getActiveConvGen
   } catch {}
 }
 
-function extractContextBreakdown(contextWindowMetadata, actualInputTokens = null) {
+function calibrateByLargestRemainder(items, getVal, targetTotal) {
+  const rawSum = items.reduce((sum, item) => {
+    const v = Number(getVal(item) || 0);
+    return sum + (v > 0 ? v : 0);
+  }, 0);
+  if (!(Number.isFinite(targetTotal) && targetTotal > 0 && rawSum > 0)) {
+    return null;
+  }
+  const slots = items.map((item, idx) => {
+    const reported = Math.max(0, Number(getVal(item) || 0));
+    if (reported <= 0) {
+      return { idx, reported: 0, floored: 0, remainder: -1 };
+    }
+    const exact = (reported / rawSum) * targetTotal;
+    const floored = Math.floor(exact);
+    return { idx, reported, floored, remainder: exact - floored };
+  });
+  const allocated = slots.reduce((sum, it) => sum + it.floored, 0);
+  const deficit = targetTotal - allocated;
+  if (deficit > 0) {
+    const positiveItems = slots
+      .filter((it) => it.reported > 0)
+      .sort((a, b) => (b.remainder - a.remainder) || (b.reported - a.reported) || (a.idx - b.idx));
+    for (let i = 0; i < deficit && i < positiveItems.length; i++) {
+      positiveItems[i].floored += 1;
+    }
+  }
+  return { rawSum, slots };
+}
+
+function buildCategoriesForBreakdown(contextWindowMetadata, parsedGroups, fallbackCategories) {
+  const rawMetaCats = contextWindowMetadata?.tokenBreakdown?.categories;
+  const sourceCats = (Array.isArray(rawMetaCats) && rawMetaCats.length > 0)
+    ? rawMetaCats
+    : (Array.isArray(fallbackCategories) && fallbackCategories.length > 0 ? fallbackCategories : null);
+
+  if (sourceCats) {
+    const normalized = [];
+    for (const c of sourceCats) {
+      const tokens = Number(c?.tokens || 0);
+      if (!(tokens > 0)) continue;
+      const typeNum = Number(c?.type || 0);
+      const known = TOKEN_CATEGORIES[typeNum];
+      normalized.push({
+        type: typeNum,
+        key: String(c?.key || known?.key || `other_${typeNum}`),
+        label: String(c?.label || known?.label || `类别 ${typeNum}`),
+        color: String(c?.color || known?.color || '#6b7280'),
+        tokens
+      });
+    }
+    if (normalized.length > 0) return normalized;
+  }
+
+  // Synthesize from parsedGroups when neither contextWindowMetadata nor SQLite provides categories
+  const GROUP_TO_CAT_TYPE = {
+    'System Prompt': 1,
+    system: 1,
+    Tools: 2,
+    tools: 2,
+    Rules: 3,
+    rules: 3,
+    MCP: 4,
+    mcp: 4,
+    Skills: 5,
+    skills: 5,
+    Subagents: 6,
+    subagents: 6,
+    'Chat Messages': 7,
+    messages: 7,
+    Workflows: 8,
+    workflows: 8,
+    Plugins: 9,
+    plugins: 9,
+    Flows: 10,
+    flows: 10
+  };
+  const totalsByType = Object.create(null);
+  const extraCats = [];
+  for (const g of parsedGroups) {
+    const tokens = Number(g?.tokens || 0);
+    if (!(tokens > 0)) continue;
+    const catType = GROUP_TO_CAT_TYPE[g.name] || GROUP_TO_CAT_TYPE[g.key] || 0;
+    if (catType > 0 && TOKEN_CATEGORIES[catType]) {
+      totalsByType[catType] = (totalsByType[catType] || 0) + tokens;
+    } else {
+      extraCats.push({
+        type: 0,
+        key: String(g.key || g.name || 'other'),
+        label: String(g.label || g.name || '其他'),
+        color: '#6b7280',
+        tokens
+      });
+    }
+  }
+  const out = [];
+  for (const cat of Object.values(TOKEN_CATEGORIES)) {
+    const tokens = totalsByType[cat.type] || 0;
+    if (tokens > 0) {
+      out.push({ ...cat, tokens });
+    }
+  }
+  return out.concat(extraCats);
+}
+
+function extractContextBreakdown(contextWindowMetadata, actualInputTokens = null, fallbackCategories = null) {
   const groups = contextWindowMetadata?.tokenBreakdown?.groups;
   if (!Array.isArray(groups) || !groups.length) return null;
   const total = Number(contextWindowMetadata.totalTokens || contextWindowMetadata.estimatedTokensUsed || 0);
@@ -4491,48 +4597,50 @@ function extractContextBreakdown(contextWindowMetadata, actualInputTokens = null
     }
   }
 
+  const rawCategories = buildCategoriesForBreakdown(contextWindowMetadata, parsedGroups, fallbackCategories);
   const targetTotal = Math.round(Number(actualInputTokens || 0));
-  const rawSum = parsedGroups.reduce((sum, g) => sum + (g.tokens > 0 ? g.tokens : 0), 0);
-  if (Number.isFinite(targetTotal) && targetTotal > 0 && rawSum > 0) {
-    const items = parsedGroups.map((g, idx) => {
-      const reported = g.tokens;
-      if (reported <= 0) {
-        return { idx, reported, floored: 0, remainder: -1 };
-      }
-      const exact = (reported / rawSum) * targetTotal;
-      const floored = Math.floor(exact);
-      return { idx, reported, floored, remainder: exact - floored };
-    });
-    const allocated = items.reduce((sum, it) => sum + it.floored, 0);
-    const deficit = targetTotal - allocated;
-    if (deficit > 0) {
-      const positiveItems = items
-        .filter((it) => it.reported > 0)
-        .sort((a, b) => (b.remainder - a.remainder) || (b.reported - a.reported) || (a.idx - b.idx));
-      for (let i = 0; i < deficit && i < positiveItems.length; i++) {
-        positiveItems[i].floored += 1;
-      }
-    }
-    for (const it of items) {
+  const groupCalib = calibrateByLargestRemainder(parsedGroups, (g) => g.tokens, targetTotal);
+  if (groupCalib) {
+    for (const it of groupCalib.slots) {
       const g = parsedGroups[it.idx];
       g.reportedTokens = it.reported;
       g.calibrated = true;
       g.tokens = it.floored;
       g.percent = Number(((g.tokens / targetTotal) * 100).toFixed(1));
     }
+    const catCalib = calibrateByLargestRemainder(rawCategories, (c) => c.tokens, targetTotal);
+    const categories = rawCategories.map((c, idx) => {
+      const slot = catCalib?.slots[idx];
+      const calTok = slot ? slot.floored : c.tokens;
+      return {
+        ...c,
+        rawTokens: c.tokens,
+        tokens: calTok,
+        percent: Number(((calTok / targetTotal) * 100).toFixed(1))
+      };
+    });
     return {
       totalTokens: targetTotal,
-      reportedTotalTokens: rawSum,
+      reportedTotalTokens: groupCalib.rawSum,
       calibrated: true,
       maxContextTokens: Number(contextWindowMetadata.maxContextTokens || 0) || null,
-      groups: parsedGroups
+      groups: parsedGroups,
+      categories
     };
   }
+
+  const catSum = rawCategories.reduce((s, c) => s + (c.tokens > 0 ? c.tokens : 0), 0);
+  const catDenom = catSum > 0 ? catSum : total;
+  const categories = rawCategories.map((c) => ({
+    ...c,
+    percent: catDenom > 0 ? Number(((c.tokens / catDenom) * 100).toFixed(1)) : 0
+  }));
 
   return {
     totalTokens: total,
     maxContextTokens: Number(contextWindowMetadata.maxContextTokens || 0) || null,
-    groups: parsedGroups
+    groups: parsedGroups,
+    categories
   };
 }
 
@@ -6057,9 +6165,15 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       : (hasTurnBd
           ? latestTurnObj._rawCtxMeta
           : (hasSqliteBd ? sqliteSignals.latestContextWindowMetadata : null));
-    const canCalibrateBd = Boolean(rawCtxMetaForBd?.tokenBreakdown?.groups?.length >= 2 && actualInputForCalib > 0);
+    const canCalibrateBd = Boolean(
+      (rawCtxMetaForBd?.tokenBreakdown?.groups?.length >= 2 || rawCtxMetaForBd?.tokenBreakdown?.categories?.length >= 2) &&
+      actualInputForCalib > 0
+    );
+    const fallbackCategories = (!lightweight && sqliteSignals?.latestContextWindowMetadata?.tokenBreakdown?.categories?.length)
+      ? sqliteSignals.latestContextWindowMetadata.tokenBreakdown.categories
+      : null;
     candidateContextBreakdown = rawCtxMetaForBd
-      ? extractContextBreakdown(rawCtxMetaForBd, canCalibrateBd ? actualInputForCalib : null)
+      ? extractContextBreakdown(rawCtxMetaForBd, canCalibrateBd ? actualInputForCalib : null, fallbackCategories)
       : null;
     if (hasInFlightBd) {
       latestTurnSourceGm = latestInFlight?._sourceGm || null;
@@ -6256,13 +6370,17 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   const latestValidTurn = [...turns].reverse().find((t) => t.totalTokens > 0 && !t.error) || latestTurn;
 
   // Session cumulative throughput, per-model breakdown & session-wide TPS stats
+  const sqlMetrics = (!lightweight && sqliteSignals?.sessionMetrics) ? sqliteSignals.sessionMetrics : null;
   const sessionTotals = {
     turnsCount: turns.length,
     inputTokens: 0,
     cacheTokens: 0,
+    cacheWrittenTokens: Number(sqlMetrics?.cacheWrittenTokens || 0),
     outputTokens: 0,
     thinkingTokens: 0,
     responseTokens: 0,
+    retryTokens: Number(sqlMetrics?.retryTokens || 0),
+    retryCalls: Number(sqlMetrics?.retryCalls || 0),
     totalTokens: 0,
     cacheHitPercent: null
   };
@@ -6814,13 +6932,80 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     routing: allSessionRouting.slice(-15).reverse()
   };
 
+  let fallbackModelTimeSum = 0;
+  let fallbackHasModelTime = false;
+  let fallbackTtftSum = 0;
+  let fallbackTtftCount = 0;
+  let fallbackStreamSecSum = 0;
+  let fallbackStreamOutSum = 0;
+  for (const t of turns) {
+    if (typeof t.duration === 'number' && t.duration > 0) {
+      fallbackModelTimeSum += t.duration;
+      fallbackHasModelTime = true;
+    }
+    if (typeof t.ttft === 'number' && t.ttft > 0) {
+      fallbackTtftSum += t.ttft;
+      fallbackTtftCount += 1;
+    }
+    if (typeof t.streamingSec === 'number' && t.streamingSec > 0 && t.outputTokens > 0) {
+      fallbackStreamSecSum += t.streamingSec;
+      fallbackStreamOutSum += t.outputTokens;
+    }
+  }
+  const stRounds = (sqlMetrics && Number(sqlMetrics.rounds) > 0)
+    ? Number(sqlMetrics.rounds)
+    : (allPromptTurns.length || userMessages || 0);
+  const stSteps = (sqlMetrics && Number(sqlMetrics.steps) > 0)
+    ? Number(sqlMetrics.steps)
+    : (totalSteps || 0);
+  const stCalls = (sqlMetrics && Number(sqlMetrics.calls) > 0)
+    ? Number(sqlMetrics.calls)
+    : (turns.length || 0);
+  const stModelTimeSec = (sqlMetrics && sqlMetrics.modelTimeSec !== null && sqlMetrics.modelTimeSec > 0)
+    ? sqlMetrics.modelTimeSec
+    : (fallbackHasModelTime ? Number(fallbackModelTimeSum.toFixed(2)) : null);
+  const stToolTimeSec = (sqlMetrics && sqlMetrics.toolTimeSec !== null)
+    ? sqlMetrics.toolTimeSec
+    : null;
+  const stTotalActiveSec = (stModelTimeSec !== null || stToolTimeSec !== null)
+    ? Number(((stModelTimeSec || 0) + (stToolTimeSec || 0)).toFixed(2))
+    : null;
+  let stModelSharePercent = null;
+  let stToolSharePercent = null;
+  if (stTotalActiveSec !== null && stTotalActiveSec > 0 && stModelTimeSec !== null && stToolTimeSec !== null) {
+    stModelSharePercent = Number(((stModelTimeSec / stTotalActiveSec) * 100).toFixed(1));
+    stToolSharePercent = Number((100 - stModelSharePercent).toFixed(1));
+  }
+  const stAvgTtftSec = (sqlMetrics && sqlMetrics.avgTtftSec !== null)
+    ? sqlMetrics.avgTtftSec
+    : (fallbackTtftCount > 0 ? Number((fallbackTtftSum / fallbackTtftCount).toFixed(2)) : null);
+  const stSessionStreamTps = (sqlMetrics && sqlMetrics.sessionStreamTps !== null)
+    ? sqlMetrics.sessionStreamTps
+    : (fallbackStreamSecSum > 0 && fallbackStreamOutSum > 0
+        ? Number((fallbackStreamOutSum / fallbackStreamSecSum).toFixed(1))
+        : (avgTps ?? null));
+  const sessionTiming = {
+    rounds: stRounds,
+    steps: stSteps,
+    calls: stCalls,
+    modelTimeSec: stModelTimeSec,
+    toolTimeSec: stToolTimeSec,
+    totalActiveSec: stTotalActiveSec,
+    modelSharePercent: stModelSharePercent,
+    toolSharePercent: stToolSharePercent,
+    avgTtftSec: stAvgTtftSec,
+    sessionStreamTps: stSessionStreamTps,
+    sqliteStale: Boolean(sqliteSignals?.stale || sqlMetrics?.stale),
+    sqlitePartial: Boolean(sqlMetrics?.partial)
+  };
+
   const resolvedTitle = conversationTitle || sqlSummaryEntry?.title || `会话 ${convId.slice(0, 8)}`;
   const promptUsed = latestValidTurn
     ? ((latestValidTurn.inputTokens || 0) + (latestValidTurn.cacheTokens || 0))
     : null;
-  const skillsTokens = (contextBreakdown?.groups?.length)
-    ? (contextBreakdown.groups.find((g) => g.key === 'skills' || g.name === 'Skills')?.tokens || 0)
-    : 0;
+  const skillsTokens = (contextBreakdown?.groups?.find((g) => g.key === 'skills' || g.name === 'Skills')?.tokens)
+    || (contextBreakdown?.categories?.find((c) => c.key === 'skills' || c.type === 5)?.tokens)
+    || 0;
   const contextPayload = {
     model: currentModelDisplay,
     modelKey: currentModelKey,
@@ -6853,6 +7038,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     quota: modelQuota,
     breakdown: contextBreakdown,
     sessionTotals,
+    sessionTiming,
     sessionModels
   };
   const speedPayload = latestValidTurn ? {

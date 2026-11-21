@@ -143,7 +143,14 @@
     hostHidden: Boolean(window.__CV_INITIAL_HIDDEN__),
     floatRunning: Boolean(window.__CV_FLOAT_MODE__) && !Boolean(window.__CV_INITIAL_HIDDEN__),
     floatPinned: Boolean(window.__CV_FLOAT_PINNED__ ?? true),
-    toastTimer: null
+    toastTimer: null,
+    capPopover: {
+      open: false,
+      pinned: false,
+      activeKey: '',
+      lastSig: '',
+      closeTimer: null
+    }
   };
 
   const $ = (id) => document.getElementById(id);
@@ -232,6 +239,21 @@
   function fmtInt(n) {
     if (n === null || n === undefined || Number.isNaN(Number(n))) return '--';
     return Math.round(Number(n)).toLocaleString('en-US');
+  }
+
+  function fmtIntZh(n) {
+    if (n === null || n === undefined || Number.isNaN(Number(n))) return '--';
+    return new Intl.NumberFormat('zh-CN').format(Math.round(Number(n)));
+  }
+
+  function fmtCompactZh(n) {
+    if (n === null || n === undefined || Number.isNaN(Number(n))) return '--';
+    const v = Number(n);
+    if (v >= 10_000_000) return `${Math.round(v / 1_000_000)}M`;
+    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+    if (v >= 100_000) return `${Math.round(v / 1_000)}K`;
+    if (v >= 1_000) return `${(v / 1_000).toFixed(1).replace(/\.0$/, '')}K`;
+    return String(Math.round(v));
   }
 
   function fmtUSD(v, minDec = 2) {
@@ -521,6 +543,10 @@
         return;
       }
       if (snap?.ok) {
+        const prevConvId = state.contextData?.conversationId || '';
+        if (prevConvId && snap.conversationId && prevConvId !== snap.conversationId && typeof closeCapPopover === 'function') {
+          closeCapPopover();
+        }
         state.contextEtag = snap.etag || '';
         state.contextEtagConv = state.selectedConvId || state.hostConvId || '';
         state.contextData = snap;
@@ -712,7 +738,9 @@
     if (miniRing) {
       const circum = 45.24; // 2 * PI * 7.2
       const ratio = pct !== null ? Math.min(1, Math.max(0, pct / 100)) : 0;
-      miniRing.setAttribute('stroke-dasharray', `${(ratio * circum).toFixed(2)} ${circum}`);
+      const offset = circum * (1 - ratio);
+      miniRing.setAttribute('stroke-dasharray', `${circum}`);
+      miniRing.setAttribute('stroke-dashoffset', `${offset.toFixed(2)}`);
       miniRing.style.stroke = resolveHealthStroke(healthPct, ctx?.error?.kind);
     }
 
@@ -722,6 +750,7 @@
     const srcSummary = hist?.analyticsBySource?.[state.sourceFilter]?.summary
       || hist?.analyticsBySource?.all?.summary;
     setText('cap-tok-val', srcSummary ? fmtTokens(srcSummary.grandTotalTokens) : '--');
+    if (typeof refreshOpenCapPopover === 'function') refreshOpenCapPopover();
   }
 
   function resolveHealthStroke(pct, errKind) {
@@ -1163,6 +1192,7 @@
     state.contextInFlightConv = '';
 
     if (closePopover) closeConvPopover();
+    if (typeof closeCapPopover === 'function') closeCapPopover();
     renderConversationPicker(state.recentConversations, state.activeConvId || normalized);
     if (showFollowToast && !normalized) {
       showToast('已切回自动跟随当前对话');
@@ -1200,6 +1230,32 @@
         setText(pendingBadge, `+待发 ~${fmtTokens(ctx.pendingTokens, 1)}`);
       } else {
         pendingBadge.classList.add('hidden');
+      }
+    }
+
+    const sqliteBadge = $('ctx-sqlite-badge');
+    if (sqliteBadge) {
+      const stTiming = ctx.sessionTiming;
+      if (stTiming && (stTiming.sqliteStale || stTiming.sqlitePartial)) {
+        sqliteBadge.classList.remove('hidden');
+        const badgeTxt = stTiming.sqlitePartial && stTiming.sqliteStale
+          ? '遥测待更新'
+          : (stTiming.sqliteStale ? '遥测略滞后' : '部分遥测');
+        setText(sqliteBadge, badgeTxt);
+        sqliteBadge.setAttribute(
+          'title',
+          formatZh(
+            stTiming.sqliteStale && stTiming.sqlitePartial
+              ? '本地 SQLite 遥测尚在同步且部分记录未就绪，耗时与分类占比可能略滞后'
+              : (stTiming.sqliteStale
+                ? '本地 SQLite 遥测尚在同步，耗时与分类占比可能略滞后'
+                : '部分 SQLite 历史记录未能解析，分类或耗时统计可能不完整')
+          )
+        );
+      } else {
+        sqliteBadge.classList.add('hidden');
+        setText(sqliteBadge, '');
+        sqliteBadge.setAttribute('title', '');
       }
     }
 
@@ -1509,59 +1565,137 @@
 
     // Card 4: Technical Audit & Attachments
     renderTechnicalAuditCard(snap);
+
+    if (typeof refreshOpenCapPopover === 'function') refreshOpenCapPopover();
+  }
+
+  const CONTEXT_CAT_META = {
+    1: { key: 'system', label: '系统提示词', color: 'var(--cv-cat-1, #9ca3af)' },
+    2: { key: 'tools', label: '工具定义', color: 'var(--cv-cat-2, #a78bfa)' },
+    3: { key: 'rules', label: '规则', color: 'var(--cv-cat-3, #f472b6)' },
+    4: { key: 'mcp', label: 'MCP 工具', color: 'var(--cv-cat-4, #2dd4bf)' },
+    5: { key: 'skills', label: '技能', color: 'var(--cv-cat-5, #fbbf24)' },
+    6: { key: 'subagent', label: '子代理', color: 'var(--cv-cat-6, #fb923c)' },
+    7: { key: 'messages', label: '对话消息', color: 'var(--cv-cat-7, #4c8df6)' },
+    8: { key: 'workflow', label: '工作流', color: 'var(--cv-cat-8, #34d399)' },
+    9: { key: 'plugin', label: '插件', color: 'var(--cv-cat-9, #c084fc)' },
+    10: { key: 'flow', label: '流程', color: 'var(--cv-cat-10, #38bdf8)' }
+  };
+
+  function resolveContextCategories(ctx = {}, audit = {}) {
+    const rawCats = ctx?.breakdown?.categories;
+    if (Array.isArray(rawCats) && rawCats.length > 0) {
+      const positive = rawCats.filter((c) => Number(c?.tokens || 0) > 0);
+      const sum = positive.reduce((acc, c) => acc + Number(c.tokens || 0), 0);
+      const items = positive.map((c, idx) => {
+        const typeNum = Number(c.type || 0);
+        const fallback = CONTEXT_CAT_META[typeNum] || {};
+        const tokens = Number(c.tokens || 0);
+        const percent = Number.isFinite(Number(c.percent))
+          ? Number(c.percent)
+          : (sum > 0 ? (tokens / sum) * 100 : 0);
+        return {
+          type: typeNum || idx + 1,
+          key: String(c.key || fallback.key || `cat_${idx + 1}`),
+          label: String(c.label || fallback.label || '其他'),
+          color: String(c.color || fallback.color || 'var(--cv-accent)'),
+          tokens,
+          percent,
+          rawTokens: c.rawTokens
+        };
+      });
+      return { items, sum, isExact: true, isCategories: true };
+    }
+
+    const groups = ctx?.breakdown?.groups;
+    if (Array.isArray(groups) && groups.length > 0) {
+      const merged = [];
+      for (const g of groups) {
+        const tok = Number(g?.tokens || 0);
+        if (tok <= 0) continue;
+        if (g.key === 'skills' || g.name === 'Skills') {
+          merged.push({ key: 'skills', label: 'Skills 技能指令', color: 'var(--cv-seg-skills-col, #10b981)', tokens: tok });
+        } else if (g.name === 'System Prompt') {
+          merged.push({ key: 'system', label: '系统提示词', color: 'var(--seg-sys-col, #6366f1)', tokens: tok });
+        } else if (g.name === 'Tools') {
+          merged.push({ key: 'tools', label: '工具定义', color: 'var(--seg-tools-col, #0ea5e9)', tokens: tok });
+        } else {
+          merged.push({ key: g.key || 'messages', label: g.label || '对话与思考历史', color: 'var(--seg-msgs-col, #a855f7)', tokens: tok });
+        }
+      }
+      const sum = merged.reduce((acc, it) => acc + it.tokens, 0);
+      const items = merged.map((it, idx) => ({
+        type: idx + 1,
+        key: it.key,
+        label: it.label,
+        color: it.color,
+        tokens: it.tokens,
+        percent: sum > 0 ? (it.tokens / sum) * 100 : 0
+      }));
+      return { items, sum, isExact: true, isCategories: false };
+    }
+
+    if (audit?.groups) {
+      const g = audit.groups;
+      const mid = (m) => (m ? Math.round(((m.low || 0) + (m.high || 0)) / 2) : 0);
+      const sysTok = mid(g.system);
+      const toolsTok = mid(g.definitions) + mid(g.tools);
+      const msgsTok = mid(g.user) + mid(g.assistant) + mid(g.thinking) + mid(g.summaries) + mid(audit.attachmentTotal);
+      const raw = [
+        { key: 'system', label: '系统提示词', color: 'var(--seg-sys-col, #6366f1)', tokens: sysTok },
+        { key: 'tools', label: '工具定义与调用', color: 'var(--seg-tools-col, #0ea5e9)', tokens: toolsTok },
+        { key: 'messages', label: '对话与思考历史', color: 'var(--seg-msgs-col, #a855f7)', tokens: msgsTok }
+      ].filter((it) => it.tokens > 0);
+      const sum = raw.reduce((acc, it) => acc + it.tokens, 0);
+      const items = raw.map((it, idx) => ({
+        type: idx + 1,
+        ...it,
+        percent: sum > 0 ? (it.tokens / sum) * 100 : 0
+      }));
+      return { items, sum, isExact: false, isCategories: false };
+    }
+
+    return { items: [], sum: 0, isExact: false, isCategories: false };
   }
 
   function renderSegmentedBreakdown(ctx, audit) {
-    let sysTok = 0;
-    let skillsTok = 0;
-    let toolsTok = 0;
-    let msgsTok = 0;
-    let isExact = false;
+    const resolved = resolveContextCategories(ctx, audit);
+    const { items, sum, isExact } = resolved;
+    const bar = $('ctx-seg-bar');
+    const leg = $('ctx-seg-legend');
 
-    if (ctx.breakdown?.groups?.length) {
-      isExact = true;
-      for (const g of ctx.breakdown.groups) {
-        if (g.key === 'skills' || g.name === 'Skills') skillsTok += g.tokens || 0;
-        else if (g.name === 'System Prompt') sysTok += g.tokens || 0;
-        else if (g.name === 'Tools') toolsTok += g.tokens || 0;
-        else msgsTok += g.tokens || 0;
+    if (bar) {
+      bar.classList?.remove('has-hover');
+      if (sum <= 0 || !items.length) {
+        bar.innerHTML = '';
+      } else {
+        bar.innerHTML = items.map((it) => {
+          const pctStr = it.percent.toFixed(1);
+          const tip = `${it.label} · ${fmtIntZh(it.tokens)} tok (${pctStr}%)`;
+          return (
+            `<div class="seg-piece" data-cat-key="${esc(it.key)}" ` +
+            `style="width:${Math.max(0.5, it.percent).toFixed(2)}%;background:${esc(it.color)}" ` +
+            `title="${escZh(tip)}"></div>`
+          );
+        }).join('');
       }
-    } else if (audit?.groups) {
-      const g = audit.groups;
-      const mid = (m) => (m ? Math.round(((m.low || 0) + (m.high || 0)) / 2) : 0);
-      sysTok = mid(g.system);
-      toolsTok = mid(g.definitions) + mid(g.tools);
-      msgsTok = mid(g.user) + mid(g.assistant) + mid(g.thinking) + mid(g.summaries) + mid(audit.attachmentTotal);
     }
 
-    const sum = sysTok + skillsTok + toolsTok + msgsTok;
-    const pSys = sum > 0 ? ((sysTok + skillsTok) / sum) * 100 : 0;
-    const pSysOnly = sum > 0 ? (sysTok / sum) * 100 : 0;
-    const pSkills = sum > 0 ? (skillsTok / sum) * 100 : 0;
-    const pTools = sum > 0 ? (toolsTok / sum) * 100 : 0;
-    const pMsgs = sum > 0 ? Math.max(0, 100 - pSys - pTools) : 0;
-
-    if ($('seg-sys')) $('seg-sys').style.width = `${pSys.toFixed(1)}%`;
-    if ($('seg-tools')) $('seg-tools').style.width = `${pTools.toFixed(1)}%`;
-    if ($('seg-msgs')) $('seg-msgs').style.width = `${pMsgs.toFixed(1)}%`;
-
-    const leg = $('ctx-seg-legend');
     if (leg) {
-      if (sum <= 0) {
+      leg.classList?.remove('has-hover');
+      if (sum <= 0 || !items.length) {
         leg.innerHTML = `<span class="muted">${escZh('暂无上下文构成明细')}</span>`;
       } else {
-        const items = [
-          { label: '系统提示词', tok: sysTok, pct: pSysOnly, col: 'var(--seg-sys-col)' },
-          ...(skillsTok > 0 ? [{ label: 'Skills 技能指令', tok: skillsTok, pct: pSkills, col: 'var(--cv-seg-skills-col)' }] : []),
-          { label: '工具定义与调用', tok: toolsTok, pct: pTools, col: 'var(--seg-tools-col)' },
-          { label: '对话与思考历史', tok: msgsTok, pct: pMsgs, col: 'var(--seg-msgs-col)' }
-        ];
-        leg.innerHTML = items.map((it) => (
-          `<span class="seg-leg-item">` +
-          `<i class="seg-dot" style="background:${it.col}"></i>` +
-          `<span>${escZh(`${it.label} ${fmtTokens(it.tok, 1)} (${it.pct.toFixed(0)}%)`)}</span>` +
-          `</span>`
-        )).join('') + (!isExact ? `<span class="muted">${escZh('· 本地启发式占比')}</span>` : '');
+        leg.innerHTML = items.map((it) => {
+          const pctStr = it.percent >= 10 ? it.percent.toFixed(0) : it.percent.toFixed(1);
+          const tip = `${it.label} · ${fmtIntZh(it.tokens)} tok (${it.percent.toFixed(1)}%)`;
+          return (
+            `<button type="button" class="seg-leg-item" data-cat-key="${esc(it.key)}" title="${escZh(tip)}">` +
+            `<i class="seg-dot" style="background:${esc(it.color)}"></i>` +
+            `<span>${escZh(`${it.label} ${pctStr}%`)}</span>` +
+            `</button>`
+          );
+        }).join('') + (!isExact ? `<span class="muted">${escZh('· 本地启发式占比')}</span>` : '');
       }
     }
   }
@@ -1606,6 +1740,48 @@
       'sp-think-sub',
       spd ? `思考 ${fmtTokens(spd.thinkingTokens || 0, 1)} / 正文 ${fmtTokens(spd.responseTokens || 0, 1)}` : '思考 -- / 正文 --'
     );
+
+    const timeWrap = $('time-split-wrap');
+    if (timeWrap) {
+      const t = ctx?.sessionTiming;
+      const modelSec = Number(t?.modelTimeSec || 0);
+      const toolSec = Number(t?.toolTimeSec || 0);
+      const totalSec = Number(t?.totalActiveSec || (modelSec + toolSec));
+      if (t && (modelSec > 0 || toolSec > 0 || totalSec > 0)) {
+        timeWrap.classList.remove('hidden');
+        const rounds = Number(t.rounds || 0);
+        const calls = Number(t.calls || 0);
+        const steps = Number(t.steps || 0);
+        const avgTtftText = typeof t.avgTtftSec === 'number' && Number.isFinite(t.avgTtftSec) && t.avgTtftSec > 0
+          ? `均值 TTFT ${fmtSec(t.avgTtftSec)}`
+          : (t.sessionStreamTps > 0 ? `会话均值 ${t.sessionStreamTps} tok/s` : '');
+        const sumActive = Math.max(0.001, modelSec + toolSec);
+        const rawModelPct = typeof t.modelSharePercent === 'number' && Number.isFinite(t.modelSharePercent)
+          ? t.modelSharePercent
+          : (modelSec / sumActive) * 100;
+        const modelPct = Math.max(0, Math.min(100, Math.round(rawModelPct)));
+        const toolPct = toolSec > 0 ? Math.max(0, 100 - modelPct) : 0;
+        const hasTools = toolSec > 0;
+        const barHtml = hasTools
+          ? `<div class="time-split-seg time-split-model" style="width:${Math.max(2, modelPct)}%" title="${escZh(`模型生成 ${fmtSec(modelSec)} (${modelPct}%)`)}"></div>` +
+            `<div class="time-split-seg time-split-tool" style="width:${Math.max(2, toolPct)}%" title="${escZh(`工具执行 ${fmtSec(toolSec)} (${toolPct}%)`)}"></div>`
+          : `<div class="time-split-seg time-split-model" style="width:100%" title="${escZh(`模型生成 ${fmtSec(modelSec)}`)}"></div>`;
+        const footHtml = hasTools
+          ? `<span class="time-split-lbl"><i class="time-dot model"></i>${escZh(`模型 ${fmtSec(modelSec)} (${modelPct}%)`)}</span>` +
+            `<span class="time-split-lbl"><i class="time-dot tool"></i>${escZh(`工具 ${fmtSec(toolSec)} (${toolPct}%)`)}</span>`
+          : `<span class="time-split-lbl"><i class="time-dot model"></i>${escZh(`模型总耗时 ${fmtSec(modelSec)} · ${fmtIntZh(calls)} 次调用`)}</span>`;
+        timeWrap.innerHTML =
+          `<div class="time-split-head">` +
+          `<span class="time-split-title">${escZh(`时间构成 · ${fmtIntZh(rounds)} 轮 ${fmtIntZh(calls)} 次调用 ${fmtIntZh(steps)} 步`)}</span>` +
+          (avgTtftText ? `<span class="muted xs num">${escZh(avgTtftText)}</span>` : '') +
+          `</div>` +
+          `<div class="time-split-bar">${barHtml}</div>` +
+          `<div class="time-split-foot">${footHtml}</div>`;
+      } else {
+        timeWrap.classList.add('hidden');
+        timeWrap.innerHTML = '';
+      }
+    }
 
     if (!spd) {
       setText('sp-takeaway', '当前会话尚无已完成输出轮次，等待首次模型响应后展示速度与首字延迟。');
@@ -1995,7 +2171,35 @@
       ? `<div class="bd-calib-note">${escZh(`按实测输入比例校准（原始估算 ${fmtInt(bd.reportedTotalTokens || total)} → 实测 ${fmtInt(total)} tok）`)}</div>`
       : '';
 
-    list.innerHTML = calibNote + bd.groups.map((g) => {
+    let catPanelHtml = '';
+    if (Array.isArray(bd.categories) && bd.categories.length > 4) {
+      const catItems = bd.categories.filter((c) => Number(c?.tokens || 0) > 0);
+      if (catItems.length > 0) {
+        const maxCatTok = Math.max(...catItems.map((c) => Number(c.tokens || 0)), 1);
+        const catRowsHtml = catItems.map((c) => {
+          const tok = Number(c.tokens || 0);
+          const pct = Number.isFinite(Number(c.percent))
+            ? Number(c.percent)
+            : (total > 0 ? (tok / total) * 100 : 0);
+          const barW = Math.max(2, (tok / maxCatTok) * 100).toFixed(1);
+          const col = c.color || CONTEXT_CAT_META[Number(c.type)]?.color || 'var(--cv-accent)';
+          return (
+            `<div class="bd-cat-row">` +
+            `<span class="bd-cat-name"><i class="bd-cat-swatch" style="background:${esc(col)}"></i><span>${escZh(c.label || c.key || '其他')}</span></span>` +
+            `<div class="bd-cat-track"><div class="bd-cat-fill" style="width:${barW}%;background:${esc(col)}"></div></div>` +
+            `<span class="bd-cat-val num">${escZh(`${fmtIntZh(tok)} tok (${pct.toFixed(1)}%)`)}</span>` +
+            `</div>`
+          );
+        }).join('');
+        catPanelHtml =
+          `<div class="bd-cat-panel">` +
+          `<div class="bd-cat-head"><span>${escZh('10 类上下文细分占比')}</span><span class="muted xs num">${escZh(`${catItems.length} 类`)}</span></div>` +
+          `<div class="bd-cat-list">${catRowsHtml}</div>` +
+          `</div>`;
+      }
+    }
+
+    list.innerHTML = calibNote + catPanelHtml + bd.groups.map((g) => {
       const pct = (((g.tokens || 0) / total) * 100).toFixed(1);
       const isSkills = g.key === 'skills' || g.name === 'Skills';
       const rawChildren = g.children || g.topChildren || [];
@@ -3970,13 +4174,423 @@
     });
   }
 
+  // -------------------------------------------------------------------------
+  // Telemetry Capsule Popover & Responsive Compact Mode
+  // -------------------------------------------------------------------------
+
+  const CAP_BTN_IDS = {
+    context: 'cap-context',
+    speed: 'cap-speed',
+    tokens: 'cap-tokens'
+  };
+
+  function syncCompactMode() {
+    if (typeof document === 'undefined' || !document.body?.classList) return;
+    const w = typeof window !== 'undefined' && typeof window.innerWidth === 'number'
+      ? window.innerWidth
+      : 999;
+    const compact = isHostSidebarContext() || (w > 0 && w <= 390);
+    document.body.classList.toggle('cv-compact', compact);
+  }
+
+  function buildCapPopRows(rows) {
+    return `<dl class="cap-pop-kv">${rows.map((r) => {
+      const toneCls = r.tone ? ` ${esc(r.tone)}-text` : '';
+      const swatch = r.color ? `<i class="cap-pop-swatch" style="background:${esc(r.color)}"></i>` : '';
+      return (
+        `<div class="cap-pop-row${r.sub ? ' is-sub' : ''}">` +
+        `<dt class="cap-pop-dt">${swatch}<span class="cap-pop-dt-lbl">${escZh(r.label)}</span></dt>` +
+        `<dd class="cap-pop-dd num${toneCls}">${escZh(r.value)}</dd>` +
+        `</div>`
+      );
+    }).join('')}</dl>`;
+  }
+
+  function renderCapPopover(key, force = false) {
+    const pop = $('cap-popover');
+    if (!pop || !key) return;
+    const snap = state.contextData || {};
+    const ctx = snap.context || {};
+    const spd = snap.speed || null;
+    const audit = snap.audit || {};
+    const hist = state.historyData || null;
+    const pinned = Boolean(state.capPopover.pinned);
+
+    let title = '';
+    let sub = '';
+    let badgeText = '';
+    let badgeTone = '';
+    let bodyHtml = '';
+    let footHtml = '';
+    let noteHtml = '';
+    let jumpTab = key === 'tokens' ? 'history' : 'context';
+    let jumpLabel = key === 'tokens' ? '用量趋势 →' : (key === 'speed' ? '速度详情 →' : '会话详情 →');
+    let jumpTargetId = key === 'speed' ? 'speed-card' : '';
+
+    if (key === 'context') {
+      title = '上下文透视';
+      const win = computeEffectiveWindow(ctx);
+      const pctStr = win.pct !== null ? `${win.pct.toFixed(1)}%` : '--%';
+      badgeText = pctStr;
+      badgeTone = win.pct !== null ? (win.pct >= 90 ? 'danger' : win.pct >= 75 ? 'warn' : '') : '';
+      sub = win.used !== null
+        ? (win.budget ? `~${fmtCompactZh(win.used)} / ${fmtCompactZh(win.budget)}` : `~${fmtCompactZh(win.used)} tok`)
+        : '等待首轮模型同步';
+
+      const { items } = resolveContextCategories(ctx, audit);
+      if (win.used !== null && items.length > 0) {
+        const denom = Math.max(win.budget || 0, win.used || 0, 1);
+        const segsHtml = items.map((it) => {
+          const wPct = Math.max(0.5, (it.tokens / denom) * 100).toFixed(2);
+          return `<div class="cap-pop-seg" style="width:${wPct}%;background:${esc(it.color)}" title="${escZh(`${it.label}: ${fmtIntZh(it.tokens)} tok`)}"></div>`;
+        }).join('');
+        bodyHtml += `<div class="cap-pop-bar-wrap"><div class="cap-pop-bar">${segsHtml}</div></div>`;
+        bodyHtml += buildCapPopRows(items.map((it) => ({
+          label: it.label,
+          color: it.color,
+          value: `${fmtIntZh(it.tokens)} tok (${it.percent.toFixed(1)}%)`
+        })));
+      } else if (win.used !== null) {
+        bodyHtml += buildCapPopRows([
+          { label: '最近模型输入', value: `${fmtIntZh(win.used)} tok` }
+        ]);
+      } else {
+        bodyHtml += buildCapPopRows([
+          { label: '状态', value: '暂无已完成模型轮次' }
+        ]);
+      }
+
+      const footParts = [];
+      if (ctx.pendingTokens > 0) footParts.push(`+待发 ~${fmtIntZh(ctx.pendingTokens)} tok`);
+      if (ctx.quota) {
+        const q = extractQuotaParts(ctx.quota);
+        if (q.p5 !== null && q.pW !== null) footParts.push(`配额 5h ${q.p5.toFixed(0)}% · 周 ${q.pW.toFixed(0)}%`);
+        else if (q.p5 !== null) footParts.push(`5h 配额 ${q.p5.toFixed(0)}%`);
+        else if (q.pBase !== null) footParts.push(`基础配额 ${q.pBase.toFixed(0)}%`);
+      }
+      if (footParts.length) {
+        footHtml = `<div class="cap-pop-foot">${escZh(footParts.join(' · '))}</div>`;
+      }
+      const stTiming = ctx.sessionTiming;
+      if (stTiming?.sqliteStale || stTiming?.sqlitePartial) {
+        noteHtml = `<p class="cap-pop-note">${escZh(
+          stTiming.sqliteStale ? 'SQLite 本地遥测同步中，分类与耗时可能略滞后。' : '部分 SQLite 历史记录未解析，明细可能不完整。'
+        )}</p>`;
+      }
+    } else if (key === 'speed') {
+      title = '效率与耗时拆分';
+      const t = ctx.sessionTiming;
+      const tps = spd?.tps ?? spd?.streamingTps ?? null;
+      badgeText = tps !== null ? `${tps} tok/s` : '-- tok/s';
+      badgeTone = tps !== null ? (tps >= 65 ? 'good' : tps >= 28 ? '' : 'warn') : '';
+      sub = spd?.avgTps != null
+        ? `均值 ${spd.avgTps} · 峰值 ${spd.peakTps ?? spd.avgTps} tok/s`
+        : '实时响应遥测';
+
+      const rounds = t?.rounds ?? audit.turnsCount ?? 0;
+      const steps = t?.steps ?? audit.totalSteps ?? 0;
+      const calls = t?.calls ?? audit.turnsCount ?? 0;
+      const rows = [
+        { label: '轮次 / 步数 / 调用', value: `${fmtIntZh(rounds)} 轮 · ${fmtIntZh(steps)} 步 · ${fmtIntZh(calls)} 次` }
+      ];
+
+      const modelSec = Number(t?.modelTimeSec || 0);
+      const toolSec = Number(t?.toolTimeSec || 0);
+      let splitHtml = '';
+      if (t && (modelSec > 0 || toolSec > 0)) {
+        const sumActive = Math.max(0.001, modelSec + toolSec);
+        const rawMPct = typeof t.modelSharePercent === 'number' && Number.isFinite(t.modelSharePercent)
+          ? t.modelSharePercent
+          : (modelSec / sumActive) * 100;
+        const mPct = Math.max(0, Math.min(100, Math.round(rawMPct)));
+        const tlPct = toolSec > 0 ? Math.max(0, 100 - mPct) : 0;
+        splitHtml =
+          `<div class="cap-pop-split">` +
+          `<div class="cap-pop-split-bar">` +
+          `<div class="time-split-seg time-split-model" style="width:${Math.max(2, mPct)}%"></div>` +
+          (toolSec > 0 ? `<div class="time-split-seg time-split-tool" style="width:${Math.max(2, tlPct)}%"></div>` : '') +
+          `</div>` +
+          `<div class="cap-pop-split-labels">` +
+          `<span>${escZh(`模型 ${fmtSec(modelSec)}${toolSec > 0 ? ` (${mPct}%)` : ''}`)}</span>` +
+          (toolSec > 0 ? `<span>${escZh(`工具 ${fmtSec(toolSec)} (${tlPct}%)`)}</span>` : '') +
+          `</div></div>`;
+      }
+
+      const avgTtft = typeof t?.avgTtftSec === 'number' && t.avgTtftSec > 0
+        ? fmtSec(t.avgTtftSec)
+        : (spd?.ttft != null ? fmtSec(spd.ttft) : '--');
+      rows.push({ label: '会话均值 TTFT', value: avgTtft });
+      rows.push({
+        label: '本次思考 / 正文输出',
+        value: spd ? `${fmtIntZh(spd.thinkingTokens || 0)} / ${fmtIntZh(spd.responseTokens || 0)} tok` : '--'
+      });
+
+      bodyHtml = buildCapPopRows(rows.slice(0, 1)) + splitHtml + buildCapPopRows(rows.slice(1));
+    } else {
+      title = 'Token 与缓存经济学';
+      const st = ctx.sessionTotals || {};
+      const srcSummary = hist?.analyticsBySource?.[state.sourceFilter]?.summary
+        || hist?.analyticsBySource?.all?.summary;
+      badgeText = Number(st.totalTokens || 0) > 0 ? `${fmtCompactZh(st.totalTokens)} tok` : '--';
+      sub = srcSummary ? `本机累计 ${fmtCompactZh(srcSummary.grandTotalTokens)} tok` : '当前会话吞吐';
+
+      const sessCachePct = typeof st.cacheHitPercent === 'number' && Number.isFinite(st.cacheHitPercent)
+        ? st.cacheHitPercent
+        : null;
+      const cacheTone = sessCachePct !== null
+        ? (sessCachePct >= 70 ? 'good' : sessCachePct < 30 ? 'warn' : '')
+        : '';
+
+      const rows = [
+        { label: '会话缓存命中率', value: sessCachePct !== null ? `${sessCachePct.toFixed(1)}%` : '--', tone: cacheTone },
+        { label: '缓存读取', value: `${fmtIntZh(st.cacheTokens || 0)} tok` }
+      ];
+      if (Number(st.cacheWrittenTokens || 0) > 0) {
+        rows.push({ label: '缓存写入', value: `${fmtIntZh(st.cacheWrittenTokens)} tok` });
+      }
+      rows.push({ label: '未缓存输入', value: `${fmtIntZh(st.inputTokens || 0)} tok` });
+      rows.push({ label: '模型输出', value: `${fmtIntZh(st.outputTokens || 0)} tok` });
+      if (Number(st.thinkingTokens || 0) > 0) {
+        rows.push({ label: '↳ 其中思考', value: `${fmtIntZh(st.thinkingTokens)} tok`, sub: true });
+      }
+      if (Number(st.retryTokens || 0) > 0 || Number(st.retryCalls || 0) > 0) {
+        const retryVal = Number(st.retryCalls || 0) > 0
+          ? `${fmtIntZh(st.retryTokens || 0)} tok (${fmtIntZh(st.retryCalls)} 次)`
+          : `${fmtIntZh(st.retryTokens || 0)} tok`;
+        rows.push({ label: '重试消耗', value: retryVal, tone: 'warn' });
+      }
+      const savedUSD = Number(ctx.sessionCacheSavingsUSD || 0);
+      rows.push({
+        label: '本会话缓存已省',
+        value: savedUSD > 0 ? `${fmtUSD(savedUSD)} (${fmtCNY(savedUSD)})` : '$0.00',
+        tone: savedUSD > 0 ? 'good' : ''
+      });
+      bodyHtml = buildCapPopRows(rows);
+    }
+
+    const sig = `${key}|${pinned ? 1 : 0}|${badgeText}|${sub}|${bodyHtml}|${footHtml}|${noteHtml}`;
+    if (!force && sig === state.capPopover.lastSig) return;
+    state.capPopover.lastSig = sig;
+
+    const badgeCls = badgeTone ? ` ${esc(badgeTone)}-text` : '';
+    pop.setAttribute('aria-label', title);
+    pop.innerHTML =
+      `<div class="cap-pop-head">` +
+      `<div class="cap-pop-title-group">` +
+      `<div class="cap-pop-title"><span>${escZh(title)}</span>` +
+      (badgeText ? `<span class="cap-pop-metric-badge num${badgeCls}">${escZh(badgeText)}</span>` : '') +
+      `</div>` +
+      `<div class="cap-pop-sub num">${escZh(sub)}</div>` +
+      `</div>` +
+      `<div class="cap-pop-head-right">` +
+      `<button type="button" class="cap-pop-act-btn${pinned ? ' is-pinned' : ''}" data-cap-pin="1" title="${escZh(pinned ? '取消钉住浮层' : '钉住浮层便于细看')}">${escZh(pinned ? '已钉住' : '钉住')}</button>` +
+      `<button type="button" class="cap-pop-act-btn" data-cap-jump="${esc(jumpTab)}" data-cap-scroll="${esc(jumpTargetId)}">${escZh(jumpLabel)}</button>` +
+      `</div>` +
+      `</div>` +
+      bodyHtml +
+      footHtml +
+      noteHtml;
+  }
+
+  function positionCapPopover() {
+    const pop = $('cap-popover');
+    const key = state.capPopover.activeKey;
+    const btn = key ? $(CAP_BTN_IDS[key]) : null;
+    if (!pop || !btn || !state.capPopover.open) return;
+    if (typeof btn.getBoundingClientRect !== 'function' || typeof window === 'undefined' || typeof window.innerWidth !== 'number') {
+      return;
+    }
+    const btnRect = btn.getBoundingClientRect();
+    const popW = pop.offsetWidth || 292;
+    const popH = pop.offsetHeight || 220;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight || 600;
+    const left = Math.max(8, Math.min(btnRect.left, vw - popW - 8));
+    let top = btnRect.bottom + 8;
+    if (top + popH > vh - 8 && btnRect.top >= popH + 12) {
+      top = btnRect.top - popH - 8;
+    }
+    pop.style.left = `${Math.round(left)}px`;
+    pop.style.top = `${Math.round(Math.max(8, Math.min(top, vh - popH - 8)))}px`;
+  }
+
+  function openCapPopover(key, { pin = false } = {}) {
+    const pop = $('cap-popover');
+    const btnId = CAP_BTN_IDS[key];
+    const btn = btnId ? $(btnId) : null;
+    if (!pop || !btn) return;
+
+    if (state.capPopover.closeTimer) {
+      clearTimeout(state.capPopover.closeTimer);
+      state.capPopover.closeTimer = null;
+    }
+    if (pin) state.capPopover.pinned = true;
+
+    const prevKey = state.capPopover.activeKey;
+    if (prevKey && prevKey !== key) {
+      $(CAP_BTN_IDS[prevKey])?.setAttribute('aria-expanded', 'false');
+    }
+    state.capPopover.open = true;
+    state.capPopover.activeKey = key;
+    btn.setAttribute('aria-expanded', 'true');
+
+    renderCapPopover(key, true);
+    pop.classList.remove('hidden');
+    if (typeof pop.showPopover === 'function' && typeof pop.matches === 'function' && !pop.matches(':popover-open')) {
+      try {
+        if (!pop.hasAttribute('popover')) pop.setAttribute('popover', 'manual');
+        pop.showPopover();
+      } catch {}
+    }
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => {
+        if (state.capPopover.open) {
+          pop.classList.add('is-open');
+          positionCapPopover();
+        }
+      });
+    } else {
+      pop.classList.add('is-open');
+      positionCapPopover();
+    }
+  }
+
+  function closeCapPopover() {
+    if (state.capPopover.closeTimer) {
+      clearTimeout(state.capPopover.closeTimer);
+      state.capPopover.closeTimer = null;
+    }
+    const prevKey = state.capPopover.activeKey;
+    if (prevKey && CAP_BTN_IDS[prevKey]) {
+      $(CAP_BTN_IDS[prevKey])?.setAttribute('aria-expanded', 'false');
+    }
+    state.capPopover.open = false;
+    state.capPopover.pinned = false;
+    state.capPopover.activeKey = '';
+    state.capPopover.lastSig = '';
+
+    const pop = $('cap-popover');
+    if (pop) {
+      pop.classList.remove('is-open');
+      pop.classList.add('hidden');
+      if (typeof pop.hidePopover === 'function' && typeof pop.matches === 'function' && pop.matches(':popover-open')) {
+        try { pop.hidePopover(); } catch {}
+      }
+    }
+  }
+
+  function scheduleCloseCapPopover() {
+    if (state.capPopover.closeTimer) clearTimeout(state.capPopover.closeTimer);
+    if (state.capPopover.pinned) return;
+    state.capPopover.closeTimer = setTimeout(() => {
+      closeCapPopover();
+    }, 220);
+  }
+
+  function refreshOpenCapPopover() {
+    if (!state.capPopover?.open || !state.capPopover.activeKey) return;
+    renderCapPopover(state.capPopover.activeKey, false);
+    positionCapPopover();
+  }
+
   function wireEvents() {
-    // Primary tabs & capsule shortcuts
+    // Primary tabs & capsule telemetry popover / smart navigation
     document.querySelectorAll('.main-tab').forEach((btn) => {
-      btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+      btn.addEventListener('click', () => {
+        closeCapPopover();
+        switchTab(btn.dataset.tab);
+      });
     });
+
     document.querySelectorAll('[data-goto-tab]').forEach((pill) => {
-      pill.addEventListener('click', () => switchTab(pill.dataset.gotoTab));
+      const capKey = pill.dataset.capKey || '';
+      pill.addEventListener('pointerenter', () => {
+        if (!capKey || state.capPopover.pinned) return;
+        openCapPopover(capKey, { pin: false });
+      });
+      pill.addEventListener('pointerleave', () => {
+        scheduleCloseCapPopover();
+      });
+      pill.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const targetTab = pill.dataset.gotoTab;
+        if (targetTab && targetTab !== state.activeTab) {
+          closeCapPopover();
+          switchTab(targetTab);
+          return;
+        }
+        if (!capKey) {
+          if (targetTab) switchTab(targetTab);
+          return;
+        }
+        if (state.capPopover.open && state.capPopover.pinned && state.capPopover.activeKey === capKey) {
+          closeCapPopover();
+        } else {
+          openCapPopover(capKey, { pin: true });
+        }
+      });
+    });
+
+    const capPopEl = $('cap-popover');
+    if (capPopEl) {
+      capPopEl.addEventListener('pointerenter', () => {
+        if (state.capPopover.closeTimer) {
+          clearTimeout(state.capPopover.closeTimer);
+          state.capPopover.closeTimer = null;
+        }
+      });
+      capPopEl.addEventListener('pointerleave', () => {
+        scheduleCloseCapPopover();
+      });
+      capPopEl.addEventListener('click', (e) => {
+        const pinBtn = e.target?.closest?.('[data-cap-pin]');
+        if (pinBtn) {
+          e.stopPropagation();
+          state.capPopover.pinned = !state.capPopover.pinned;
+          renderCapPopover(state.capPopover.activeKey, true);
+          positionCapPopover();
+          return;
+        }
+        const jumpBtn = e.target?.closest?.('[data-cap-jump]');
+        if (jumpBtn) {
+          e.stopPropagation();
+          const tab = jumpBtn.dataset.capJump;
+          const scrollId = jumpBtn.dataset.capScroll;
+          closeCapPopover();
+          if (tab) switchTab(tab);
+          if (scrollId) {
+            $(scrollId)?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
+          }
+        }
+      });
+    }
+
+    // Linked hover highlight between Context Spectrum Bar & Legend
+    const setSegHover = (catKey) => {
+      const bar = $('ctx-seg-bar');
+      const leg = $('ctx-seg-legend');
+      const active = Boolean(catKey);
+      bar?.classList?.toggle('has-hover', active);
+      leg?.classList?.toggle('has-hover', active);
+      [bar, leg].forEach((container) => {
+        container?.querySelectorAll?.('[data-cat-key]')?.forEach((node) => {
+          node.classList?.toggle('is-highlighted', active && node.dataset.catKey === catKey);
+        });
+      });
+    };
+    ['ctx-seg-bar', 'ctx-seg-legend'].forEach((cid) => {
+      const el = $(cid);
+      if (!el) return;
+      el.addEventListener('pointerover', (e) => {
+        const item = e.target?.closest?.('[data-cat-key]');
+        if (item?.dataset?.catKey) setSegHover(item.dataset.catKey);
+      });
+      el.addEventListener('pointerleave', () => setSegHover(''));
+      el.addEventListener('focusin', (e) => {
+        const item = e.target?.closest?.('[data-cat-key]');
+        if (item?.dataset?.catKey) setSegHover(item.dataset.catKey);
+      });
+      el.addEventListener('focusout', () => setSegHover(''));
     });
 
     // Collapsible sections
@@ -4070,15 +4684,27 @@
     });
 
     document.addEventListener('pointerdown', (e) => {
-      if (!state.convPicker.open) return;
-      const dropdown = $('conv-dropdown');
-      if (dropdown && !dropdown.contains(e.target)) {
-        closeConvPopover();
+      if (state.convPicker.open) {
+        const dropdown = $('conv-dropdown');
+        if (dropdown && (!dropdown.contains || !dropdown.contains(e.target))) {
+          closeConvPopover();
+        }
+      }
+      if (state.capPopover.open) {
+        const pop = $('cap-popover');
+        const strip = document.querySelector?.('.capsule-strip');
+        const inPop = pop && pop.contains && pop.contains(e.target);
+        const inStrip = strip && strip.contains && strip.contains(e.target);
+        if (!inPop && !inStrip) {
+          closeCapPopover();
+        }
       }
     });
 
     window.addEventListener('resize', () => {
+      syncCompactMode();
       if (state.convPicker.open) positionConvPopover();
+      if (state.capPopover.open) positionCapPopover();
     });
 
     $('conv-select')?.addEventListener('change', (e) => {
@@ -4383,6 +5009,12 @@
       }
 
       if (ev.repeat) return;
+      if (ev.key === 'Escape' && !ev.metaKey && !ev.ctrlKey && !ev.altKey && state.capPopover.open) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        closeCapPopover();
+        return;
+      }
       if (ev.key === 'Escape' && !ev.metaKey && !ev.ctrlKey && !ev.altKey && state.convPicker.open) {
         ev.preventDefault();
         ev.stopPropagation();
@@ -5497,6 +6129,7 @@
 
   async function boot() {
     normalizeStaticDomTypography();
+    syncCompactMode();
     applyAppearanceToDom();
     syncFloatButtonUi();
     wireEvents();
