@@ -1847,12 +1847,19 @@ async function main() {
           budget: 1000000,
           budgetSource: 'server',
           remaining: 520000,
-          percent: 48
+          percent: 48,
+          cacheHitPercent: 98.2,
+          sessionTotals: {
+            ...(t3ExpandedSnap.context.sessionTotals || {}),
+            turnsCount: 8,
+            cacheHitPercent: 34.5
+          }
         }
       };
       t3Harness.vmCtx.state.contextData = u1Expanded1MSnap;
       t3Harness.vmCtx.renderTopCapsules();
       t3Harness.vmCtx.renderContextPanel(u1Expanded1MSnap);
+      const u1HealthyTakeaway = t3Harness.getEl('ctx-takeaway').textContent;
       assert(
         t3Harness.getEl('ctx-budget-chip').textContent === '上限 1.00M' &&
           t3Harness.getEl('ctx-budget').textContent === '1.00M' &&
@@ -1860,8 +1867,31 @@ async function main() {
           t3Harness.getEl('ctx-health-pill').textContent === '运行健康' &&
           t3Harness.getEl('hero-ring-fill').style.stroke === 'var(--cv-accent)' &&
           !t3Harness.getEl('ctx-takeaway').classList.contains('danger') &&
-          !t3Harness.getEl('ctx-takeaway').classList.contains('warn'),
-        `U1 扩容至 1M 动态跟随异常：pill=${t3Harness.getEl('ctx-health-pill').textContent}, chip=${t3Harness.getEl('ctx-budget-chip').textContent}`
+          !t3Harness.getEl('ctx-takeaway').classList.contains('warn') &&
+          u1HealthyTakeaway.includes('会话平均缓存命中 34.5%（8 轮）') &&
+          !u1HealthyTakeaway.includes('98.2%') &&
+          !u1HealthyTakeaway.includes('高达') &&
+          !u1HealthyTakeaway.includes('显著降低'),
+        `U1 扩容至 1M 动态跟随或健康态 takeaway 会话平均缓存口径异常：pill=${t3Harness.getEl('ctx-health-pill').textContent}, chip=${t3Harness.getEl('ctx-budget-chip').textContent}, takeaway=${u1HealthyTakeaway}`
+      );
+
+      const u1WarnSnap = {
+        ...u1Expanded1MSnap,
+        context: {
+          ...u1Expanded1MSnap.context,
+          used: 760000,
+          remaining: 240000,
+          percent: 76
+        }
+      };
+      t3Harness.vmCtx.state.contextData = u1WarnSnap;
+      t3Harness.vmCtx.renderContextPanel(u1WarnSnap);
+      const u1WarnTakeaway = t3Harness.getEl('ctx-takeaway').textContent;
+      assert(
+        t3Harness.getEl('ctx-takeaway').classList.contains('warn') &&
+          u1WarnTakeaway.includes('会话平均缓存命中 34.5%') &&
+          !u1WarnTakeaway.includes('98.2%'),
+        `U1 72% 警戒态 takeaway 应使用会话平均缓存口径：takeaway=${u1WarnTakeaway}`
       );
 
       const u1EmptySnap = {

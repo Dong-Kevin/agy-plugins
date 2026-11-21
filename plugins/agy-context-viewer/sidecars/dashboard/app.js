@@ -1505,17 +1505,20 @@
         );
       } else if (pct >= 72) {
         takeaway.classList.add('warn');
+        const sessCachePart = sessCachePct !== null
+          ? `，会话平均缓存命中 ${sessCachePct.toFixed(1)}%`
+          : '';
         setText(
           takeaway,
-          `当前窗口已使用 ${pct.toFixed(1)}%（${fmtTokens(win.used)} / ${fmtTokens(win.budget)}），缓存命中率 ${ctx.cacheHitPercent ?? 0}%，后续长输出轮次可能触发自动摘要。`
+          `当前窗口已使用 ${pct.toFixed(1)}%（${fmtTokens(win.used)} / ${fmtTokens(win.budget)}）${sessCachePart}，后续长输出轮次可能触发自动摘要。`
         );
       } else {
-        const cacheNote = ctx.cacheHitPercent !== null && ctx.cacheHitPercent >= 50
-          ? `缓存命中高达 ${ctx.cacheHitPercent.toFixed(1)}%，显著降低首字延迟与折算成本。`
-          : '上下文容量充裕，推理与工具调用处于最佳窗口区间。';
+        const sessCacheNote = sessCachePct !== null
+          ? `，会话平均缓存命中 ${sessCachePct.toFixed(1)}%${sessTurnsCount > 0 ? `（${fmtInt(sessTurnsCount)} 轮）` : ''}`
+          : '';
         setText(
           takeaway,
-          `会话「${snap.conversationTitle}」窗口健康（已用 ${fmtTokens(win.used)} / ${fmtTokens(win.budget)}）。${cacheNote}`
+          `会话「${snap.conversationTitle}」窗口健康（已用 ${fmtTokens(win.used)} / ${fmtTokens(win.budget)}）${sessCacheNote}。`
         );
       }
     }

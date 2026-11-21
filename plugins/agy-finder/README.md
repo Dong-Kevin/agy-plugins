@@ -30,7 +30,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/m
 irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-finder/install.ps1 | iex
 ```
 
-- 也可从 [Releases](https://github.com/Dong-Kevin/agy-plugins/releases) 下载 `agy-finder-v0.2.8.zip` 解压后执行 `./install.sh`，或运行 `agy plugin install ./plugins/agy-finder`。
+- 也可从 [Releases](https://github.com/Dong-Kevin/agy-plugins/releases) 下载 `agy-finder-v0.2.9.zip` 解压后执行 `./install.sh`，或运行 `agy plugin install ./plugins/agy-finder`。
 
 </details>
 

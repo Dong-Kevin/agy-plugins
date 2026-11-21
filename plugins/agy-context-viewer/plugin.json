@@ -2,7 +2,7 @@
   "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "context-viewer",
   "displayName": "上下文与 Token 看板",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "description": "实时查看 Antigravity 桌面端、IDE 与 agy CLI 的会话上下文占用、Prompt 冷热启动诊断、重度消耗排行、Swarm/子代理整树聚合、/btw 去重、压缩摘要、生成速度（TTFT / tok/s）、53 周热力图、异常与灰度路由取证、双池配额及 API 订阅折算。",
   "author": {
     "name": "Dong-Kevin",

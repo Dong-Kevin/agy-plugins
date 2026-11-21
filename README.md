@@ -6,8 +6,8 @@
 
 | 插件 | 核心能力 | 当前版本 | 文档 |
 | :--- | :--- | :---: | :--- |
-| **`agy-finder`** | 右侧目录树、聊天路径 `[📂]` 定位 / HTML `[🌐]` 默认浏览器打开、对话提及提取、原生弹窗与 `⌘⇧E` 抽屉 | `v0.2.8` | [中文说明](plugins/agy-finder/README.md) · [EN](plugins/agy-finder/README_EN.md) |
-| **`context-viewer`** | 上下文占比 / Prompt 冷热启动 / 重度 Top 10 / Swarm 整树 / 53 周热力图、双池配额、异常取证、菜单栏与置顶小窗 | `v1.8.0` | [中文说明](plugins/agy-context-viewer/README.md) · [EN](plugins/agy-context-viewer/README_EN.md) |
+| **`agy-finder`** | 右侧目录树、聊天路径 `[📂]` 定位 / HTML `[🌐]` 默认浏览器打开、对话提及提取、原生弹窗与 `⌘⇧E` 抽屉 | `v0.2.9` | [中文说明](plugins/agy-finder/README.md) · [EN](plugins/agy-finder/README_EN.md) |
+| **`context-viewer`** | 上下文占比 / 10 类光谱 / 会话与分模型缓存率 / Swarm 整树 / 自定义日期趋势、双池配额、异常取证、菜单栏与置顶小窗 | `v1.9.0` | [中文说明](plugins/agy-context-viewer/README.md) · [EN](plugins/agy-context-viewer/README_EN.md) |
 
 ---
 

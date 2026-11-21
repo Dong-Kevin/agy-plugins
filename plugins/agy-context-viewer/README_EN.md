@@ -30,7 +30,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/m
 irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.ps1 | iex
 ```
 
-- You can also download `context-viewer-v1.8.0.zip` from [Releases](https://github.com/Dong-Kevin/agy-plugins/releases), extract it, and run `./install.sh` (or `agy plugin install ./plugins/agy-context-viewer`).
+- You can also download `context-viewer-v1.9.0.zip` from [Releases](https://github.com/Dong-Kevin/agy-plugins/releases), extract it, and run `./install.sh` (or `agy plugin install ./plugins/agy-context-viewer`).
 - When installed via `agy plugin install` alone, invoke the CLI with `node ~/.gemini/config/plugins/context-viewer/sidecars/dashboard/cli.mjs`.
 
 </details>

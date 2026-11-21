@@ -1,17 +1,21 @@
 # agy-plugins ROADMAP
 
-更新时间：2026-11-21 19:19（Asia/Shanghai）。
+更新时间：2026-11-21 19:46（Asia/Shanghai）。
 
 ## 本次交付目标
 
-1. 根治 `agy-finder` 在 `agy` CLI 会话中仍偶发输出 `[📂](sidecar://...)` 导致终端 Markdown 渲染器原样展开不可点击长 URL 的问题（规则硬门禁前置 + `SessionStart` CLI 宿主守卫钩子双层防护），并补齐安装、打包与回归测试。
-2. 保留并兼容既有成果（`context-viewer` `statusline` 超时强杀根治、10 类上下文光谱拆解、模型/工具耗时拆分、顶部胶囊透视浮层、缓存洞察、分模型缓存率、自定义日期趋势、P1 + P2 精细遥测与官方定价同步、`context-viewer v1.8.0`、`Gemini 4 Neon` 适配与 `agy-finder v0.2.8`）。
+1. 修复 `context-viewer` 上下文摘要卡片（`#ctx-takeaway`）误用单轮缓存命中率及夸大措辞的问题，统一改用会话平均缓存命中率口径，并发布 `v2026.11.21`（`context-viewer v1.9.0` & `agy-finder v0.2.9`）。
+2. 保留并整合自 `v2026.11.19` 以来的全部成果（`agy-finder` CLI 防误吐 `sidecar://` 双层守卫、`context-viewer` `statusline` 极速短路与超时强杀根治、10 类上下文光谱拆解、模型/工具耗时构成、顶部胶囊透视浮层、会话/分模型平均缓存率、自定义日期趋势、CLI 自动跟随与按项目分组、精细 Protobuf 与官方定价显式同步）。
 
 ## 后置与挂起事项
 
 - **挂起：`agy-fork` / `agy-session`（`agy` CLI 无损会话分叉插件）**：调研确认底层依赖宿主 `ForkConversation` / `UpdateConversationAnnotations` RPC（需处理 `invoke_subagent` 前轮回退），但经 boss 确认当前非刚需且预计官方原生推出，暂挂起不立项。
 
 ## 当前阶段与状态
+
+- **已完成 `context-viewer v1.9.0` & `agy-finder v0.2.9`（`v2026.11.21`）收口升级，准备提交、推送并发布 GitHub Release**：
+  - **`context-viewer` 摘要文案与缓存口径修复**（[app.js](./plugins/agy-context-viewer/sidecars/dashboard/app.js)、[context-viewer/scripts/verify.mjs](./plugins/agy-context-viewer/scripts/verify.mjs)）：移除健康态夸大文案（`缓存命中高达 XX%，显著降低首字延迟与折算成本` / `上下文容量充裕...`），将健康态与 72% 警戒态的 `#ctx-takeaway` 统一改用会话平均缓存命中率 `st.cacheHitPercent`（含轮次），补充单轮 `98.2%` vs 会话平均 `34.5%` 回归断言。
+  - **版本与文档同步**：将 `context-viewer` 升级至 `1.9.0`、`agy-finder` 升级至 `0.2.9`，同步更新根仓库及插件中英文 README、`index.html` 静态缓存版本参数与 `cli.mjs` 兜底版本号。
 
 - **已完成 `agy-finder` CLI 宿主防误吐 `sidecar://` 双层修复、全仓严格校验、打包与本机 `./install.sh agy-finder` 热同步（同步 `main`）**：
   - **规则硬门禁前置**（[plugins/agy-finder/rules/AGENTS.md](./plugins/agy-finder/rules/AGENTS.md)、[plugins/agy-finder/skills/agy-finder/SKILL.md](./plugins/agy-finder/skills/agy-finder/SKILL.md)）：将宿主环境判定从末尾补充提升为第 1 节硬门禁，明确要求先检查 `<user_information>` 中的 `App Data Directory` / `Artifact Directory Path`（含 `antigravity-cli`）与 `ANTIGRAVITY_LS_VERSION`（`cli-*`），命中 `agy` CLI 时严禁输出 `sidecar://`、`[📂]` / `[🌐]` 胶囊，仅保留标准 `[文件名](file:///绝对路径)`；确认桌面端 / IDE（`antigravity` / `antigravity-ide`）时再启用胶囊约定。
