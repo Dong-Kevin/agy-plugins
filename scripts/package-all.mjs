@@ -108,6 +108,8 @@ function packageAgyFinder() {
   const prefix = 'agy-finder';
   const relFiles = [
     ['plugin.json', false],
+    ['hooks.json', false],
+    ['hooks/session_host_guard.mjs', false],
     ['README.md', false],
     ['README_EN.md', false],
     ['LICENSE', false],

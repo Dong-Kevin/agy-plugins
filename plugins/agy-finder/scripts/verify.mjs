@@ -23,6 +23,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import vm from 'node:vm';
 
 import {
+  CLI_GUARD_MESSAGE,
+  buildSessionStartOutput,
+  isCliHostSession
+} from '../hooks/session_host_guard.mjs';
+import {
   ackAuxPaneTrigger,
   getAuxShortcutConfig,
   getDrawerShortcutConfig,
@@ -73,6 +78,16 @@ function verifyManifestAndAssets() {
   const rulesText = readFileSync(join(ROOT, 'rules/AGENTS.md'), 'utf8');
   assert.ok(!rulesText.trimStart().startsWith('---'), 'rules/AGENTS.md must NOT have YAML frontmatter');
   assert.ok(rulesText.includes('[🌐]') && rulesText.includes('open=browser'), 'rules/AGENTS.md must document [🌐] open=browser link');
+  const cliGateIdx = rulesText.indexOf('antigravity-cli');
+  const capsuleIdx = rulesText.indexOf('[📂](sidecar://');
+  assert.ok(cliGateIdx > 0 && capsuleIdx > cliGateIdx, 'rules/AGENTS.md must place antigravity-cli host gate before sidecar:// capsule examples');
+
+  const hooksJson = JSON.parse(readFileSync(join(ROOT, 'hooks.json'), 'utf8'));
+  const sessionStartHandlers = hooksJson['agy-finder-cli-guard']?.SessionStart;
+  assert.ok(Array.isArray(sessionStartHandlers) && sessionStartHandlers.length === 1, 'hooks.json must declare a flat SessionStart handler array');
+  assert.equal(sessionStartHandlers[0].type, 'command');
+  assert.equal(sessionStartHandlers[0].command, 'node hooks/session_host_guard.mjs');
+  assert.ok(existsSync(join(ROOT, 'hooks/session_host_guard.mjs')), 'hooks/session_host_guard.mjs must exist');
 
   const skillText = readFileSync(join(ROOT, 'skills/agy-finder/SKILL.md'), 'utf8');
   assert.ok(skillText.trimStart().startsWith('---'), 'SKILL.md must have YAML frontmatter');
@@ -82,12 +97,13 @@ function verifyManifestAndAssets() {
   const sidecar = JSON.parse(readFileSync(join(ROOT, 'sidecars/tree/sidecar.json'), 'utf8'));
   assert.equal(sidecar.has_web_ui, true);
   assert.ok(sidecar.ui_config.views.some((v) => v.entrypoint === 'SIDECAR_UI_ENTRYPOINT_AUX_PANE' && v.path === '/'));
-  pass('Manifest, rules/AGENTS.md, SKILL.md, and sidecar.json schema');
+  pass('Manifest, hooks.json, rules/AGENTS.md, SKILL.md, and sidecar.json schema');
 }
 
 // 2. JS syntax & macOS Swift typecheck
 function verifySyntax() {
   const files = [
+    'hooks/session_host_guard.mjs',
     'sidecars/tree/main.mjs',
     'sidecars/tree/path_utils.mjs',
     'sidecars/tree/mentions.mjs',
@@ -695,6 +711,8 @@ function verifyInstaller() {
     const installedDir = join(tempPluginsDir, 'agy-finder');
     const cliLink = join(tempBinDir, 'agy-finder');
     assert.ok(existsSync(join(installedDir, 'plugin.json')));
+    assert.ok(existsSync(join(installedDir, 'hooks.json')));
+    assert.ok(existsSync(join(installedDir, 'hooks/session_host_guard.mjs')));
     assert.ok(existsSync(join(installedDir, 'rules/AGENTS.md')));
     assert.ok(existsSync(join(installedDir, 'sidecars/tree/sidecar.json')));
     assert.ok(existsSync(join(installedDir, 'sidecars/tree/drawer.mjs')));
@@ -1901,6 +1919,98 @@ async function verifyFinderAuxBridgeBehavior() {
   pass('VM behavioral checks: Aux Pane hidden toggleConversation wakeup, visible toggleAuxPane handoff, cold-mount close guard & cross-plugin revealPath preservation');
 }
 
+// 12. SessionStart CLI host guard hook checks (unit + subprocess stdin/stdout)
+function verifyCliSessionHostGuard() {
+  assert.equal(
+    isCliHostSession({ transcriptPath: '/mock/.gemini/antigravity-cli/brain/conv/transcript.jsonl' }, {}),
+    true,
+    'POSIX antigravity-cli transcriptPath must be detected as CLI'
+  );
+  assert.equal(
+    isCliHostSession({ artifactDirectoryPath: 'D:\\mock\\.gemini\\antigravity-cli\\brain\\conv' }, {}),
+    true,
+    'Windows antigravity-cli artifactDirectoryPath must be detected as CLI'
+  );
+  assert.equal(
+    isCliHostSession(
+      { transcriptPath: '/mock/.gemini/antigravity/brain/conv/transcript.jsonl' },
+      { ANTIGRAVITY_LS_VERSION: 'cli-1.5.13', ANTIGRAVITY_PROJECT_ID: 'default-cli-project' }
+    ),
+    false,
+    'Desktop transcriptPath must take precedence over inherited CLI env vars'
+  );
+  assert.equal(
+    isCliHostSession({ artifactDirectoryPath: '/mock/.gemini/antigravity-ide/brain/conv' }, {}),
+    false,
+    'IDE artifactDirectoryPath must not be treated as CLI'
+  );
+  assert.equal(
+    isCliHostSession({}, { ANTIGRAVITY_APP_DATA_DIR: '/mock/.gemini/antigravity-cli' }),
+    true
+  );
+  assert.equal(
+    isCliHostSession({}, { ANTIGRAVITY_APP_DATA_DIR: '/mock/.gemini/antigravity-client' }),
+    false,
+    'Non-CLI directory name with antigravity-cli prefix must not false-positive'
+  );
+  assert.equal(
+    isCliHostSession({}, { ANTIGRAVITY_LS_VERSION: 'cli-1.5.13' }),
+    true
+  );
+  assert.equal(
+    isCliHostSession({}, { ANTIGRAVITY_PROJECT_ID: 'default-cli-project' }),
+    true
+  );
+  assert.equal(
+    isCliHostSession({}, {}),
+    false
+  );
+
+  const cliOutObj = buildSessionStartOutput({ transcriptPath: '/mock/.gemini/antigravity-cli/brain/c1/transcript.jsonl' }, {});
+  assert.equal(cliOutObj.injectSteps?.length, 1);
+  assert.equal(cliOutObj.injectSteps[0].systemMessage?.systemMessage, CLI_GUARD_MESSAGE);
+  assert.deepEqual(buildSessionStartOutput({ transcriptPath: '/mock/.gemini/antigravity/brain/c1/transcript.jsonl' }, {}), {});
+
+  const cleanEnv = { PATH: process.env.PATH || '' };
+  const cliSubOut = JSON.parse(
+    execFileSync(process.execPath, ['hooks/session_host_guard.mjs'], {
+      cwd: ROOT,
+      env: cleanEnv,
+      input: JSON.stringify({
+        hookEventName: 'SessionStart',
+        transcriptPath: '/mock/.gemini/antigravity-cli/brain/c1/.system_generated/logs/transcript.jsonl'
+      }),
+      encoding: 'utf8'
+    })
+  );
+  assert.equal(cliSubOut.injectSteps?.[0]?.systemMessage?.systemMessage, CLI_GUARD_MESSAGE);
+
+  const desktopSubOut = JSON.parse(
+    execFileSync(process.execPath, ['hooks/session_host_guard.mjs'], {
+      cwd: ROOT,
+      env: cleanEnv,
+      input: JSON.stringify({
+        hookEventName: 'SessionStart',
+        transcriptPath: '/mock/.gemini/antigravity/brain/c1/.system_generated/logs/transcript.jsonl'
+      }),
+      encoding: 'utf8'
+    })
+  );
+  assert.deepEqual(desktopSubOut, {});
+
+  const badJsonSubOut = JSON.parse(
+    execFileSync(process.execPath, ['hooks/session_host_guard.mjs'], {
+      cwd: ROOT,
+      env: cleanEnv,
+      input: '{not-json',
+      encoding: 'utf8'
+    })
+  );
+  assert.deepEqual(badJsonSubOut, {});
+
+  pass('SessionStart CLI host guard hook (POSIX/Win path detection, desktop/IDE precedence & stdin/stdout contract)');
+}
+
 async function main() {
   verifyManifestAndAssets();
   verifySyntax();
@@ -1913,6 +2023,7 @@ async function main() {
   verifyPathResolutionAndSymlinkSearch();
   await verifyFinderFrontendBehavior();
   await verifyFinderAuxBridgeBehavior();
+  verifyCliSessionHostGuard();
   console.log('\nAll agy-finder verification checks passed.');
 }
 

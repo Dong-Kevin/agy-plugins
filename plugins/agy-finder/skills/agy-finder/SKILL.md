@@ -23,7 +23,7 @@ description: 在右侧辅助栏打开项目目录树面板，或生成点击直�
 
 ## 终端 `agy` CLI 用法
 
-- `agy` CLI 不加载桌面端 Sidecar 面板，也不支持点击 `sidecar://` 协议链接；在 CLI 会话中仅输出标准 `[文件名](file:///绝对路径)` 链接。
+- 当 `<user_information>` 中的 `App Data Directory` / `Artifact Directory Path` 包含 `antigravity-cli`（或处于 `agy` CLI 终端会话）时，宿主不加载桌面端 Sidecar 面板，且终端 Markdown 渲染器会将 `sidecar://` 展开为不可点击的长 URL；**严禁**输出任何 `sidecar://`、`[📂]` 或 `[🌐]` 链接，仅输出标准 `[文件名](file:///绝对路径)` 链接。
 - 如需在终端外使用独立目录树抽屉或直接用浏览器打开本地 HTML，可在终端标签页运行：
   - `agy-finder` / `agy-finder open <path>`：开关右侧独立目录树抽屉并高亮目标路径（macOS 如需在终端前台按 `⌘⇧E` 呼出，可执行 `agy-finder shortcut --global`）
   - `agy-finder browser <path>`：用系统默认浏览器打开本地 HTML 文件

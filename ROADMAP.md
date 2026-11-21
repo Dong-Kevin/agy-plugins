@@ -1,17 +1,22 @@
 # agy-plugins ROADMAP
 
-更新时间：2026-11-21 16:20（Asia/Shanghai）。
+更新时间：2026-11-21 19:19（Asia/Shanghai）。
 
 ## 本次交付目标
 
-1. 彻底根治 `context-viewer` 中 `agy-context statusline` 偶发 `signal: killed` 超时强杀问题（零重依赖极速快照短路、真实墙钟 RPC 超时与断池、消除 RPC→SQLite 超时瀑布、全链路硬截止保险丝与即时退出），并补齐回归验证。
-2. 保留并兼容既有成果（10 类上下文光谱拆解、模型/工具耗时拆分、顶部胶囊透视浮层、缓存洞察、分模型缓存率、自定义日期趋势、P1 + P2 精细遥测与官方定价同步、`context-viewer v1.8.0`、`Gemini 4 Neon` 适配与 `agy-finder v0.2.8`）。
+1. 根治 `agy-finder` 在 `agy` CLI 会话中仍偶发输出 `[📂](sidecar://...)` 导致终端 Markdown 渲染器原样展开不可点击长 URL 的问题（规则硬门禁前置 + `SessionStart` CLI 宿主守卫钩子双层防护），并补齐安装、打包与回归测试。
+2. 保留并兼容既有成果（`context-viewer` `statusline` 超时强杀根治、10 类上下文光谱拆解、模型/工具耗时拆分、顶部胶囊透视浮层、缓存洞察、分模型缓存率、自定义日期趋势、P1 + P2 精细遥测与官方定价同步、`context-viewer v1.8.0`、`Gemini 4 Neon` 适配与 `agy-finder v0.2.8`）。
 
 ## 后置与挂起事项
 
 - **挂起：`agy-fork` / `agy-session`（`agy` CLI 无损会话分叉插件）**：调研确认底层依赖宿主 `ForkConversation` / `UpdateConversationAnnotations` RPC（需处理 `invoke_subagent` 前轮回退），但经 boss 确认当前非刚需且预计官方原生推出，暂挂起不立项。
 
 ## 当前阶段与状态
+
+- **已完成 `agy-finder` CLI 宿主防误吐 `sidecar://` 双层修复、全仓严格校验、打包与本机 `./install.sh agy-finder` 热同步（同步 `main`）**：
+  - **规则硬门禁前置**（[plugins/agy-finder/rules/AGENTS.md](./plugins/agy-finder/rules/AGENTS.md)、[plugins/agy-finder/skills/agy-finder/SKILL.md](./plugins/agy-finder/skills/agy-finder/SKILL.md)）：将宿主环境判定从末尾补充提升为第 1 节硬门禁，明确要求先检查 `<user_information>` 中的 `App Data Directory` / `Artifact Directory Path`（含 `antigravity-cli`）与 `ANTIGRAVITY_LS_VERSION`（`cli-*`），命中 `agy` CLI 时严禁输出 `sidecar://`、`[📂]` / `[🌐]` 胶囊，仅保留标准 `[文件名](file:///绝对路径)`；确认桌面端 / IDE（`antigravity` / `antigravity-ide`）时再启用胶囊约定。
+  - **运行时 `SessionStart` CLI 宿主守卫钩子**（新建 [plugins/agy-finder/hooks.json](./plugins/agy-finder/hooks.json)、[plugins/agy-finder/hooks/session_host_guard.mjs](./plugins/agy-finder/hooks/session_host_guard.mjs)）：跨平台 `node hooks/session_host_guard.mjs` 仅在新会话启动时执行一次；依据 `transcriptPath` / `artifactDirectoryPath`（优先于残留环境变量防误伤桌面端 / IDE）及 `ANTIGRAVITY_APP_DATA_DIR` / `ANTIGRAVITY_LS_VERSION` / `ANTIGRAVITY_PROJECT_ID` 精准识别 `agy` CLI，仅 CLI 注入 1 条禁用 `sidecar://` 的 `systemMessage`，桌面端 / IDE 返回 `{}` 零干扰。
+  - **安装、打包与回归同步**（[plugins/agy-finder/install.sh](./plugins/agy-finder/install.sh)、[plugins/agy-finder/install.ps1](./plugins/agy-finder/install.ps1)、[scripts/package-all.mjs](./scripts/package-all.mjs)、[plugins/agy-finder/scripts/verify.mjs](./plugins/agy-finder/scripts/verify.mjs)）：同步安装与打包 `hooks.json` 与 `hooks/session_host_guard.mjs`，新增 `verifyCliSessionHostGuard()` 覆盖 POSIX / Windows 路径判定、桌面端 / IDE 优先级、stdin/stdout 子进程契约及畸形输入容错；`node scripts/verify.mjs --strict-git-identity` 与 `node scripts/package-all.mjs` 已全部通过（2026-11-21 19:19）。
 
 - **已完成 `context-viewer` `statusline` 超时强杀（`signal: killed`）根治修复、全仓门禁/打包验证与本机 `./install.sh context-viewer` 热同步（同步 `main`）**：
   - **零重加载极速短路与硬截止保险丝**（[cli.mjs](./plugins/agy-context-viewer/sidecars/dashboard/cli.mjs)）：记录 `PROCESS_START_MS`，将 `collector.mjs`（316 KB）与 `pricing.mjs`（72 KB）改为按需动态加载（保持全部 7 个具名导出同步兼容）；`statusline` 渲染分支先走纯标准库 `tryFastStatuslineSnapHit()` 校验 `statusline_snap_v1.json` 全部 10 项签名与 TTL，命中即跳过 450 KB 重模块直接输出并 `process.exit(0)`；未命中时按 `AGY_STATUSLINE_BUDGET_MS`（默认 `260 ms`）加外层 `Promise.race` 硬截止保险丝，超预算即 abort 并用旧快照 + 磁盘配额 + `stdinPayload` 零闪烁兜底，不污染快照也不误写 `cliActiveConvId`。

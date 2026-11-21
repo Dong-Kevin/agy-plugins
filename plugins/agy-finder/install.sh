@@ -210,9 +210,11 @@ if [[ -z "${SCRIPT_DIR}" ]]; then
 fi
 
 STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agy-finder-stage.XXXXXX")"
-mkdir -p "$STAGE_DIR/assets" "$STAGE_DIR/rules" "$STAGE_DIR/skills/agy-finder" "$STAGE_DIR/sidecars/tree"
+mkdir -p "$STAGE_DIR/assets" "$STAGE_DIR/hooks" "$STAGE_DIR/rules" "$STAGE_DIR/skills/agy-finder" "$STAGE_DIR/sidecars/tree"
 
 cp "$SCRIPT_DIR/plugin.json" "$STAGE_DIR/plugin.json"
+cp "$SCRIPT_DIR/hooks.json" "$STAGE_DIR/hooks.json"
+cp "$SCRIPT_DIR/hooks/session_host_guard.mjs" "$STAGE_DIR/hooks/session_host_guard.mjs"
 [[ -f "$SCRIPT_DIR/README.md" ]] && cp "$SCRIPT_DIR/README.md" "$STAGE_DIR/README.md"
 [[ -f "$SCRIPT_DIR/LICENSE" ]] && cp "$SCRIPT_DIR/LICENSE" "$STAGE_DIR/LICENSE"
 cp "$SCRIPT_DIR/assets/logo.svg" "$STAGE_DIR/assets/logo.svg"
@@ -228,9 +230,11 @@ if [[ -z "$ORIG_PLUGINS_DIR" ]] && [[ -d "$TARGET_DIR" ]]; then
   node "$STAGE_DIR/sidecars/tree/cli.mjs" quit >/dev/null || true
 fi
 
-mkdir -p "$TARGET_DIR/assets" "$TARGET_DIR/rules" "$TARGET_DIR/skills/agy-finder" "$TARGET_DIR/sidecars/tree"
+mkdir -p "$TARGET_DIR/assets" "$TARGET_DIR/hooks" "$TARGET_DIR/rules" "$TARGET_DIR/skills/agy-finder" "$TARGET_DIR/sidecars/tree"
 
 cp -f "$STAGE_DIR/plugin.json" "$TARGET_DIR/plugin.json"
+cp -f "$STAGE_DIR/hooks.json" "$TARGET_DIR/hooks.json"
+cp -f "$STAGE_DIR/hooks/session_host_guard.mjs" "$TARGET_DIR/hooks/session_host_guard.mjs"
 [[ -f "$STAGE_DIR/README.md" ]] && cp -f "$STAGE_DIR/README.md" "$TARGET_DIR/README.md"
 [[ -f "$STAGE_DIR/LICENSE" ]] && cp -f "$STAGE_DIR/LICENSE" "$TARGET_DIR/LICENSE"
 cp -f "$STAGE_DIR/assets/logo.svg" "$TARGET_DIR/assets/logo.svg"

@@ -212,7 +212,7 @@ try {
   }
 
   $TreeFiles = @("package.json", "main.mjs", "path_utils.mjs", "mentions.mjs", "drawer.mjs", "cli.mjs", "native_drawer_macos.swift", "index.html", "styles.css", "app.js", "sidecar.json")
-  foreach ($Req in @("plugin.json", "assets\logo.svg", "rules\AGENTS.md", "skills\agy-finder\SKILL.md")) {
+  foreach ($Req in @("plugin.json", "hooks.json", "hooks\session_host_guard.mjs", "assets\logo.svg", "rules\AGENTS.md", "skills\agy-finder\SKILL.md")) {
     if (-not (Test-Path (Join-Path $ScriptDir $Req))) {
       throw "安装包缺少必需文件：$Req"
     }
@@ -233,6 +233,7 @@ try {
   $Dirs = @(
     $TargetDir,
     (Join-Path $TargetDir "assets"),
+    (Join-Path $TargetDir "hooks"),
     (Join-Path $TargetDir "rules"),
     (Join-Path $TargetDir "skills\agy-finder"),
     (Join-Path $TargetDir "sidecars\tree")
@@ -242,6 +243,8 @@ try {
   }
 
   Copy-Item -Force (Join-Path $ScriptDir "plugin.json") (Join-Path $TargetDir "plugin.json")
+  Copy-Item -Force (Join-Path $ScriptDir "hooks.json") (Join-Path $TargetDir "hooks.json")
+  Copy-Item -Force (Join-Path $ScriptDir "hooks\session_host_guard.mjs") (Join-Path $TargetDir "hooks\session_host_guard.mjs")
   foreach ($OptFile in @("README.md", "LICENSE")) {
     $OptPath = Join-Path $ScriptDir $OptFile
     if (Test-Path $OptPath) { Copy-Item -Force $OptPath (Join-Path $TargetDir $OptFile) }
