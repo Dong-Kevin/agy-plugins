@@ -81,6 +81,7 @@ export const MODEL_PRICING_TABLE = {
       inputPerMillion: 4.00,
       outputPerMillion: 20.00,
       cacheReadPerMillion: 0.20,
+      cacheWritePerMillion: 5.00,
       note: 'Claude Opus 5.5 标准费率'
     }
   ],
@@ -89,6 +90,7 @@ export const MODEL_PRICING_TABLE = {
       inputPerMillion: 2.00,
       outputPerMillion: 10.00,
       cacheReadPerMillion: 0.10,
+      cacheWritePerMillion: 2.50,
       note: 'Claude Sonnet 5.5 标准费率'
     }
   ],
@@ -889,33 +891,47 @@ export function calculateRequestApiCost(req, dynamicModelMap = null) {
       reason: !rawModel ? '未记录模型名称' : '暂无公开零售费率'
     };
   }
-  const input = Number(req.inputTokens ?? req.input_tokens ?? req.input ?? 0);
-  const cache = Number(req.cacheTokens ?? req.cacheReadTokens ?? req.cache_read_tokens ?? req.cached ?? 0);
-  const output = Number(req.outputTokens ?? req.output_tokens ?? req.output ?? 0);
-  const thinking = Number(req.thinkingTokens ?? req.thinking_output_tokens ?? req.thinking ?? 0);
+  const input = Math.max(0, Number(req.inputTokens ?? req.input_tokens ?? req.input ?? 0) || 0);
+  const cache = Math.max(0, Number(req.cacheTokens ?? req.cacheReadTokens ?? req.cache_read_tokens ?? req.cached ?? 0) || 0);
+  const cacheWrite = Math.max(
+    0,
+    Number(req.cacheWriteTokens ?? req.cacheCreationInputTokens ?? req.cache_creation_input_tokens ?? req.cache_write_tokens ?? 0) || 0
+  );
+  const output = Math.max(0, Number(req.outputTokens ?? req.output_tokens ?? req.output ?? 0) || 0);
+  const thinking = Math.max(0, Number(req.thinkingTokens ?? req.thinking_output_tokens ?? req.thinking ?? 0) || 0);
   const reqDate = req.date || req.created_at || PRICING_VERIFIED_DATE;
-  const tier = matchPricingRule(modelKey, reqDate, input + cache);
+  const tier = matchPricingRule(modelKey, reqDate, input + cache + cacheWrite);
+  const writeRate = tier.cacheWritePerMillion !== undefined
+    ? Number(tier.cacheWritePerMillion)
+    : (modelKey.startsWith('claude-') ? tier.inputPerMillion * 1.25 : tier.inputPerMillion);
   const inputCost = (input * tier.inputPerMillion) / 1_000_000;
   const cacheCost = (cache * tier.cacheReadPerMillion) / 1_000_000;
+  const cacheWriteCost = (cacheWrite * writeRate) / 1_000_000;
   const outputCost = (output * tier.outputPerMillion) / 1_000_000;
-  const totalCost = inputCost + cacheCost + outputCost;
-  const cacheSavingsUSD = Number(((cache * Math.max(0, tier.inputPerMillion - tier.cacheReadPerMillion)) / 1_000_000).toFixed(6));
+  const totalCost = inputCost + cacheCost + cacheWriteCost + outputCost;
+  const grossCacheSavingsUSD = (cache * Math.max(0, tier.inputPerMillion - tier.cacheReadPerMillion)) / 1_000_000;
+  const cacheWriteSurchargeUSD = (cacheWrite * Math.max(0, writeRate - tier.inputPerMillion)) / 1_000_000;
+  const cacheSavingsUSD = Number((grossCacheSavingsUSD - cacheWriteSurchargeUSD).toFixed(6));
 
   return {
     costUSD: Number(totalCost.toFixed(6)),
     inputCostUSD: Number(inputCost.toFixed(6)),
     cacheCostUSD: Number(cacheCost.toFixed(6)),
+    cacheWriteCostUSD: Number(cacheWriteCost.toFixed(6)),
     outputCostUSD: Number(outputCost.toFixed(6)),
     cacheSavingsUSD,
+    grossCacheSavingsUSD: Number(grossCacheSavingsUSD.toFixed(6)),
+    cacheWriteSurchargeUSD: Number(cacheWriteSurchargeUSD.toFixed(6)),
     isPriced: true,
     modelKey,
     modelDisplayName: MODEL_DISPLAY_NAMES[modelKey] || rawModel || modelKey,
     matchedTier: tier,
     inputTokens: input,
     cacheTokens: cache,
+    cacheWriteTokens: cacheWrite,
     outputTokens: output,
     thinkingTokens: thinking,
-    totalTokens: input + cache + output
+    totalTokens: input + cache + cacheWrite + output
   };
 }
 
@@ -923,16 +939,19 @@ export function summarizeApiCost(requests = [], dynamicModelMap = null) {
   let pricedCostUSD = 0;
   let pricedInputCostUSD = 0;
   let pricedCacheCostUSD = 0;
+  let pricedCacheWriteCostUSD = 0;
   let pricedOutputCostUSD = 0;
   let pricedCacheSavingsUSD = 0;
   let pricedTokens = 0;
   let pricedInputTokens = 0;
   let pricedCacheTokens = 0;
+  let pricedCacheWriteTokens = 0;
   let pricedOutputTokens = 0;
   let pricedThinkingTokens = 0;
   let unpricedTokens = 0;
   let unpricedInputTokens = 0;
   let unpricedCacheTokens = 0;
+  let unpricedCacheWriteTokens = 0;
   let unpricedOutputTokens = 0;
   let pricedRequestsCount = 0;
   let unpricedRequestsCount = 0;
@@ -940,10 +959,14 @@ export function summarizeApiCost(requests = [], dynamicModelMap = null) {
   const byModel = {};
 
   for (const req of requests) {
-    const inp = Number(req.inputTokens ?? req.input_tokens ?? req.input ?? 0);
-    const cap = Number(req.cacheTokens ?? req.cacheReadTokens ?? req.cache_read_tokens ?? req.cached ?? 0);
-    const outp = Number(req.outputTokens ?? req.output_tokens ?? req.output ?? 0);
-    const tot = inp + cap + outp;
+    const inp = Math.max(0, Number(req.inputTokens ?? req.input_tokens ?? req.input ?? 0) || 0);
+    const cap = Math.max(0, Number(req.cacheTokens ?? req.cacheReadTokens ?? req.cache_read_tokens ?? req.cached ?? 0) || 0);
+    const cw = Math.max(
+      0,
+      Number(req.cacheWriteTokens ?? req.cacheCreationInputTokens ?? req.cache_creation_input_tokens ?? req.cache_write_tokens ?? 0) || 0
+    );
+    const outp = Math.max(0, Number(req.outputTokens ?? req.output_tokens ?? req.output ?? 0) || 0);
+    const tot = inp + cap + cw + outp;
     if (tot <= 0) continue;
 
     const calc = calculateRequestApiCost(req, dynamicModelMap);
@@ -951,11 +974,13 @@ export function summarizeApiCost(requests = [], dynamicModelMap = null) {
       pricedCostUSD += calc.costUSD;
       pricedInputCostUSD += calc.inputCostUSD;
       pricedCacheCostUSD += calc.cacheCostUSD;
+      pricedCacheWriteCostUSD += calc.cacheWriteCostUSD || 0;
       pricedOutputCostUSD += calc.outputCostUSD;
       pricedCacheSavingsUSD += calc.cacheSavingsUSD || 0;
       pricedTokens += calc.totalTokens;
       pricedInputTokens += calc.inputTokens;
       pricedCacheTokens += calc.cacheTokens;
+      pricedCacheWriteTokens += calc.cacheWriteTokens || 0;
       pricedOutputTokens += calc.outputTokens;
       pricedThinkingTokens += calc.thinkingTokens;
       pricedRequestsCount++;
@@ -967,6 +992,7 @@ export function summarizeApiCost(requests = [], dynamicModelMap = null) {
           tokens: 0,
           inputTokens: 0,
           cacheTokens: 0,
+          cacheWriteTokens: 0,
           outputTokens: 0,
           costUSD: 0,
           cacheSavingsUSD: 0
@@ -977,6 +1003,7 @@ export function summarizeApiCost(requests = [], dynamicModelMap = null) {
       m.tokens += calc.totalTokens;
       m.inputTokens += calc.inputTokens;
       m.cacheTokens += calc.cacheTokens;
+      m.cacheWriteTokens += calc.cacheWriteTokens || 0;
       m.outputTokens += calc.outputTokens;
       m.costUSD = Number((m.costUSD + calc.costUSD).toFixed(6));
       m.cacheSavingsUSD = Number((m.cacheSavingsUSD + (calc.cacheSavingsUSD || 0)).toFixed(6));
@@ -985,6 +1012,7 @@ export function summarizeApiCost(requests = [], dynamicModelMap = null) {
       unpricedTokens += tot;
       unpricedInputTokens += inp;
       unpricedCacheTokens += cap;
+      unpricedCacheWriteTokens += cw;
       unpricedOutputTokens += outp;
       if (!calc.rawModel) unpricedReasons.missingModel++;
       else unpricedReasons.unsupportedModel++;
@@ -1003,6 +1031,7 @@ export function summarizeApiCost(requests = [], dynamicModelMap = null) {
           tokens: 0,
           inputTokens: 0,
           cacheTokens: 0,
+          cacheWriteTokens: 0,
           outputTokens: 0,
           costUSD: 0,
           cacheSavingsUSD: 0,
@@ -1015,6 +1044,7 @@ export function summarizeApiCost(requests = [], dynamicModelMap = null) {
       m.tokens += tot;
       m.inputTokens += inp;
       m.cacheTokens += cap;
+      m.cacheWriteTokens += cw;
       m.outputTokens += outp;
     }
   }
@@ -1028,6 +1058,7 @@ export function summarizeApiCost(requests = [], dynamicModelMap = null) {
     pricedCostUSD: Number(pricedCostUSD.toFixed(4)),
     pricedInputCostUSD: Number(pricedInputCostUSD.toFixed(4)),
     pricedCacheCostUSD: Number(pricedCacheCostUSD.toFixed(4)),
+    pricedCacheWriteCostUSD: Number(pricedCacheWriteCostUSD.toFixed(4)),
     pricedOutputCostUSD: Number(pricedOutputCostUSD.toFixed(4)),
     pricedCacheSavingsUSD: Number(pricedCacheSavingsUSD.toFixed(4)),
     pricedRequestsCount,
@@ -1038,12 +1069,14 @@ export function summarizeApiCost(requests = [], dynamicModelMap = null) {
     byCategory: {
       inputTokens: pricedInputTokens,
       cacheTokens: pricedCacheTokens,
+      cacheWriteTokens: pricedCacheWriteTokens,
       outputTokens: pricedOutputTokens,
       thinkingTokens: pricedThinkingTokens
     },
     unpricedByCategory: {
       inputTokens: unpricedInputTokens,
       cacheTokens: unpricedCacheTokens,
+      cacheWriteTokens: unpricedCacheWriteTokens,
       outputTokens: unpricedOutputTokens
     },
     tokenCoveragePercent,
@@ -1054,18 +1087,28 @@ export function summarizeApiCost(requests = [], dynamicModelMap = null) {
 }
 
 export function calculateReferenceCost(tokenTotals = {}, refModelKey = 'gemini-3.8-flash', pricingDate = PRICING_VERIFIED_DATE) {
-  const input = Number(tokenTotals.inputTokens ?? tokenTotals.input ?? 0);
-  const cache = Number(tokenTotals.cacheTokens ?? tokenTotals.cache ?? 0);
-  const output = Number(tokenTotals.outputTokens ?? tokenTotals.output ?? 0);
-  const total = Number(tokenTotals.totalTokens ?? tokenTotals.total ?? (input + cache + output));
+  const input = Math.max(0, Number(tokenTotals.inputTokens ?? tokenTotals.input ?? 0) || 0);
+  const cache = Math.max(0, Number(tokenTotals.cacheTokens ?? tokenTotals.cache ?? 0) || 0);
+  const cacheWrite = Math.max(
+    0,
+    Number(tokenTotals.cacheWriteTokens ?? tokenTotals.cacheCreationInputTokens ?? tokenTotals.cache_creation_input_tokens ?? tokenTotals.cache_write_tokens ?? tokenTotals.cacheWrite ?? 0) || 0
+  );
+  const output = Math.max(0, Number(tokenTotals.outputTokens ?? tokenTotals.output ?? 0) || 0);
+  const total = Number(tokenTotals.totalTokens ?? tokenTotals.total ?? (input + cache + cacheWrite + output));
   const normKey = normalizeModelId(refModelKey) || 'gemini-3.8-flash';
   const tier = matchPricingRule(normKey, pricingDate, 0) || MODEL_PRICING_TABLE['gemini-3.8-flash'][0];
+  const writeRate = tier.cacheWritePerMillion !== undefined
+    ? Number(tier.cacheWritePerMillion)
+    : (normKey.startsWith('claude-') ? tier.inputPerMillion * 1.25 : tier.inputPerMillion);
 
   const inputCost = (input * tier.inputPerMillion) / 1_000_000;
   const cacheCost = (cache * tier.cacheReadPerMillion) / 1_000_000;
+  const cacheWriteCost = (cacheWrite * writeRate) / 1_000_000;
   const outputCost = (output * tier.outputPerMillion) / 1_000_000;
-  const totalCost = inputCost + cacheCost + outputCost;
-  const cacheSavings = (cache * Math.max(0, tier.inputPerMillion - tier.cacheReadPerMillion)) / 1_000_000;
+  const totalCost = inputCost + cacheCost + cacheWriteCost + outputCost;
+  const grossCacheSavings = (cache * Math.max(0, tier.inputPerMillion - tier.cacheReadPerMillion)) / 1_000_000;
+  const cacheWriteSurcharge = (cacheWrite * Math.max(0, writeRate - tier.inputPerMillion)) / 1_000_000;
+  const cacheSavings = grossCacheSavings - cacheWriteSurcharge;
 
   return {
     modelKey: normKey,
@@ -1073,12 +1116,16 @@ export function calculateReferenceCost(tokenTotals = {}, refModelKey = 'gemini-3
     tier,
     inputTokens: input,
     cacheTokens: cache,
+    cacheWriteTokens: cacheWrite,
     outputTokens: output,
     totalTokens: total,
     inputCostUSD: Number(inputCost.toFixed(4)),
     cacheCostUSD: Number(cacheCost.toFixed(4)),
+    cacheWriteCostUSD: Number(cacheWriteCost.toFixed(4)),
     outputCostUSD: Number(outputCost.toFixed(4)),
     totalCostUSD: Number(totalCost.toFixed(4)),
+    grossCacheSavingsUSD: Number(grossCacheSavings.toFixed(4)),
+    cacheWriteSurchargeUSD: Number(cacheWriteSurcharge.toFixed(4)),
     cacheSavingsUSD: Number(cacheSavings.toFixed(4))
   };
 }

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-glass="on">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -13,7 +13,7 @@
     <!-- Top Sticky Capsule Bar -->
     <header class="top-bar">
       <div class="capsule-strip" role="group" aria-label="核心状态速览">
-        <button id="cap-context" type="button" class="capsule-pill active" data-goto-tab="context" data-cap-key="context" aria-controls="cap-popover" aria-expanded="false" title="点击查看或钉住当前会话上下文透视">
+        <button id="cap-context" type="button" class="capsule-pill active" data-goto-tab="context" data-cap-key="context" aria-controls="cap-popover" aria-expanded="false" title="点击查看或钉住当前会话上下文透视" data-i18n-title="cap.ctx.title">
           <svg class="mini-ring" width="18" height="18" viewBox="0 0 20 20" aria-hidden="true">
             <circle class="mini-ring-track" cx="10" cy="10" r="7.2"></circle>
             <circle id="mini-ring-fill" class="mini-ring-fill" cx="10" cy="10" r="7.2" stroke-dasharray="45.24" stroke-dashoffset="45.24" transform="rotate(-90 10 10)"></circle>
@@ -21,31 +21,34 @@
           <span id="cap-ctx-pct" class="num-strong">--%</span>
         </button>
 
-        <button id="cap-speed" type="button" class="capsule-pill" data-goto-tab="context" data-cap-key="speed" aria-controls="cap-popover" aria-expanded="false" title="悬停查看效率与耗时拆分，点击跳转或钉住">
+        <button id="cap-speed" type="button" class="capsule-pill" data-goto-tab="context" data-cap-key="speed" aria-controls="cap-popover" aria-expanded="false" title="悬停查看效率与耗时拆分，点击跳转或钉住" data-i18n-title="cap.speed.title">
           <svg class="svg-ic ic-bolt" viewBox="0 0 16 16" aria-hidden="true"><path d="M9.2 1.5 3.8 9h4.1l-.9 5.5L12.4 7H8.3l.9-5.5Z"/></svg>
           <span id="cap-speed-val" class="num">-- tok/s</span>
         </button>
 
-        <button id="cap-tokens" type="button" class="capsule-pill" data-goto-tab="history" data-cap-key="tokens" aria-controls="cap-popover" aria-expanded="false" title="悬停查看 Token 与缓存经济学，点击跳转用量趋势或钉住">
+        <button id="cap-tokens" type="button" class="capsule-pill" data-goto-tab="history" data-cap-key="tokens" aria-controls="cap-popover" aria-expanded="false" title="悬停查看 Token 与缓存经济学，点击跳转用量趋势或钉住" data-i18n-title="cap.tok.title">
           <svg class="svg-ic ic-bars" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 13V8.5M8 13V3.5M13 13V6"/></svg>
           <span id="cap-tok-val" class="num">--</span>
         </button>
       </div>
 
       <div class="top-actions">
-        <button id="btn-cli" type="button" class="icon-btn cli-btn" title="在当前工作区启动 agy CLI">
+        <button id="btn-cli" type="button" class="icon-btn cli-btn" title="在当前工作区启动 agy CLI" data-i18n-title="btn.cli.title">
           <span class="mono-tag">&gt;_</span><span>CLI</span>
         </button>
         <button id="btn-float" type="button" class="icon-btn" title="弹出或收回右侧置顶小窗">
           <svg id="ic-float" class="svg-ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M9.8 2.2 13.8 6.2 12.2 7.8 11.4 7 8.9 9.5l.6 2.6-1.3 1.3-2.6-2.6-3.1 3.1M6.6 10.8 4 8.2l1.3-1.3 2.6.6L10.4 5l-.8-.8 1.6-1.6"/></svg>
         </button>
-        <button id="btn-palette" type="button" class="icon-btn" aria-expanded="false" title="快捷键、菜单栏显示定制、置顶小窗与色阶设置">
+        <button id="btn-palette" type="button" class="icon-btn" aria-expanded="false" title="快捷键、菜单栏显示定制、置顶小窗与色阶设置" data-i18n-title="btn.palette.title">
           <svg class="svg-ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><circle cx="6" cy="6.2" r=".9" class="fill"/><circle cx="9.8" cy="5.8" r=".9" class="fill"/><circle cx="10.6" cy="9" r=".9" class="fill"/><circle cx="6.5" cy="10.2" r="1.1" class="fill"/></svg>
         </button>
-        <button id="btn-theme" type="button" class="icon-btn" title="切换主题：跟随宿主 / 浅色 / 深色">
+        <button id="btn-theme" type="button" class="icon-btn" title="切换主题：跟随宿主 / 浅色 / 深色 / OLED 纯黑">
           <svg id="ic-theme" class="svg-ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.2a5.8 5.8 0 1 0 5.8 5.8A4.6 4.6 0 0 1 8 2.2Z"/></svg>
         </button>
-        <button id="btn-refresh" type="button" class="icon-btn" title="强制刷新统计数据">
+        <button id="btn-copy-md" type="button" class="icon-btn" title="复制脱敏 Markdown 遥测摘要" data-i18n-title="btn.copyMd.title" aria-label="复制脱敏 Markdown 遥测摘要">
+          <svg id="ic-copy-md" class="svg-ic" viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="4" width="8" height="9.5" rx="1.4"/><path d="M3.5 11V3.4A1.4 1.4 0 0 1 4.9 2h5.6"/></svg>
+        </button>
+        <button id="btn-refresh" type="button" class="icon-btn" title="强制刷新统计数据" data-i18n-title="btn.refresh.title">
           <svg id="ic-refresh" class="svg-ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.6v3h-3"/></svg>
         </button>
       </div>
@@ -57,99 +60,116 @@
     <!-- Slide-down Appearance & Palette Customizer Drawer -->
     <section id="palette-drawer" class="palette-drawer hidden" aria-label="快捷入口与外观自定义">
       <div class="drawer-head">
-        <span class="drawer-title">快捷入口模式与外观定制</span>
+        <span class="drawer-title" data-i18n="drawer.title">快捷入口模式与外观定制</span>
         <div class="row-gap">
-          <button id="btn-reset-appearance" type="button" class="ghost-btn xs">恢复默认</button>
+          <button id="btn-reset-appearance" type="button" class="ghost-btn xs" data-i18n="drawer.reset">恢复默认</button>
           <button id="btn-close-palette" type="button" class="icon-btn xs" aria-label="关闭设置">×</button>
         </div>
       </div>
 
       <div id="menubar-entry-row" class="palette-row">
-        <span class="field-lbl" title="左键显隐看板 · 右键切换模式">顶部菜单栏常驻图标</span>
+        <span class="field-lbl" title="左键显隐看板 · 右键切换模式" data-i18n="drawer.menubarEntry" data-i18n-title="drawer.menubarEntry.title">顶部菜单栏常驻图标</span>
         <div class="seg-group" id="menubar-entry-seg">
-          <button type="button" class="seg-btn active" data-menubar-entry="on">开启</button>
-          <button type="button" class="seg-btn" data-menubar-entry="off">关闭</button>
+          <button type="button" class="seg-btn active" data-menubar-entry="on" data-i18n="common.on">开启</button>
+          <button type="button" class="seg-btn" data-menubar-entry="off" data-i18n="common.off">关闭</button>
         </div>
       </div>
 
       <div id="menubar-mode-row" class="palette-row">
-        <span class="field-lbl" title="切换会话时自动跟随更新">菜单栏显示内容</span>
+        <span class="field-lbl" title="切换会话时自动跟随更新" data-i18n="drawer.menubarMode" data-i18n-title="drawer.menubarMode.title">菜单栏显示内容</span>
         <div class="seg-group" id="menubar-mode-seg">
-          <button type="button" class="seg-btn active" data-menubar-mode="context" title="显示当前窗口占用百分比">上下文占比</button>
-          <button type="button" class="seg-btn" data-menubar-mode="speed" title="显示最新速度、耗时与均值/峰值">速度与耗时</button>
-          <button type="button" class="seg-btn" data-menubar-mode="quota" title="显示 5h / Week 额度余量与倒计时">5h/Week 额度</button>
+          <button type="button" class="seg-btn active" data-menubar-mode="context" title="显示当前窗口占用百分比" data-i18n="menubar.context" data-i18n-title="menubar.context.title">上下文占比</button>
+          <button type="button" class="seg-btn" data-menubar-mode="speed" title="显示最新速度、耗时与均值/峰值" data-i18n="menubar.speed" data-i18n-title="menubar.speed.title">速度与耗时</button>
+          <button type="button" class="seg-btn" data-menubar-mode="quota" title="显示 5h / Week 额度余量与倒计时" data-i18n="menubar.quota" data-i18n-title="menubar.quota.title">5h/Week 额度</button>
         </div>
       </div>
 
       <div class="palette-row">
-        <span class="field-lbl" title="在屏幕右侧弹出独立置顶小窗，不受宿主右侧栏切换影响">右侧独立置顶窗（📌）</span>
+        <span class="field-lbl" title="在屏幕右侧弹出独立置顶小窗，不受宿主右侧栏切换影响" data-i18n="drawer.float" data-i18n-title="drawer.float.title">右侧独立置顶窗（📌）</span>
         <button id="btn-drawer-float" type="button" class="ghost-btn xs">弹出独立置顶小窗</button>
       </div>
 
       <div id="shortcut-config-row" class="palette-row">
-        <span class="field-lbl" title="按下组合键一键打开或关闭右侧独立置顶看板，零辅助功能权限弹窗">独立悬浮窗快捷键</span>
+        <span class="field-lbl" title="按下组合键一键打开或关闭右侧独立置顶看板，零辅助功能权限弹窗" data-i18n="drawer.floatSc" data-i18n-title="drawer.floatSc.title">独立悬浮窗快捷键</span>
         <div class="shortcut-ctrl-group">
-          <button id="btn-record-shortcut" type="button" class="kbd-record-btn" title="点击后直接按下新的组合键（按 Esc 取消录制）">
+          <button id="btn-record-shortcut" type="button" class="kbd-record-btn" title="点击后直接按下新的组合键（按 Esc 取消录制）" data-i18n-title="btn.recordSc.title">
             <kbd id="shortcut-kbd-label">⌥⌘K</kbd>
             <span id="shortcut-record-hint" class="kbd-sub">点击修改</span>
           </button>
-          <button id="btn-toggle-shortcut" type="button" class="ghost-btn xs" title="启用或停用独立悬浮窗快捷键">已开启</button>
-          <button id="btn-reset-shortcut" type="button" class="ghost-btn xs" title="恢复默认快捷键">默认</button>
+          <button id="btn-toggle-shortcut" type="button" class="ghost-btn xs" title="启用或停用独立悬浮窗快捷键" data-i18n-title="btn.toggleFloatSc.title">已开启</button>
+          <button id="btn-reset-shortcut" type="button" class="ghost-btn xs" title="恢复默认快捷键" data-i18n="common.default" data-i18n-title="btn.resetFloatSc.title">默认</button>
         </div>
       </div>
 
       <div id="aux-shortcut-config-row" class="palette-row">
-        <span class="field-lbl" title="按下组合键一键打开或切换 Antigravity 右侧辅助栏「上下文看板」（右键标签选择 Pin Tab 后可跨对话、从 Overview 状态随时直达，零辅助功能权限弹窗）">AGY 侧栏看板键</span>
+        <span class="field-lbl" title="按下组合键一键打开或切换 Antigravity 右侧辅助栏「上下文看板」（右键标签选择 Pin Tab 后可跨对话、从 Overview 状态随时直达，零辅助功能权限弹窗）" data-i18n="drawer.auxSc" data-i18n-title="drawer.auxSc.title">AGY 侧栏看板键</span>
         <div class="shortcut-ctrl-group">
-          <button id="btn-record-aux-shortcut" type="button" class="kbd-record-btn" title="点击后直接按下新的组合键（按 Esc 取消录制）">
+          <button id="btn-record-aux-shortcut" type="button" class="kbd-record-btn" title="点击后直接按下新的组合键（按 Esc 取消录制）" data-i18n-title="btn.recordSc.title">
             <kbd id="aux-shortcut-kbd-label">⌃⌥K</kbd>
             <span id="aux-shortcut-record-hint" class="kbd-sub">点击修改</span>
           </button>
-          <button id="btn-toggle-aux-shortcut" type="button" class="ghost-btn xs" title="启用或停用 AGY 右侧辅助栏看板快捷键">已开启</button>
-          <button id="btn-reset-aux-shortcut" type="button" class="ghost-btn xs" title="恢复默认快捷键">默认</button>
+          <button id="btn-toggle-aux-shortcut" type="button" class="ghost-btn xs" title="启用或停用 AGY 右侧辅助栏看板快捷键" data-i18n-title="btn.toggleAuxSc.title">已开启</button>
+          <button id="btn-reset-aux-shortcut" type="button" class="ghost-btn xs" title="恢复默认快捷键" data-i18n="common.default" data-i18n-title="btn.resetAuxSc.title">默认</button>
         </div>
       </div>
 
       <div id="shortcut-scope-row" class="palette-row">
-        <span class="field-lbl" title="默认仅在 Antigravity 或看板处于前台时生效，避免与其他软件快捷键冲突；同时作用于独立悬浮窗与 AGY 侧栏快捷键">快捷键生效范围</span>
+        <span class="field-lbl" title="默认仅在 Antigravity 或看板处于前台时生效，避免与其他软件快捷键冲突；同时作用于独立悬浮窗与 AGY 侧栏快捷键" data-i18n="drawer.scScope" data-i18n-title="drawer.scScope.title">快捷键生效范围</span>
         <div class="seg-group" id="shortcut-scope-seg">
-          <button type="button" class="seg-btn active" data-shortcut-scope="app" title="仅当 Antigravity 或看板窗口处于前台时响应">仅宿主前台</button>
-          <button type="button" class="seg-btn" data-shortcut-scope="global" title="在任意应用界面下均可呼出或收回右侧看板">全局生效</button>
+          <button type="button" class="seg-btn active" data-shortcut-scope="app" title="仅当 Antigravity 或看板窗口处于前台时响应" data-i18n="scope.app" data-i18n-title="scope.app.title">仅宿主前台</button>
+          <button type="button" class="seg-btn" data-shortcut-scope="global" title="在任意应用界面下均可呼出或收回右侧看板" data-i18n="scope.global" data-i18n-title="scope.global.title">全局生效</button>
         </div>
       </div>
 
       <div class="drawer-sep"></div>
 
       <div class="palette-row">
-        <span class="field-lbl">界面主题</span>
+        <span class="field-lbl" data-i18n="drawer.theme">界面主题</span>
         <div class="seg-group" id="theme-seg">
-          <button type="button" class="seg-btn active" data-theme-mode="auto">跟随宿主</button>
-          <button type="button" class="seg-btn" data-theme-mode="light">浅色</button>
-          <button type="button" class="seg-btn" data-theme-mode="dark">深色</button>
+          <button type="button" class="seg-btn active" data-theme-mode="auto" data-i18n="theme.auto">跟随宿主</button>
+          <button type="button" class="seg-btn" data-theme-mode="light" data-i18n="theme.light">浅色</button>
+          <button type="button" class="seg-btn" data-theme-mode="dark" data-i18n="theme.dark">深色</button>
+          <button type="button" class="seg-btn" data-theme-mode="oled" data-i18n="theme.oled">OLED 纯黑</button>
         </div>
       </div>
 
       <div class="palette-row">
-        <span class="field-lbl">热力图色阶预设</span>
+        <span class="field-lbl" data-i18n="drawer.glass">玻璃质感</span>
+        <div class="seg-group" id="glass-seg">
+          <button type="button" class="seg-btn active" data-glass-mode="on" data-i18n="glass.on">毛玻璃</button>
+          <button type="button" class="seg-btn" data-glass-mode="off" data-i18n="glass.off">实色</button>
+        </div>
+      </div>
+
+      <div class="palette-row">
+        <span class="field-lbl" data-i18n="drawer.lang">界面语言</span>
+        <div class="seg-group" id="lang-seg">
+          <button type="button" class="seg-btn active" data-lang-mode="zh">中文</button>
+          <button type="button" class="seg-btn" data-lang-mode="en">English</button>
+        </div>
+      </div>
+
+      <div class="palette-row">
+        <span class="field-lbl" data-i18n="drawer.heatPreset">热力图色阶预设</span>
         <div class="preset-chips" id="heat-presets">
-          <button type="button" class="preset-chip active" data-preset="violet"><i style="background:#8b5cf6"></i>流光紫</button>
-          <button type="button" class="preset-chip" data-preset="emerald"><i style="background:#10b981"></i>翡翠绿</button>
-          <button type="button" class="preset-chip" data-preset="sky"><i style="background:#0ea5e9"></i>星际蓝</button>
-          <button type="button" class="preset-chip" data-preset="amber"><i style="background:#f59e0b"></i>琥珀金</button>
-          <button type="button" class="preset-chip" data-preset="rose"><i style="background:#f43f5e"></i>珊瑚红</button>
+          <button type="button" class="preset-chip active" data-preset="violet"><i style="background:#8b5cf6"></i><span data-i18n="preset.violet">流光紫</span></button>
+          <button type="button" class="preset-chip" data-preset="emerald"><i style="background:#10b981"></i><span data-i18n="preset.emerald">翡翠绿</span></button>
+          <button type="button" class="preset-chip" data-preset="sky"><i style="background:#0ea5e9"></i><span data-i18n="preset.sky">星际蓝</span></button>
+          <button type="button" class="preset-chip" data-preset="amber"><i style="background:#f59e0b"></i><span data-i18n="preset.amber">琥珀金</span></button>
+          <button type="button" class="preset-chip" data-preset="rose"><i style="background:#f43f5e"></i><span data-i18n="preset.rose">珊瑚红</span></button>
         </div>
       </div>
 
       <div class="palette-row">
-        <span class="field-lbl">5 档逐格微调与强调色</span>
+        <span class="field-lbl" data-i18n="drawer.swatches">5 档逐格微调与强调色</span>
         <div class="swatch-strip">
-          <label class="swatch-item" title="1 档（无用量）"><span>L0</span><input type="color" id="col-lvl0"></label>
-          <label class="swatch-item" title="2 档（低用量）"><span>L1</span><input type="color" id="col-lvl1"></label>
-          <label class="swatch-item" title="3 档（中用量）"><span>L2</span><input type="color" id="col-lvl2"></label>
-          <label class="swatch-item" title="4 档（高用量）"><span>L3</span><input type="color" id="col-lvl3"></label>
-          <label class="swatch-item" title="5 档（峰值）"><span>L4</span><input type="color" id="col-lvl4"></label>
+          <label class="swatch-item" title="1 档（无用量）" data-i18n-title="swatch.l0"><span>L0</span><input type="color" id="col-lvl0"></label>
+          <label class="swatch-item" title="2 档（低用量）" data-i18n-title="swatch.l1"><span>L1</span><input type="color" id="col-lvl1"></label>
+          <label class="swatch-item" title="3 档（中用量）" data-i18n-title="swatch.l2"><span>L2</span><input type="color" id="col-lvl2"></label>
+          <label class="swatch-item" title="4 档（高用量）" data-i18n-title="swatch.l3"><span>L3</span><input type="color" id="col-lvl3"></label>
+          <label class="swatch-item" title="5 档（峰值）" data-i18n-title="swatch.l4"><span>L4</span><input type="color" id="col-lvl4"></label>
           <span class="v-div"></span>
-          <label class="swatch-item" title="主强调色"><span>强调</span><input type="color" id="col-accent"></label>
+          <label class="swatch-item" title="主强调色" data-i18n-title="swatch.accent"><span data-i18n="drawer.accent">强调</span><input type="color" id="col-accent"></label>
         </div>
       </div>
     </section>
@@ -157,12 +177,12 @@
     <!-- Primary Segmented Navigation + Conversation Selector -->
     <nav class="nav-bar" aria-label="主视图切换">
       <div class="main-tabs" role="tablist">
-        <button type="button" role="tab" aria-selected="true" class="main-tab active" data-tab="context">当前会话</button>
-        <button type="button" role="tab" aria-selected="false" class="main-tab" data-tab="history">用量趋势</button>
-        <button type="button" role="tab" aria-selected="false" class="main-tab" data-tab="cost">费用与订阅</button>
+        <button type="button" role="tab" aria-selected="true" class="main-tab active" data-tab="context" data-i18n="tab.context">当前会话</button>
+        <button type="button" role="tab" aria-selected="false" class="main-tab" data-tab="history" data-i18n="tab.history">用量趋势</button>
+        <button type="button" role="tab" aria-selected="false" class="main-tab" data-tab="cost" data-i18n="tab.cost">费用与订阅</button>
       </div>
       <div class="conv-picker-wrap" id="conv-picker-wrap">
-        <button id="btn-follow-current" type="button" class="ghost-btn xs hidden" title="切回自动跟随当前对话">回到当前</button>
+        <button id="btn-follow-current" type="button" class="ghost-btn xs hidden" title="切回自动跟随当前对话" data-i18n="conv.follow" data-i18n-title="conv.follow.title">回到当前</button>
         <div class="conv-dropdown" id="conv-dropdown">
           <button id="conv-picker-trigger" type="button" class="conv-picker-trigger" aria-haspopup="dialog" aria-expanded="false" aria-controls="conv-popover" title="选择按项目分组的会话或切回自动跟随">
             <span id="conv-trigger-label" class="conv-trigger-label">自动跟随当前对话</span>
@@ -175,7 +195,7 @@
             <div class="conv-pop-head">
               <div class="conv-search-box">
                 <svg class="svg-ic conv-search-ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg>
-                <input id="conv-search-input" type="search" class="conv-search-input" placeholder="搜索会话标题或项目名…" autocomplete="off" spellcheck="false" aria-label="搜索会话标题或项目名">
+                <input id="conv-search-input" type="search" class="conv-search-input" placeholder="搜索会话标题或项目名…" data-i18n-placeholder="conv.search.ph" autocomplete="off" spellcheck="false" aria-label="搜索会话标题或项目名">
                 <button id="conv-search-clear" type="button" class="conv-search-clear hidden" aria-label="清空搜索">×</button>
               </div>
               <div id="conv-project-pills" class="conv-project-pills" role="tablist" aria-label="按项目筛选"></div>
@@ -187,6 +207,7 @@
     </nav>
 
     <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+    <div id="cv-tooltip" class="cv-tooltip hidden" role="tooltip" aria-hidden="true"></div>
 
     <!-- Main Scrollable Viewport -->
     <main class="viewport">
@@ -196,9 +217,9 @@
         <article class="card hero-card">
           <div class="card-head wrap-gap">
             <div class="title-group">
-              <h2 class="card-title">上下文窗口占用</h2>
+              <h2 class="card-title" data-i18n="ctx.title">上下文窗口占用</h2>
               <span id="ctx-model-badge" class="meta-chip">读取中…</span>
-              <span id="ctx-pending-badge" class="status-pill warn hidden" title="上一轮响应后新增的待发送步骤预估 Token">+待发 0</span>
+              <span id="ctx-pending-badge" class="status-pill warn hidden" title="上一轮响应后新增的待发送步骤预估 Token" data-i18n-title="ctx.pending.title">+待发 0</span>
               <span id="ctx-sqlite-badge" class="meta-chip cv-subtle-badge hidden"></span>
             </div>
             <div class="row-gap">
@@ -231,22 +252,22 @@
 
             <div class="ctx-metrics-grid">
               <div class="metric-cell">
-                <span class="m-label">当前已用</span>
+                <span class="m-label" data-i18n="ctx.used">当前已用</span>
                 <span id="ctx-used" class="m-val">--</span>
                 <span id="ctx-used-sub" class="m-sub">服务端统计</span>
               </div>
               <div class="metric-cell">
-                <span class="m-label">预算上限</span>
+                <span class="m-label" data-i18n="ctx.budget">预算上限</span>
                 <span id="ctx-budget" class="m-val">--</span>
                 <span id="ctx-budget-sub" class="m-sub">服务端实时阈值</span>
               </div>
               <div class="metric-cell" id="ctx-session-cache-cell" title="当前会话全部有效轮次的加权平均缓存命中率（累计缓存读取 / 累计提示输入）">
-                <span class="m-label">会话平均缓存</span>
+                <span class="m-label" data-i18n="ctx.sessionCache">会话平均缓存</span>
                 <span id="ctx-session-cache" class="m-val accent-text">--</span>
                 <span id="ctx-session-cache-sub" class="m-sub">累计均值</span>
               </div>
               <div class="metric-cell" id="ctx-cache-rate-cell" title="最近一轮已完成请求的缓存读取占比">
-                <span class="m-label">单轮缓存命中</span>
+                <span class="m-label" data-i18n="ctx.roundCache">单轮缓存命中</span>
                 <span id="ctx-cache-rate" class="m-val accent-text">--</span>
                 <span id="ctx-cache-sub" class="m-sub">缓存读取占比</span>
               </div>
@@ -255,7 +276,7 @@
 
           <!-- Segmented Bar (System / Tools / Messages) -->
           <div class="seg-bar-wrap">
-            <div id="ctx-seg-bar" class="seg-bar" title="上下文构成比例">
+            <div id="ctx-seg-bar" class="seg-bar" title="上下文构成比例" data-i18n-title="ctx.segBar.title">
               <div id="seg-sys" class="seg-piece seg-sys" style="width:0%"></div>
               <div id="seg-tools" class="seg-piece seg-tools" style="width:0%"></div>
               <div id="seg-msgs" class="seg-piece seg-msgs" style="width:0%"></div>
@@ -270,6 +291,7 @@
               <span id="ctx-quota-val" class="num-strong">--</span>
             </div>
             <div class="thin-track"><div id="ctx-quota-bar" class="thin-fill"></div></div>
+            <div id="ctx-quota-cal" class="quota-cal-line hidden"></div>
           </div>
 
           <div id="ctx-takeaway" class="takeaway-box">正在同步当前对话上下文指标…</div>
@@ -278,7 +300,7 @@
           <div id="ctx-session-models-wrap" class="session-models-wrap hidden">
             <div class="session-models-head">
               <div class="title-group">
-                <span class="sub-heading no-margin">本会话使用模型</span>
+                <span class="sub-heading no-margin" data-i18n="ctx.sessionModels">本会话使用模型</span>
                 <span id="ctx-session-models-count" class="meta-chip num">0 个模型</span>
               </div>
               <span id="ctx-session-models-hint" class="muted xs">模型级平均缓存命中率</span>
@@ -290,43 +312,43 @@
           <div class="cum-section">
             <button type="button" class="collapse-trigger cum-collapse-trigger" data-toggle="cum-collapse-body" aria-expanded="false">
               <span class="title-group">
-                <span class="sub-heading no-margin">累计四维吞吐与折算</span>
+                <span class="sub-heading no-margin" data-i18n="ctx.cumTitle">累计四维吞吐与折算</span>
                 <span id="cum-summary-chip" class="meta-chip num">累计 --</span>
               </span>
               <span class="chevron">▾</span>
             </button>
             <div id="cum-collapse-body" class="cum-collapse-body hidden">
               <div class="cum-head">
-                <span class="muted xs">含当前会话历史轮次</span>
+                <span class="muted xs" data-i18n="ctx.cumHistory">含当前会话历史轮次</span>
                 <span id="cum-cache-overall" class="muted xs num">累计缓存率 --</span>
               </div>
               <div class="four-grid compact-tiles">
                 <div class="stat-tile">
-                  <span class="m-label">累计缓存读取</span>
+                  <span class="m-label" data-i18n="cum.cacheRead">累计缓存读取</span>
                   <span id="cum-cache-tok" class="m-val accent-text">--</span>
                   <span id="cum-cache-saved" class="m-sub good-text hidden"></span>
                 </div>
                 <div class="stat-tile">
-                  <span class="m-label">累计新增输入</span>
+                  <span class="m-label" data-i18n="cum.input">累计新增输入</span>
                   <span id="cum-input-tok" class="m-val">--</span>
                 </div>
                 <div class="stat-tile">
-                  <span class="m-label">累计生成输出</span>
+                  <span class="m-label" data-i18n="cum.output">累计生成输出</span>
                   <span id="cum-output-tok" class="m-val">--</span>
                   <span id="cum-think-sub" class="m-sub">含思考 --</span>
                 </div>
                 <div class="stat-tile">
-                  <span class="m-label">会话总吞吐</span>
+                  <span class="m-label" data-i18n="cum.total">会话总吞吐</span>
                   <span id="cum-total-tok" class="m-val">--</span>
                 </div>
               </div>
               <div class="cost-strip">
                 <div class="cost-strip-item">
-                  <span class="muted">本轮 API 参考估值</span>
+                  <span class="muted" data-i18n="ctx.roundCost">本轮 API 参考估值</span>
                   <strong id="ctx-round-cost" class="num">--</strong>
                 </div>
                 <div class="cost-strip-item">
-                  <span class="muted">当前会话累计折算</span>
+                  <span class="muted" data-i18n="ctx.sessionCost">当前会话累计折算</span>
                   <strong id="ctx-session-cost" class="num">--</strong>
                 </div>
               </div>
@@ -338,7 +360,7 @@
         <article id="agent-tree-card" class="card collapsible hidden">
           <button type="button" class="collapse-trigger" data-toggle="agent-tree-body" aria-expanded="false">
             <div class="title-group">
-              <span class="card-title">Swarm / 子代理整树</span>
+              <span class="card-title" data-i18n="agentTree.title">Swarm / 子代理整树</span>
               <span id="agent-tree-title" class="meta-chip hidden"></span>
               <span id="agent-tree-chip" class="meta-chip num">0 个子代理</span>
             </div>
@@ -347,17 +369,17 @@
           <div id="agent-tree-body" class="collapse-body hidden">
             <div class="three-grid compact-tiles">
               <div class="stat-tile">
-                <span class="m-label">整树总吞吐</span>
+                <span class="m-label" data-i18n="agentTree.totalTok">整树总吞吐</span>
                 <span id="agent-tree-total-tok" class="m-val">--</span>
                 <span id="agent-tree-total-sub" class="m-sub">--</span>
               </div>
               <div class="stat-tile">
-                <span class="m-label">整树折算费用</span>
+                <span class="m-label" data-i18n="agentTree.totalCost">整树折算费用</span>
                 <span id="agent-tree-total-cost" class="m-val">--</span>
                 <span id="agent-tree-total-cny" class="m-sub">--</span>
               </div>
               <div class="stat-tile">
-                <span class="m-label">整树缓存已省</span>
+                <span class="m-label" data-i18n="agentTree.cacheSaved">整树缓存已省</span>
                 <span id="agent-tree-cache-saved" class="m-val good-text">--</span>
                 <span id="agent-tree-cache-sub" class="m-sub">--</span>
               </div>
@@ -370,7 +392,7 @@
         <article id="speed-card" class="card">
           <div class="card-head wrap-gap">
             <div class="title-group">
-              <h2 class="card-title">最新生成速度与耗时</h2>
+              <h2 class="card-title" data-i18n="speed.title">最新生成速度与耗时</h2>
               <span id="speed-source-tag" class="meta-chip">实时遥测</span>
               <span id="sp-avg-peak-chip" class="meta-chip num">均值 -- · 峰值 --</span>
             </div>
@@ -379,22 +401,22 @@
 
           <div class="four-grid">
             <div class="stat-tile">
-              <span class="m-label">综合速度</span>
+              <span class="m-label" data-i18n="speed.tps">综合速度</span>
               <span id="sp-tps" class="m-val speed-accent">--</span>
               <span id="sp-stream-tps" class="m-sub">流式峰值 --</span>
             </div>
             <div class="stat-tile">
-              <span class="m-label">生成总耗时</span>
+              <span class="m-label" data-i18n="speed.dur">生成总耗时</span>
               <span id="sp-dur" class="m-val">--</span>
               <span id="sp-stream-sec" class="m-sub">流传输 --</span>
             </div>
             <div class="stat-tile">
-              <span class="m-label">首字延迟 TTFT</span>
+              <span class="m-label" data-i18n="speed.ttft">首字延迟 TTFT</span>
               <span id="sp-ttft" class="m-val">--</span>
-              <span class="m-sub">含推理准备</span>
+              <span class="m-sub" data-i18n="speed.ttftSub">含推理准备</span>
             </div>
             <div class="stat-tile">
-              <span class="m-label">本次输出</span>
+              <span class="m-label" data-i18n="speed.out">本次输出</span>
               <span id="sp-out" class="m-val">--</span>
               <span id="sp-think-sub" class="m-sub">思考 -- / 正文 --</span>
             </div>
@@ -408,8 +430,8 @@
           <div id="spark-wrap" class="spark-wrap hidden">
             <div class="spark-head">
               <span class="spark-legend">
-                <span class="spark-leg-item"><i class="spark-dot total"></i>总上下文</span>
-                <span class="spark-leg-item"><i class="spark-dot cache"></i>缓存读取</span>
+                <span class="spark-leg-item"><i class="spark-dot total"></i><span data-i18n="spark.total">总上下文</span></span>
+                <span class="spark-leg-item"><i class="spark-dot cache"></i><span data-i18n="spark.cache">缓存读取</span></span>
               </span>
               <span id="spark-meta" class="muted num">--</span>
             </div>
@@ -421,9 +443,9 @@
         <article id="turns-card" class="card collapsible">
           <button type="button" class="collapse-trigger" data-toggle="turns-body" aria-expanded="true">
             <div class="title-group">
-              <span class="card-title">每轮消耗与工具调用明细</span>
+              <span class="card-title" data-i18n="turns.title">每轮消耗与工具调用明细</span>
               <span id="turns-count-chip" class="meta-chip num">0 轮</span>
-              <span id="turns-cold-badge" class="status-pill danger hidden" title="最近一轮用户输入触发了缓存冷启动">最近冷启动</span>
+              <span id="turns-cold-badge" class="status-pill danger hidden" title="最近一轮用户输入触发了缓存冷启动" data-i18n-title="turns.cold.title">最近冷启动</span>
             </div>
             <span class="chevron">▾</span>
           </button>
@@ -432,17 +454,17 @@
               <span id="turns-toolbar-desc" class="muted xs">倒序展示最近 40 轮上下文涨跌（Δ）、缓存率、单轮耗时与调用工具</span>
               <div class="turns-toolbar-ctrls">
                 <div class="seg-group" id="turns-view-seg" role="group" aria-label="轮次分组视角">
-                  <button type="button" class="seg-btn active" data-tview="steps">按模型步</button>
-                  <button type="button" class="seg-btn" data-tview="prompts">按 Prompt 轮次</button>
+                  <button type="button" class="seg-btn active" data-tview="steps" data-i18n="turns.view.steps">按模型步</button>
+                  <button type="button" class="seg-btn" data-tview="prompts" data-i18n="turns.view.prompts">按 Prompt 轮次</button>
                 </div>
                 <div class="seg-group" id="turns-filter-seg">
-                  <button type="button" class="seg-btn active" data-tfilter="all">全部</button>
-                  <button type="button" class="seg-btn" data-tfilter="spike">激增 &gt;5K</button>
-                  <button type="button" class="seg-btn" data-tfilter="tools">含工具</button>
+                  <button type="button" class="seg-btn active" data-tfilter="all" data-i18n="common.all">全部</button>
+                  <button type="button" class="seg-btn" data-tfilter="spike" data-i18n="turns.filter.spike">激增 &gt;5K</button>
+                  <button type="button" class="seg-btn" data-tfilter="tools" data-i18n="turns.filter.tools">含工具</button>
                 </div>
                 <div class="seg-group hidden" id="prompt-filter-seg">
-                  <button type="button" class="seg-btn active" data-pfilter="all">全部</button>
-                  <button type="button" class="seg-btn" data-pfilter="cold">冷启动</button>
+                  <button type="button" class="seg-btn active" data-pfilter="all" data-i18n="common.all">全部</button>
+                  <button type="button" class="seg-btn" data-pfilter="cold" data-i18n="turns.filter.cold">冷启动</button>
                 </div>
               </div>
             </div>
@@ -454,7 +476,7 @@
         <article id="heavy-card" class="card collapsible hidden">
           <button type="button" class="collapse-trigger" data-toggle="heavy-body" aria-expanded="false">
             <div class="title-group">
-              <span class="card-title">重度消耗排行 Top 10</span>
+              <span class="card-title" data-i18n="heavy.title">重度消耗排行 Top 10</span>
               <span id="heavy-count-chip" class="meta-chip num">0 项</span>
             </div>
             <span class="chevron">▾</span>
@@ -468,7 +490,7 @@
         <article id="compactions-card" class="card collapsible hidden">
           <button type="button" class="collapse-trigger" data-toggle="compactions-body" aria-expanded="false">
             <div class="title-group">
-              <span class="card-title">压缩历史与摘要</span>
+              <span class="card-title" data-i18n="compactions.title">压缩历史与摘要</span>
               <span id="compactions-count-chip" class="meta-chip num">0 次压缩</span>
             </div>
             <span class="chevron">▾</span>
@@ -481,7 +503,7 @@
         <!-- Card 3: Server Context Breakdown Details (Collapsible) -->
         <article id="breakdown-card" class="card collapsible hidden">
           <button type="button" class="collapse-trigger" data-toggle="breakdown-body" aria-expanded="false">
-            <span class="card-title">服务端上下文精确构成（System / Tools / Messages）</span>
+            <span class="card-title" data-i18n="breakdown.title">服务端上下文精确构成（System / Tools / Messages）</span>
             <span class="chevron">▾</span>
           </button>
           <div id="breakdown-body" class="collapse-body hidden">
@@ -492,23 +514,23 @@
         <!-- Card 4: Technical Audit & Attachments (Collapsible) -->
         <article class="card collapsible">
           <button type="button" class="collapse-trigger" data-toggle="audit-body" aria-expanded="false">
-            <span class="card-title">底层技术参数、本地估算与附件审计</span>
+            <span class="card-title" data-i18n="audit.title">底层技术参数、本地估算与附件审计</span>
             <span class="chevron">▾</span>
           </button>
           <div id="audit-body" class="collapse-body hidden">
-            <div class="sub-heading">最近一次模型请求明细</div>
+            <div class="sub-heading" data-i18n="audit.reqSub">最近一次模型请求明细</div>
             <div id="req-kv" class="kv-grid"></div>
 
-            <div class="sub-heading">全会话归档内容 · 本地启发式估算</div>
+            <div class="sub-heading" data-i18n="audit.localSub">全会话归档内容 · 本地启发式估算</div>
             <div id="local-kv" class="kv-grid"></div>
 
             <div class="sub-heading-row">
-              <span class="sub-heading no-margin">附件逐项审计</span>
-              <button id="btn-rescan-files" type="button" class="ghost-btn xs">重新扫描附件</button>
+              <span class="sub-heading no-margin" data-i18n="audit.attSub">附件逐项审计</span>
+              <button id="btn-rescan-files" type="button" class="ghost-btn xs" data-i18n="audit.rescan">重新扫描附件</button>
             </div>
             <div id="attachments-list" class="att-list"></div>
 
-            <p class="fine-print">
+            <p class="fine-print" data-i18n="audit.finePrint">
               说明：会话累计包含全部归档历史（含已压缩轮次），不等于下一次实际发送给模型的窗口大小。本地 Token 区间按字符与字节启发式估算；图像按像素尺寸与 Gemini Vision 分块估算；未解析二进制项标注为未知，绝不按 0 处理。所有扫描均在本地只读完成，不上传任何文件。
             </p>
           </div>
@@ -519,35 +541,41 @@
       <section id="panel-history" class="tab-panel" role="tabpanel">
         <div class="filter-bar">
           <div class="seg-group" id="source-seg" role="group" aria-label="数据来源筛选">
-            <button type="button" class="seg-btn active" data-source="all">全部来源</button>
-            <button type="button" class="seg-btn" data-source="desktop">桌面端</button>
-            <button type="button" class="seg-btn" data-source="cli">CLI</button>
+            <button type="button" class="seg-btn active" data-source="all" data-i18n="source.all">全部来源</button>
+            <button type="button" class="seg-btn" data-source="desktop" data-i18n="source.desktop">桌面端</button>
+            <button type="button" class="seg-btn" data-source="cli" data-i18n="source.cli">CLI</button>
           </div>
-          <span id="hist-source-meta" class="muted xs num">—</span>
+          <div class="filter-bar-right">
+            <span id="hist-source-meta" class="muted xs num">—</span>
+            <div class="export-btn-group" role="group" aria-label="导出统计台账">
+              <button id="btn-export-csv" type="button" class="ghost-btn xs export-btn" title="导出当前筛选来源的脱敏 CSV 账本" data-i18n-title="hist.exportCsv.title">CSV</button>
+              <button id="btn-export-json" type="button" class="ghost-btn xs export-btn" title="导出当前筛选来源的脱敏 JSON 账本" data-i18n-title="hist.exportJson.title">JSON</button>
+            </div>
+          </div>
         </div>
 
         <!-- 4 Summary KPI Cards -->
         <div class="kpi-grid">
           <div class="card kpi-card">
-            <div class="kpi-head"><span>累计处理 Token</span><span class="kpi-tag">TOTAL</span></div>
+            <div class="kpi-head"><span data-i18n="kpi.total">累计处理 Token</span><span class="kpi-tag">TOTAL</span></div>
             <div id="kpi-total" class="kpi-val">—</div>
             <div id="kpi-total-sub" class="kpi-sub">—</div>
             <div id="kpi-total-cost" class="kpi-cost">—</div>
           </div>
           <div class="card kpi-card">
-            <div class="kpi-head"><span>今日使用</span><span class="kpi-tag sky">TODAY</span></div>
+            <div class="kpi-head"><span data-i18n="kpi.today">今日使用</span><span class="kpi-tag sky">TODAY</span></div>
             <div id="kpi-today" class="kpi-val">—</div>
             <div id="kpi-today-sub" class="kpi-sub">—</div>
             <div id="kpi-today-cost" class="kpi-cost">—</div>
           </div>
           <div class="card kpi-card">
-            <div class="kpi-head"><span>本月使用</span><span class="kpi-tag">MONTH</span></div>
+            <div class="kpi-head"><span data-i18n="kpi.month">本月使用</span><span class="kpi-tag">MONTH</span></div>
             <div id="kpi-month" class="kpi-val">—</div>
             <div id="kpi-month-sub" class="kpi-sub">—</div>
             <div id="kpi-month-cost" class="kpi-cost">—</div>
           </div>
           <div class="card kpi-card">
-            <div class="kpi-head"><span>年度使用</span><span class="kpi-tag">YEAR</span></div>
+            <div class="kpi-head"><span data-i18n="kpi.year">年度使用</span><span class="kpi-tag">YEAR</span></div>
             <div id="kpi-year" class="kpi-val">—</div>
             <div id="kpi-year-sub" class="kpi-sub">—</div>
             <div id="kpi-year-cost" class="kpi-cost">—</div>
@@ -558,30 +586,30 @@
         <article class="card">
           <div class="chart-toolbar">
             <div class="chart-title-row">
-              <h2 class="card-title">Token 活跃趋势</h2>
+              <h2 class="card-title" data-i18n="hist.trendTitle">Token 活跃趋势</h2>
               <span id="first-use-pill" class="meta-chip">首次记录：—</span>
             </div>
             <div class="seg-group" id="chart-mode-seg" role="tablist" aria-label="图表周期切换">
-              <button type="button" class="seg-btn" data-chart="hourly">24 小时</button>
-              <button type="button" class="seg-btn active" data-chart="daily">每天</button>
-              <button type="button" class="seg-btn" data-chart="weekly">每周</button>
-              <button type="button" class="seg-btn" data-chart="monthly">每月</button>
-              <button type="button" class="seg-btn" data-chart="yearly">今年</button>
-              <button type="button" class="seg-btn" data-chart="cumulative">累计</button>
-              <button type="button" class="seg-btn" data-chart="custom">自定义</button>
+              <button type="button" class="seg-btn" data-chart="hourly" data-i18n="chart.hourly">24 小时</button>
+              <button type="button" class="seg-btn active" data-chart="daily" data-i18n="chart.daily">每天</button>
+              <button type="button" class="seg-btn" data-chart="weekly" data-i18n="chart.weekly">每周</button>
+              <button type="button" class="seg-btn" data-chart="monthly" data-i18n="chart.monthly">每月</button>
+              <button type="button" class="seg-btn" data-chart="yearly" data-i18n="chart.yearly">今年</button>
+              <button type="button" class="seg-btn" data-chart="cumulative" data-i18n="chart.cumulative">累计</button>
+              <button type="button" class="seg-btn" data-chart="custom" data-i18n="chart.custom">自定义</button>
             </div>
           </div>
 
           <div id="heat-nav-row" class="heat-nav-row">
-            <button id="btn-heat-prev" type="button" class="ghost-btn xs" disabled>‹ 前一年</button>
+            <button id="btn-heat-prev" type="button" class="ghost-btn xs" disabled data-i18n="heat.prev">‹ 前一年</button>
             <span id="heat-range-label" class="muted xs num">—</span>
-            <button id="btn-heat-next" type="button" class="ghost-btn xs" disabled>后一年 ›</button>
+            <button id="btn-heat-next" type="button" class="ghost-btn xs" disabled data-i18n="heat.next">后一年 ›</button>
           </div>
 
           <div id="hourly-day-row" class="hourly-day-row hidden">
             <div class="seg-group" id="hourly-day-seg" role="group" aria-label="24 小时日期切换">
-              <button type="button" class="seg-btn active" data-hday="today">今日</button>
-              <button type="button" class="seg-btn" data-hday="yesterday">昨日</button>
+              <button type="button" class="seg-btn active" data-hday="today" data-i18n="hourly.today">今日</button>
+              <button type="button" class="seg-btn" data-hday="yesterday" data-i18n="hourly.yesterday">昨日</button>
             </div>
             <span id="hourly-range-label" class="muted xs num">--</span>
           </div>
@@ -590,29 +618,29 @@
             <div class="custom-range-top">
               <div class="custom-date-inputs">
                 <label class="custom-date-field" title="统计开始日期">
-                  <span>从</span>
+                  <span data-i18n="custom.from">从</span>
                   <input id="custom-start-date" type="date" aria-label="统计开始日期">
                 </label>
-                <span class="muted xs">至</span>
+                <span class="muted xs" data-i18n="custom.to">至</span>
                 <label class="custom-date-field" title="统计结束日期">
                   <input id="custom-end-date" type="date" aria-label="统计结束日期">
                 </label>
               </div>
               <div class="seg-group" id="custom-gran-seg" role="group" aria-label="统计聚合粒度">
-                <button type="button" class="seg-btn active" data-cgran="auto">自动</button>
-                <button type="button" class="seg-btn" data-cgran="day">按天</button>
-                <button type="button" class="seg-btn" data-cgran="week">按周</button>
-                <button type="button" class="seg-btn" data-cgran="month">按月</button>
+                <button type="button" class="seg-btn active" data-cgran="auto" data-i18n="custom.gran.auto">自动</button>
+                <button type="button" class="seg-btn" data-cgran="day" data-i18n="custom.gran.day">按天</button>
+                <button type="button" class="seg-btn" data-cgran="week" data-i18n="custom.gran.week">按周</button>
+                <button type="button" class="seg-btn" data-cgran="month" data-i18n="custom.gran.month">按月</button>
               </div>
             </div>
             <div class="custom-range-presets">
               <div class="seg-group" id="custom-preset-seg" role="group" aria-label="快捷日期区间">
-                <button type="button" class="seg-btn" data-cpreset="7d">近 7 天</button>
-                <button type="button" class="seg-btn active" data-cpreset="30d">近 30 天</button>
-                <button type="button" class="seg-btn" data-cpreset="90d">近 90 天</button>
-                <button type="button" class="seg-btn" data-cpreset="mtd">本月</button>
-                <button type="button" class="seg-btn" data-cpreset="prevMonth">上月</button>
-                <button type="button" class="seg-btn" data-cpreset="all">全量</button>
+                <button type="button" class="seg-btn" data-cpreset="7d" data-i18n="custom.preset.7d">近 7 天</button>
+                <button type="button" class="seg-btn active" data-cpreset="30d" data-i18n="custom.preset.30d">近 30 天</button>
+                <button type="button" class="seg-btn" data-cpreset="90d" data-i18n="custom.preset.90d">近 90 天</button>
+                <button type="button" class="seg-btn" data-cpreset="mtd" data-i18n="custom.preset.mtd">本月</button>
+                <button type="button" class="seg-btn" data-cpreset="prevMonth" data-i18n="custom.preset.prevMonth">上月</button>
+                <button type="button" class="seg-btn" data-cpreset="all" data-i18n="custom.preset.all">全量</button>
               </div>
               <span id="custom-range-meta" class="muted xs num">--</span>
             </div>
@@ -624,28 +652,28 @@
 
           <!-- Selected / Hovered Day Inspector -->
           <div id="day-inspector" class="day-inspector">
-            <span class="muted">点击或悬浮任一日期格 / 柱条查看当日输入、缓存、输出与折算明细</span>
+            <span class="muted" data-i18n="hist.inspectorHint">点击或悬浮任一日期格 / 柱条查看当日输入、缓存、输出与折算明细</span>
           </div>
 
           <!-- Period Summary Strip -->
           <div class="summary-ribbon">
-            <div class="rib-cell"><span class="muted">区间合计</span><strong id="sum-tok" class="num">—</strong></div>
-            <div class="rib-cell"><span class="muted">参考折算</span><strong id="sum-cost" class="num">—</strong></div>
-            <div class="rib-cell"><span class="muted">自然日均</span><strong id="sum-daily" class="num">—</strong></div>
-            <div class="rib-cell"><span class="muted">活跃日均</span><strong id="sum-active" class="num">—</strong></div>
-            <div class="rib-cell"><span class="muted">订阅性价比</span><strong id="sum-ratio" class="num accent-text">—</strong></div>
+            <div class="rib-cell"><span class="muted" data-i18n="rib.total">区间合计</span><strong id="sum-tok" class="num">—</strong></div>
+            <div class="rib-cell"><span class="muted" data-i18n="rib.cost">参考折算</span><strong id="sum-cost" class="num">—</strong></div>
+            <div class="rib-cell"><span class="muted" data-i18n="rib.daily">自然日均</span><strong id="sum-daily" class="num">—</strong></div>
+            <div class="rib-cell"><span class="muted" data-i18n="rib.active">活跃日均</span><strong id="sum-active" class="num">—</strong></div>
+            <div class="rib-cell"><span class="muted" data-i18n="rib.ratio">订阅性价比</span><strong id="sum-ratio" class="num accent-text">—</strong></div>
           </div>
 
           <div class="legend-bar">
-            <span class="muted xs">含缓存读取 Token；点击右侧色块可直接自定义色阶</span>
+            <span class="muted xs" data-i18n="hist.legendNote">含缓存读取 Token；点击右侧色块可直接自定义色阶</span>
             <div class="heat-legend" id="heat-legend">
-              <span class="xs muted">少</span>
+              <span class="xs muted" data-i18n="hist.less">少</span>
               <button type="button" class="leg-box" data-leg-slot="0" title="点击修改第 1 档颜色"></button>
               <button type="button" class="leg-box" data-leg-slot="1" title="点击修改第 2 档颜色"></button>
               <button type="button" class="leg-box" data-leg-slot="2" title="点击修改第 3 档颜色"></button>
               <button type="button" class="leg-box" data-leg-slot="3" title="点击修改第 4 档颜色"></button>
               <button type="button" class="leg-box" data-leg-slot="4" title="点击修改第 5 档颜色"></button>
-              <span class="xs muted">多</span>
+              <span class="xs muted" data-i18n="hist.more">多</span>
             </div>
           </div>
         </article>
@@ -654,7 +682,7 @@
         <article id="diagnostics-card" class="card collapsible">
           <button type="button" class="collapse-trigger" data-toggle="diagnostics-body" aria-expanded="false">
             <div class="title-group">
-              <span class="card-title">异常事件与灰度路由取证</span>
+              <span class="card-title" data-i18n="diag.title">异常事件与灰度路由取证</span>
               <span id="diag-source-chip" class="meta-chip">Transcript 模式</span>
               <span id="diag-count-chip" class="meta-chip num">0 条记录</span>
             </div>
@@ -664,8 +692,8 @@
           <div id="diagnostics-body" class="collapse-body hidden">
             <div class="diag-toolbar">
               <div class="seg-group" id="diag-tab-seg" role="tablist" aria-label="取证类别切换">
-                <button type="button" class="seg-btn active" data-dtab="events">异常事件</button>
-                <button type="button" class="seg-btn" data-dtab="routing">灰度路由</button>
+                <button type="button" class="seg-btn active" data-dtab="events" data-i18n="diag.tab.events">异常事件</button>
+                <button type="button" class="seg-btn" data-dtab="routing" data-i18n="diag.tab.routing">灰度路由</button>
               </div>
               <span id="diag-toolbar-meta" class="muted xs num">--</span>
             </div>
@@ -680,10 +708,10 @@
         <article class="card">
           <div class="card-head">
             <div class="title-group">
-              <h2 class="card-title">AI 订阅与额度池状态</h2>
+              <h2 class="card-title" data-i18n="cost.planTitle">AI 订阅与额度池状态</h2>
               <span id="plan-tier-badge" class="status-pill good">读取中</span>
             </div>
-            <button id="btn-toggle-plan-form" type="button" class="ghost-btn xs">自定义订阅设置 ✎</button>
+            <button id="btn-toggle-plan-form" type="button" class="ghost-btn xs" data-i18n="cost.editPlan">自定义订阅设置 ✎</button>
           </div>
 
           <div class="plan-banner">
@@ -702,7 +730,7 @@
           <!-- Model Quota Pools List -->
           <div id="quota-pools-wrap" class="quota-pools-wrap hidden">
             <div class="sub-heading-row">
-              <span class="sub-heading no-margin">实时模型配额池余量</span>
+              <span class="sub-heading no-margin" data-i18n="cost.quotaPoolsTitle">实时模型配额池余量</span>
               <span id="quota-sync-pill" class="status-pill warn hidden"></span>
             </div>
             <div id="quota-pools-list" class="quota-pools-list"></div>
@@ -710,64 +738,64 @@
 
           <!-- Inline Subscription Customizer Form -->
           <form id="plan-form" class="plan-form hidden">
-            <div class="sub-heading no-margin">编辑当前账号订阅与实付参数（仅保存在本机插件目录）</div>
+            <div class="sub-heading no-margin" data-i18n="plan.formTitle">编辑当前账号订阅与实付参数（仅保存在本机插件目录）</div>
             <div class="form-grid">
               <label class="f-field">
-                <span>快捷套用国家 / 地区参考价</span>
+                <span data-i18n="plan.regionPreset">快捷套用国家 / 地区参考价</span>
                 <select id="f-region-preset"></select>
               </label>
               <label class="f-field">
-                <span>获取方式 / 权益渠道</span>
+                <span data-i18n="plan.acquisition">获取方式 / 权益渠道</span>
                 <select id="f-acquisition"></select>
               </label>
               <label class="f-field">
-                <span>账号所属地区（本地备注）</span>
-                <input id="f-account-country" type="text" placeholder="如：美国 (US)">
+                <span data-i18n="plan.accountCountry">账号所属地区（本地备注）</span>
+                <input id="f-account-country" type="text" placeholder="如：美国 (US)" data-i18n-placeholder="plan.accountCountry.ph">
               </label>
               <label class="f-field">
-                <span>自定义渠道名称（选填）</span>
-                <input id="f-acq-name" type="text" placeholder="如：Pixel 11 Pro 赠送">
+                <span data-i18n="plan.acqName">自定义渠道名称（选填）</span>
+                <input id="f-acq-name" type="text" placeholder="如：Pixel 11 Pro 赠送" data-i18n-placeholder="plan.acqName.ph">
               </label>
               <label class="f-field">
-                <span>计价模式</span>
+                <span data-i18n="plan.priceMode">计价模式</span>
                 <select id="f-price-mode">
-                  <option value="preset">跟随所选地区参考价</option>
-                  <option value="custom">手动指定实付金额</option>
+                  <option value="preset" data-i18n="plan.priceMode.preset">跟随所选地区参考价</option>
+                  <option value="custom" data-i18n="plan.priceMode.custom">手动指定实付金额</option>
                 </select>
               </label>
               <label class="f-field">
-                <span>结算币种与实付金额</span>
+                <span data-i18n="plan.currencyPaid">结算币种与实付金额</span>
                 <div class="inline-pair">
                   <select id="f-currency"></select>
-                  <input id="f-paid" type="number" step="0.01" min="0" placeholder="金额">
+                  <input id="f-paid" type="number" step="0.01" min="0" placeholder="金额" data-i18n-placeholder="plan.paid.ph">
                 </div>
               </label>
               <label class="f-field">
-                <span>计费周期</span>
+                <span data-i18n="plan.cycle">计费周期</span>
                 <select id="f-cycle">
-                  <option value="月付">月付</option>
-                  <option value="年付">年付（自动按 1/12 折算月均）</option>
-                  <option value="免费权益">免费 / 活动赠送</option>
+                  <option value="月付" data-i18n="plan.cycle.monthly">月付</option>
+                  <option value="年付" data-i18n="plan.cycle.annual">年付（自动按 1/12 折算月均）</option>
+                  <option value="免费权益" data-i18n="plan.cycle.free">免费 / 活动赠送</option>
                 </select>
               </label>
               <label class="f-field">
-                <span>权益到期日（选填）</span>
+                <span data-i18n="plan.validUntil">权益到期日（选填）</span>
                 <input id="f-valid-until" type="date">
               </label>
             </div>
             <label class="check-row">
               <input id="f-zero-extra" type="checkbox">
-              <span>本权益期内无需额外支付订阅费（实付记为 0）</span>
+              <span data-i18n="plan.zeroExtra">本权益期内无需额外支付订阅费（实付记为 0）</span>
             </label>
             <label class="f-field">
-              <span>备注说明（选填）</span>
-              <input id="f-note" type="text" placeholder="如：家庭组拼车 / 学生优惠首年">
+              <span data-i18n="plan.note">备注说明（选填）</span>
+              <input id="f-note" type="text" placeholder="如：家庭组拼车 / 学生优惠首年" data-i18n-placeholder="plan.note.ph">
             </label>
             <div class="form-actions">
-              <button id="btn-clear-plan" type="button" class="ghost-btn danger xs">清除自定义</button>
+              <button id="btn-clear-plan" type="button" class="ghost-btn danger xs" data-i18n="plan.clear">清除自定义</button>
               <div class="row-gap">
-                <button id="btn-cancel-plan" type="button" class="ghost-btn xs">取消</button>
-                <button type="submit" class="primary-btn xs">保存设置</button>
+                <button id="btn-cancel-plan" type="button" class="ghost-btn xs" data-i18n="plan.cancel">取消</button>
+                <button type="submit" class="primary-btn xs" data-i18n="plan.save">保存设置</button>
               </div>
             </div>
           </form>
@@ -777,23 +805,23 @@
         <article class="card">
           <div class="card-head wrap-gap">
             <div class="title-group">
-              <h2 class="card-title">API 等值参考金额</h2>
-              <span class="meta-chip">API 零售折算 · 非实际账单</span>
+              <h2 class="card-title" data-i18n="cost.refTitle">API 等值参考金额</h2>
+              <span class="meta-chip" data-i18n="cost.refChip">API 零售折算 · 非实际账单</span>
             </div>
             <div class="row-gap">
               <div class="seg-group" id="cost-scope-seg">
-                <button type="button" class="seg-btn active" data-scope="period">本期自然月</button>
-                <button type="button" class="seg-btn" data-scope="allTime">全量历史</button>
+                <button type="button" class="seg-btn active" data-scope="period" data-i18n="cost.scope.period">本期自然月</button>
+                <button type="button" class="seg-btn" data-scope="allTime" data-i18n="cost.scope.allTime">全量历史</button>
               </div>
             </div>
           </div>
 
           <div class="mode-row">
-            <span class="muted xs">估值模式</span>
+            <span class="muted xs" data-i18n="cost.modeLabel">估值模式</span>
             <div class="seg-group" id="cost-mode-seg">
-              <button type="button" class="seg-btn active" data-cmode="hybrid">混合精确折算</button>
-              <button type="button" class="seg-btn" data-cmode="identified">仅已识别模型</button>
-              <button type="button" class="seg-btn" data-cmode="reference">统一按 Flash 基准</button>
+              <button type="button" class="seg-btn active" data-cmode="hybrid" data-i18n="cost.mode.hybrid">混合精确折算</button>
+              <button type="button" class="seg-btn" data-cmode="identified" data-i18n="cost.mode.identified">仅已识别模型</button>
+              <button type="button" class="seg-btn" data-cmode="reference" data-i18n="cost.mode.reference">统一按 Flash 基准</button>
             </div>
           </div>
 
@@ -816,12 +844,12 @@
             </div>
             <div class="dual-bars">
               <div class="dual-row">
-                <span class="dual-lbl">API 折算</span>
+                <span class="dual-lbl" data-i18n="cost.dual.api">API 折算</span>
                 <div class="thin-track"><div id="bar-api-val" class="thin-fill accent"></div></div>
                 <span id="lbl-api-val" class="dual-num num">—</span>
               </div>
               <div class="dual-row">
-                <span class="dual-lbl">订阅实付</span>
+                <span class="dual-lbl" data-i18n="cost.dual.sub">订阅实付</span>
                 <div class="thin-track"><div id="bar-sub-val" class="thin-fill muted-fill"></div></div>
                 <span id="lbl-sub-val" class="dual-num num">—</span>
               </div>
@@ -831,34 +859,34 @@
           <!-- 3-Column Category Formula Breakdown -->
           <div class="three-grid">
             <div class="stat-tile">
-              <span class="m-label">输入 Token</span>
+              <span class="m-label" data-i18n="cost.cat.in">输入 Token</span>
               <span id="cat-in-cost" class="m-val">$0.00</span>
               <span id="cat-in-tok" class="m-sub">0 tok</span>
             </div>
             <div class="stat-tile">
-              <span class="m-label">缓存读取（优惠）</span>
+              <span class="m-label" data-i18n="cost.cat.cache">缓存读取（优惠）</span>
               <span id="cat-cache-cost" class="m-val accent-text">$0.00</span>
               <span id="cat-cache-tok" class="m-sub">0 tok</span>
               <span id="cat-cache-saved" class="m-sub good-text hidden"></span>
             </div>
             <div class="stat-tile">
-              <span class="m-label">输出 Token（含思考）</span>
+              <span class="m-label" data-i18n="cost.cat.out">输出 Token（含思考）</span>
               <span id="cat-out-cost" class="m-val">$0.00</span>
               <span id="cat-out-tok" class="m-sub">0 tok</span>
             </div>
           </div>
 
           <!-- Model Usage Leaderboard -->
-          <div class="sub-heading">分模型消耗与折算分布</div>
+          <div class="sub-heading" data-i18n="cost.modelBoard">分模型消耗与折算分布</div>
           <div id="model-leaderboard" class="model-list"></div>
 
           <!-- Project / Workspace Usage Leaderboard -->
           <div id="project-leaderboard-wrap" class="hidden">
-            <div class="sub-heading">按项目 / 工作区消耗分布</div>
+            <div class="sub-heading" data-i18n="cost.projBoard">按项目 / 工作区消耗分布</div>
             <div id="project-leaderboard" class="model-list"></div>
           </div>
 
-          <p class="fine-print">
+          <p class="fine-print" data-i18n="cost.finePrint">
             注：API 等值金额按 Google / Anthropic 公开标准单价估算（缓存读取按优惠费率计价，输出已含推理思考 Token），仅用于评估使用强度，包月订阅或赠送权益与按量零售并非同类计费，差额不代表实际现金退补。
           </p>
         </article>

@@ -1,17 +1,25 @@
 # agy-plugins ROADMAP
 
-更新时间：2026-11-21 19:46（Asia/Shanghai）。
+更新时间：2026-11-24 23:59（Asia/Shanghai）。
 
 ## 本次交付目标
 
-1. 修复 `context-viewer` 上下文摘要卡片（`#ctx-takeaway`）误用单轮缓存命中率及夸大措辞的问题，统一改用会话平均缓存命中率口径，并发布 `v2026.11.21`（`context-viewer v1.9.0` & `agy-finder v0.2.9`）。
-2. 保留并整合自 `v2026.11.19` 以来的全部成果（`agy-finder` CLI 防误吐 `sidecar://` 双层守卫、`context-viewer` `statusline` 极速短路与超时强杀根治、10 类上下文光谱拆解、模型/工具耗时构成、顶部胶囊透视浮层、会话/分模型平均缓存率、自定义日期趋势、CLI 自动跟随与按项目分组、精细 Protobuf 与官方定价显式同步）。
+1. 参考 `DDG0808/antigravity-viewer-pulse`（严格排除其 `app.asar` / CDP / 二进制补丁等越界注入层），落地 `context-viewer` 纯合规 **P0 + P1 + P2 + Spatial Bento 毛玻璃质感** 优化：
+   - **P0 + P1**：打通 `cacheWriteTokens` 与净缓存收益（含「净增」语义）、兼容 Protobuf/ms 耗时解析与 50 ms `tok/s` 防抖、区分自动压缩与缓存断流、补齐切会话 `AbortController` 竞态与唤醒看门狗、新增 GUI CSV/JSON 账本导出与脱敏 Markdown 遥测快照复制（模型速度对决已按实机反馈移除）。
+   - **P2 + 毛玻璃质感**：配额池基于 `Δtokens / ΔremainingFraction` 的剩余 Token EMA 估算校准（含跨端偏离检测、重置保留与 7d/21d TTL）、OLED / Pitch 纯黑主题、Spatial Bento 毛玻璃质感（纯 `--cv-*` 变量、独立 `body::before` 环境微光与 `.top-bar::before` 防 WKWebView 脏绘隔离，支持「毛玻璃 / 实色」切换及 `prefers-reduced-transparency` 降级）与前端中/英双语切换。
+2. 保持全仓零外部依赖、`--cv-*` 样式隔离、零外链及隐私门禁通过。
 
 ## 后置与挂起事项
 
+- **待 boss 确认下一步**：按需升版（如 `v1.10.0`）、同步中英文 README 并发布 GitHub Release。
 - **挂起：`agy-fork` / `agy-session`（`agy` CLI 无损会话分叉插件）**：调研确认底层依赖宿主 `ForkConversation` / `UpdateConversationAnnotations` RPC（需处理 `invoke_subagent` 前轮回退），但经 boss 确认当前非刚需且预计官方原生推出，暂挂起不立项。
 
 ## 当前阶段与状态
+
+- **已完成 `context-viewer` 参考 `antigravity-viewer-pulse` 的 P0 + P1 + P2 + 毛玻璃质感合规优化与实机反馈修复、全仓严格校验、打包验证及本机 `./install.sh context-viewer` 热同步（同步 `main`）**：
+  - **后端采集与计价升级**（[pricing.mjs](./plugins/agy-context-viewer/sidecars/dashboard/pricing.mjs)、[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs)）：补全 `cacheWriteTokens` 全链路传播与 Claude `1.25x` 写入溢价扣减（保留负净收益 `cacheSavingsUSD`、`pricedCacheWriteCostUSD` 及 `byCategory.cacheWriteTokens`）；增强 `parseDurationSec()` 支持 Protobuf `{ seconds, nanos }` 与 `ms` 字符串，并为服务端 `tps`/`effectiveTps` 加入 `>= 0.05s` 防抖底限；新增 `annotateTurnsCompactionAndCacheBreak()` 与 `context.cacheStatus` 区分自动压缩与突发缓存断流（压缩不再误报冷启动）；新增 `updateQuotaCapacityCalibration()` / `buildQuotaCalibrationSnapshot()`（`quota_capacity_cal_v1.json` 持久化，EMA `0.6/0.4`、跨端偏离检测、配额重置保留已学总量、5h 7d / weekly 21d TTL，`statusline` 快速路径零额外 I/O）及 `saveSettings()` 对 `themeMode` (`oled`) / `glass` / `lang` 校验；已彻底清理 `speedDuel` 冗余聚合。
+  - **前端竞态防护、导出、OLED/毛玻璃与双语**（[index.html](./plugins/agy-context-viewer/sidecars/dashboard/index.html)、[styles.css](./plugins/agy-context-viewer/sidecars/dashboard/styles.css)、[app.js](./plugins/agy-context-viewer/sidecars/dashboard/app.js)）：`loadContext()` 补齐 `AbortController` 切会话中止与 25s 休眠挂起看门狗；统一 `fmtCacheSavings()` 在净收益为负时展示「净增」；轮次时间线与 Hero 呈现「自动压缩 -X%」vs「缓存断流」及 `cacheWriteTokens` 明细；顶栏新增 `#btn-copy-md` 一键复制脱敏 Markdown 遥测摘要；趋势页新增 `#btn-export-csv`（UTF-8 BOM + 防公式注入）与 `#btn-export-json`（已移除 `#speed-duel-card`），并修复热力图首列相邻月份标签重叠（如 `1112月`）；新增 `:root[data-force-mode="oled"]` 纯黑主题、`:root[data-glass="on"|"off"]` 增强版 Spatial Bento 毛玻璃质感（通过 `body::before` 固定环境微光层、移除 `.top-bar`/`.top-bar::before` 的 `backdrop-filter` 并引入页内主题跟随防溢出提示 `#cv-tooltip` 彻底根治 macOS WKWebView 悬停灰块脏绘，采用「外层清晰冷灰细描边 + 内层顶部玻璃高光」双层边界强化卡片/指标卡/汇总带与热力图空格轮廓，支持 `prefers-reduced-transparency` 降级）、Tab 1 / Tab 3 配额池 EMA 余量估算展示及 `200` 键全覆盖前端中/英切换（默认中文，全程 `--cv-*` 隔离与零外链）。
+  - **校验与打包**（[context-viewer/scripts/verify.mjs](./plugins/agy-context-viewer/scripts/verify.mjs)）：校准 10 类 SQLite 断言（`catSum === 5000`），补充 P0 + P1 + P2 全部回归断言（含 EMA 校准、偏好校验、OLED/毛玻璃选择器与 `data-i18n` 全键覆盖）；最近验证：`node scripts/verify.mjs --strict-git-identity` 与 `node scripts/package-all.mjs` 全部通过（2026-11-24 23:46）。
 
 - **已完成 `context-viewer v1.9.0` & `agy-finder v0.2.9`（`v2026.11.21`）收口升级，准备提交、推送并发布 GitHub Release**：
   - **`context-viewer` 摘要文案与缓存口径修复**（[app.js](./plugins/agy-context-viewer/sidecars/dashboard/app.js)、[context-viewer/scripts/verify.mjs](./plugins/agy-context-viewer/scripts/verify.mjs)）：移除健康态夸大文案（`缓存命中高达 XX%，显著降低首字延迟与折算成本` / `上下文容量充裕...`），将健康态与 72% 警戒态的 `#ctx-takeaway` 统一改用会话平均缓存命中率 `st.cacheHitPercent`（含轮次），补充单轮 `98.2%` vs 会话平均 `34.5%` 回归断言。

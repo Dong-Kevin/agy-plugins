@@ -10267,7 +10267,8 @@ async function verifyTelemetryCategoriesAndPopover(cvHtmlSource, cvAppSource) {
       const catSum = (vmSnap?.context?.breakdown?.categories || []).reduce((s, c) => s + (c.tokens || 0), 0);
       assert(
         vmSnap?.context?.breakdown?.calibrated === true &&
-          catSum === 4400 &&
+          catSum === 5000 &&
+          vmSnap.context.sessionTotals?.cacheWriteTokens === 600 &&
           vmSnap.context.sessionTotals?.cacheWrittenTokens === 650 &&
           vmSnap.context.sessionTotals?.retryTokens === 650 &&
           vmSnap.context.sessionTotals?.retryCalls === 1 &&
@@ -10525,6 +10526,185 @@ async function verifyTelemetryCategoriesAndPopover(cvHtmlSource, cvAppSource) {
       popEl.classList.contains('hidden') && capSpeed.getAttribute('aria-expanded') === 'false',
       '再次点击已钉住胶囊应关闭 #cap-popover'
     );
+
+    // P0 + P1 regression checks: cacheWrite net savings, parseDurationSec, compaction vs cache-break, export DOM
+    {
+      const dashDir = join(ROOT, 'sidecars', 'dashboard');
+      const pricingUrl = pathToFileURL(join(dashDir, 'pricing.mjs')).href;
+      const collectorUrl = pathToFileURL(join(dashDir, 'collector.mjs')).href;
+      const { calculateRequestApiCost, summarizeApiCost } = await import(pricingUrl);
+      const { parseDurationSec, annotateTurnsCompactionAndCacheBreak } = await import(collectorUrl);
+
+      const claudeNetNeg = calculateRequestApiCost({
+        model: 'claude-sonnet-5-5',
+        inputTokens: 1000,
+        cacheReadTokens: 1000,
+        cacheWriteTokens: 100000,
+        outputTokens: 500
+      });
+      assert(
+        claudeNetNeg.isPriced === true &&
+          claudeNetNeg.cacheWriteTokens === 100000 &&
+          claudeNetNeg.cacheWriteCostUSD > 0 &&
+          claudeNetNeg.cacheWriteSurchargeUSD > claudeNetNeg.grossCacheSavingsUSD &&
+          claudeNetNeg.cacheSavingsUSD < 0 &&
+          claudeNetNeg.totalTokens === 102500,
+        `Claude cacheWriteTokens 负净收益核算异常：${JSON.stringify(claudeNetNeg)}`
+      );
+      const sumApi = summarizeApiCost([
+        { model: 'claude-sonnet-5-5', inputTokens: 1000, cacheReadTokens: 1000, cacheWriteTokens: 100000, outputTokens: 500 }
+      ]);
+      assert(
+        sumApi.pricedCacheWriteCostUSD > 0 &&
+          sumApi.pricedCacheSavingsUSD < 0 &&
+          sumApi.byCategory?.cacheWriteTokens === 100000 &&
+          sumApi.byModel?.[0]?.cacheWriteTokens === 100000,
+        `summarizeApiCost cacheWriteTokens 汇总异常：${JSON.stringify(sumApi)}`
+      );
+
+      assert(
+        Math.abs(parseDurationSec({ nanos: 450000000 }) - 0.45) < 1e-6 &&
+          Math.abs(parseDurationSec({ seconds: '1', nanos: 250000000 }) - 1.25) < 1e-6 &&
+          Math.abs(parseDurationSec('450ms') - 0.45) < 1e-6 &&
+          Math.abs(parseDurationSec('1.5s') - 1.5) < 1e-6 &&
+          parseDurationSec(-1) === null,
+        'parseDurationSec 未正确解析 Protobuf Duration / ms / 负值边界'
+      );
+
+      const mockTurns = [
+        { turnIndex: 1, stepIndex: 1, inputTokens: 5000, cacheTokens: 20000, cacheWriteTokens: 0, outputTokens: 500, totalTokens: 25500, cacheHitPercent: 80.0 },
+        { turnIndex: 2, stepIndex: 2, inputTokens: 8000, cacheTokens: 0, cacheWriteTokens: 0, outputTokens: 400, totalTokens: 8400, cacheHitPercent: 0.0 },
+        { turnIndex: 3, stepIndex: 3, inputTokens: 2000, cacheTokens: 12000, cacheWriteTokens: 0, outputTokens: 300, totalTokens: 14300, cacheHitPercent: 85.7 },
+        { turnIndex: 4, stepIndex: 4, inputTokens: 14000, cacheTokens: 500, cacheWriteTokens: 0, outputTokens: 300, totalTokens: 14800, cacheHitPercent: 3.4 }
+      ];
+      annotateTurnsCompactionAndCacheBreak(mockTurns, []);
+      assert(
+        mockTurns[1].isCompacted === true &&
+          mockTurns[1].isCacheBreak === false &&
+          mockTurns[3].isCompacted === false &&
+          mockTurns[3].isCacheBreak === true &&
+          mockTurns[3].cacheBreakPrevPercent === 85.7,
+        `压缩与缓存断流消歧异常：${JSON.stringify(mockTurns.map((t) => ({ i: t.turnIndex, c: t.isCompacted, b: t.isCacheBreak })))}`
+      );
+
+      const htmlSrc = readFileSync(join(dashDir, 'index.html'), 'utf-8');
+      const cssSrc = readFileSync(join(dashDir, 'styles.css'), 'utf-8');
+      const appSrc = readFileSync(join(dashDir, 'app.js'), 'utf-8');
+      assert(
+        htmlSrc.includes('id="btn-copy-md"') &&
+          htmlSrc.includes('id="btn-export-csv"') &&
+          htmlSrc.includes('id="btn-export-json"'),
+        'index.html 缺少 P1 导出/摘要复制 DOM 入口'
+      );
+
+      // P2 regression checks: Quota Pool EMA calibration, preferences sanitization, OLED + Glassmorphism + i18n coverage
+      const {
+        updateQuotaCapacityCalibration,
+        buildQuotaCalibrationSnapshot,
+        saveSettings
+      } = await import(collectorUrl);
+      const calStore = { version: 1, entries: {} };
+      const t0 = 1_750_000_000_000;
+      const r0 = updateQuotaCapacityCalibration(
+        calStore,
+        { poolId: 'pool:claude', windowKey: '5h', remainingFraction: 1.0, totalTokens: 500_000, resetTime: '2026-11-24T15:00:00Z' },
+        t0
+      );
+      assert(r0.changed === true && r0.calibration === null, 'EMA 首次基线观测不应立即产生估算值');
+      const r1 = updateQuotaCapacityCalibration(
+        calStore,
+        { poolId: 'pool:claude', windowKey: '5h', remainingFraction: 0.95, totalTokens: 600_000, resetTime: '2026-11-24T15:00:00Z' },
+        t0 + 60_000
+      );
+      assert(
+        r1.calibration?.estTotalTokens === 2_000_000 &&
+          r1.calibration?.estRemainingTokens === 1_900_000 &&
+          r1.calibration?.samples === 1 &&
+          r1.calibration?.confidence === 'low',
+        `EMA 首次校准计算异常：${JSON.stringify(r1.calibration)}`
+      );
+      const r2 = updateQuotaCapacityCalibration(
+        calStore,
+        { poolId: 'pool:claude', windowKey: '5h', remainingFraction: 0.90, totalTokens: 750_000, resetTime: '2026-11-24T15:00:00Z' },
+        t0 + 120_000
+      );
+      assert(
+        r2.calibration?.estTotalTokens === 2_400_000 && r2.calibration?.samples === 2,
+        `EMA 二次平滑计算异常：${JSON.stringify(r2.calibration)}`
+      );
+      const r3 = updateQuotaCapacityCalibration(
+        calStore,
+        { poolId: 'pool:claude', windowKey: '5h', remainingFraction: 0.85, totalTokens: 870_000, resetTime: '2026-11-24T15:00:00Z' },
+        t0 + 180_000
+      );
+      assert(
+        r3.calibration?.samples === 3 && r3.calibration?.confidence === 'high',
+        `EMA 三次采样置信度应升至 high：${JSON.stringify(r3.calibration)}`
+      );
+      const rDiv = updateQuotaCapacityCalibration(
+        calStore,
+        { poolId: 'pool:claude', windowKey: '5h', remainingFraction: 0.80, totalTokens: 870_100, resetTime: '2026-11-24T15:00:00Z' },
+        t0 + 240_000
+      );
+      assert(
+        rDiv.calibration?.diverged === true && rDiv.calibration?.estTotalTokens === 2_400_000,
+        `EMA 跨端偏离检测异常：${JSON.stringify(rDiv.calibration)}`
+      );
+      const rReset = updateQuotaCapacityCalibration(
+        calStore,
+        { poolId: 'pool:claude', windowKey: '5h', remainingFraction: 1.0, totalTokens: 870_100, resetTime: '2026-11-24T20:00:00Z' },
+        t0 + 300_000
+      );
+      assert(
+        rReset.calibration?.diverged === false && rReset.calibration?.estTotalTokens === 2_400_000,
+        `EMA 配额重置应清除 diverged 并保留已学总量：${JSON.stringify(rReset.calibration)}`
+      );
+      const expiredSnap = buildQuotaCalibrationSnapshot(
+        calStore,
+        'pool:claude',
+        '5h',
+        0.5,
+        t0 + 8 * 24 * 3600 * 1000
+      );
+      assert(expiredSnap === null, 'EMA 5h 校准超过 7 天 TTL 后应过期失效');
+
+      const savedP2 = await saveSettings({ uiPreferences: { themeMode: 'oled', glass: false, lang: 'en' } });
+      assert(
+        savedP2.uiPreferences?.themeMode === 'oled' &&
+          savedP2.uiPreferences?.glass === false &&
+          savedP2.uiPreferences?.lang === 'en',
+        `saveSettings P2 偏好保存异常：${JSON.stringify(savedP2.uiPreferences)}`
+      );
+      const savedFallback = await saveSettings({ uiPreferences: { themeMode: 'invalid-mode', lang: 'xx' } });
+      assert(
+        savedFallback.uiPreferences?.themeMode === 'auto' && savedFallback.uiPreferences?.lang === 'zh',
+        `saveSettings 非法 themeMode/lang 应回退默认值：${JSON.stringify(savedFallback.uiPreferences)}`
+      );
+
+      assert(
+        htmlSrc.includes('data-theme-mode="oled"') &&
+          htmlSrc.includes('id="glass-seg"') &&
+          htmlSrc.includes('id="lang-seg"') &&
+          htmlSrc.includes('id="ctx-quota-cal"') &&
+          htmlSrc.includes('data-glass="on"'),
+        'index.html 缺少 P2 OLED / 毛玻璃 / 语言切换或 EMA 校准 DOM 入口'
+      );
+      assert(
+        cssSrc.includes(':root[data-force-mode="oled"]') &&
+          cssSrc.includes(':root[data-glass="on"]') &&
+          cssSrc.includes(':root[data-glass="off"]') &&
+          cssSrc.includes('prefers-reduced-transparency: reduce') &&
+          cssSrc.includes('.quota-cal-line'),
+        'styles.css 缺少 P2 OLED / 毛玻璃 / 透明降级或 EMA 样式规则'
+      );
+      const i18nKeys = new Set();
+      for (const m of htmlSrc.matchAll(/data-i18n(?:-(?:title|placeholder))?="([^"]+)"/g)) {
+        i18nKeys.add(m[1]);
+      }
+      assert(i18nKeys.size >= 100, `index.html data-i18n 键覆盖不足：${i18nKeys.size}`);
+      const missingI18n = [...i18nKeys].filter((k) => !appSrc.includes(`'${k}':`) && !appSrc.includes(`"${k}":`));
+      assert(missingI18n.length === 0, `app.js I18N_EN 缺少映射键：${missingI18n.slice(0, 10).join(', ')}`);
+    }
   } finally {
     for (const [k, v] of Object.entries(savedEnv)) {
       if (v === undefined) delete process.env[k];

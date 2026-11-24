@@ -80,7 +80,8 @@ const TEXT_EXTENSIONS = new Set([
 
 // Caches
 const fileAuditCache = new Map();       // "realPath|size|mtimeMs" -> attachment result
-const transcriptHistCache = new Map();  // filePath -> { size, mtimeMs, firstDate, rawRecords, stepsNeedingGen }
+const TRANSCRIPT_HIST_CACHE_VERSION = 2;
+const transcriptHistCache = new Map();  // filePath -> { cacheVersion, size, mtimeMs, firstDate, rawRecords, stepsNeedingGen }
 const convGenMetaCache = new Map();     // convId -> { at, generatorList, callsByStep }
 const lsGenMissCache = new Map();       // convId -> { lsAddr, size, mtimeMs, at, settled }
 const recentConvMetaCache = new Map();  // logPath -> { key, title, lastContextTokens, turnsCount, isSubagent, lastUserInputAtMs, lastModelTurnAtMs, lastStepType, hasUserInput }
@@ -557,12 +558,29 @@ export function formatLocalDateKey(dateObj) {
   return `${y}-${m}-${d}`;
 }
 
-function parseDurationSec(value) {
+export function parseDurationSec(value) {
   if (value === undefined || value === null) return null;
   if (typeof value === 'number') return Number.isFinite(value) && value >= 0 ? value : null;
-  const m = String(value).trim().match(/^([\d.]+)\s*s?$/i);
-  if (!m) return null;
-  const n = parseFloat(m[1]);
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    const hasSeconds = value.seconds !== undefined && value.seconds !== null;
+    const hasNanos = value.nanos !== undefined && value.nanos !== null;
+    if (!hasSeconds && !hasNanos) return null;
+    const s = hasSeconds ? Number(value.seconds) : 0;
+    const ns = hasNanos ? Number(value.nanos) : 0;
+    if (!Number.isFinite(s) || !Number.isFinite(ns) || s < 0 || ns < 0) return null;
+    const total = s + ns / 1e9;
+    return Number.isFinite(total) && total >= 0 ? total : null;
+  }
+  const str = String(value).trim();
+  if (!str) return null;
+  const msMatch = str.match(/^([\d.]+)\s*ms$/i);
+  if (msMatch) {
+    const ms = parseFloat(msMatch[1]);
+    return Number.isFinite(ms) && ms >= 0 ? ms / 1000 : null;
+  }
+  const sMatch = str.match(/^([\d.]+)\s*s?$/i);
+  if (!sMatch) return null;
+  const n = parseFloat(sMatch[1]);
   return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
@@ -856,6 +874,314 @@ function hasCrossedQuotaResetBoundary(quotas, cachedAtMs, nowMs) {
     }
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Quota Pool Token Capacity EMA Calibration
+// ---------------------------------------------------------------------------
+
+const QUOTA_CAL_TTL_5H_MS = 7 * 24 * 3600 * 1000;
+const QUOTA_CAL_TTL_WEEKLY_MS = 21 * 24 * 3600 * 1000;
+const QUOTA_CAL_MIN_DELTA_F = 0.02;
+const QUOTA_CAL_MIN_DELTA_TOK = 2000;
+const QUOTA_CAL_MIN_TOTAL = 50_000;
+const QUOTA_CAL_MAX_TOTAL = 500_000_000;
+let quotaCalibrationCache = { path: '', mtimeMs: -1, size: -1, data: null };
+
+export function getQuotaCalibrationPath() {
+  return join(getPluginStateDir(), 'quota_capacity_cal_v1.json');
+}
+
+function loadQuotaCalibrationStore(calPath = getQuotaCalibrationPath(), forMutation = false) {
+  const p = calPath || getQuotaCalibrationPath();
+  let st = null;
+  try {
+    if (existsSync(p)) st = statSync(p);
+  } catch {}
+  const stMtime = st ? st.mtimeMs : -1;
+  const stSize = st ? st.size : -1;
+  if (
+    quotaCalibrationCache.path === p &&
+    quotaCalibrationCache.mtimeMs === stMtime &&
+    quotaCalibrationCache.size === stSize &&
+    quotaCalibrationCache.data
+  ) {
+    return forMutation ? structuredClone(quotaCalibrationCache.data) : quotaCalibrationCache.data;
+  }
+  const raw = readJsonSafe(p, { version: 1, entries: {} });
+  const entries = (
+    raw &&
+    typeof raw === 'object' &&
+    !Array.isArray(raw) &&
+    raw.entries &&
+    typeof raw.entries === 'object' &&
+    !Array.isArray(raw.entries)
+  )
+    ? raw.entries
+    : {};
+  const data = { version: 1, entries };
+  quotaCalibrationCache = { path: p, mtimeMs: stMtime, size: stSize, data };
+  return forMutation ? structuredClone(data) : data;
+}
+
+function formatQuotaCalibrationResult(entry, remainingFraction) {
+  if (!entry || typeof entry !== 'object') return null;
+  const hasEma = typeof entry.emaTotalTokens === 'number' && Number.isFinite(entry.emaTotalTokens) && entry.emaTotalTokens > 0;
+  const diverged = Boolean(entry.diverged);
+  if (!hasEma && !diverged) return null;
+  const samples = Number(entry.samples) > 0 ? Number(entry.samples) : 0;
+  const hasFrac = typeof remainingFraction === 'number' && Number.isFinite(remainingFraction) && remainingFraction >= 0 && remainingFraction <= 1;
+  return {
+    estTotalTokens: hasEma ? entry.emaTotalTokens : null,
+    estRemainingTokens: (hasEma && hasFrac)
+      ? Math.max(0, Math.round(entry.emaTotalTokens * Math.max(0, Math.min(1, remainingFraction))))
+      : null,
+    samples,
+    updatedAt: entry.updatedAt || null,
+    diverged,
+    confidence: samples >= 3 ? 'high' : (samples >= 1 ? 'low' : 'none')
+  };
+}
+
+export function updateQuotaCapacityCalibration(store, observation, nowMs = Date.now()) {
+  if (!store || typeof store !== 'object') {
+    return { changed: false, calibration: null };
+  }
+  if (!store.entries || typeof store.entries !== 'object' || Array.isArray(store.entries)) {
+    store.entries = {};
+  }
+  if (store.version == null) {
+    store.version = 1;
+  }
+  const { poolId, windowKey, remainingFraction, totalTokens, resetTime } = observation || {};
+  const safePoolId = typeof poolId === 'string'
+    ? poolId.trim()
+    : (typeof poolId === 'number' && Number.isFinite(poolId) ? String(poolId) : '');
+  if (
+    !safePoolId ||
+    (windowKey !== '5h' && windowKey !== 'weekly' && windowKey !== 'base') ||
+    !Number.isFinite(remainingFraction) ||
+    remainingFraction < 0 ||
+    remainingFraction > 1 ||
+    !Number.isFinite(totalTokens) ||
+    totalTokens < 0
+  ) {
+    return { changed: false, calibration: null };
+  }
+
+  const tsNow = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const key = `${safePoolId}|${windowKey}`;
+  let entry = store.entries[key];
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+    entry = {};
+    store.entries[key] = entry;
+  }
+  const ttlMs = windowKey === 'weekly' ? QUOTA_CAL_TTL_WEEKLY_MS : QUOTA_CAL_TTL_5H_MS;
+  let changed = false;
+
+  if (entry.emaTotalTokens > 0 && entry.updatedAt && (tsNow - entry.updatedAt > ttlMs)) {
+    entry.emaTotalTokens = null;
+    entry.samples = 0;
+    entry.updatedAt = null;
+    changed = true;
+  }
+
+  const prevObs = entry.lastObs && typeof entry.lastObs === 'object' ? entry.lastObs : null;
+  const nextResetTime = resetTime || null;
+  if (
+    prevObs && (
+      (nextResetTime && prevObs.resetTime && nextResetTime !== prevObs.resetTime) ||
+      remainingFraction > prevObs.fraction + 0.02 ||
+      totalTokens < prevObs.totalTokens
+    )
+  ) {
+    entry.lastObs = { fraction: remainingFraction, totalTokens, ts: tsNow, resetTime: nextResetTime };
+    entry.diverged = false;
+    changed = true;
+  } else if (prevObs) {
+    const deltaF = prevObs.fraction - remainingFraction;
+    const deltaTok = totalTokens - prevObs.totalTokens;
+    if ((deltaF >= 0.03 && deltaTok < 500) || (deltaF >= 0.15 && deltaTok < 2000)) {
+      entry.diverged = true;
+      entry.divergedAt = tsNow;
+      entry.lastObs = { fraction: remainingFraction, totalTokens, ts: tsNow, resetTime: nextResetTime };
+      changed = true;
+    } else if (deltaF >= QUOTA_CAL_MIN_DELTA_F && deltaTok >= QUOTA_CAL_MIN_DELTA_TOK && deltaTok <= 200_000_000) {
+      const sampleTotal = deltaTok / deltaF;
+      if (sampleTotal >= QUOTA_CAL_MIN_TOTAL && sampleTotal <= QUOTA_CAL_MAX_TOTAL) {
+        entry.emaTotalTokens = entry.emaTotalTokens > 0
+          ? Math.round(entry.emaTotalTokens * 0.6 + sampleTotal * 0.4)
+          : Math.round(sampleTotal);
+        entry.samples = (entry.samples || 0) + 1;
+        entry.updatedAt = tsNow;
+        entry.diverged = false;
+      }
+      entry.lastObs = { fraction: remainingFraction, totalTokens, ts: tsNow, resetTime: nextResetTime };
+      changed = true;
+    }
+  } else {
+    entry.lastObs = { fraction: remainingFraction, totalTokens, ts: tsNow, resetTime: nextResetTime };
+    changed = true;
+  }
+
+  return {
+    changed,
+    calibration: formatQuotaCalibrationResult(entry, remainingFraction)
+  };
+}
+
+export function buildQuotaCalibrationSnapshot(store, poolId, windowKey, remainingFraction, nowMs = Date.now()) {
+  if (!store || typeof store !== 'object' || !store.entries || typeof store.entries !== 'object') {
+    return null;
+  }
+  const safePoolId = typeof poolId === 'string'
+    ? poolId.trim()
+    : (typeof poolId === 'number' && Number.isFinite(poolId) ? String(poolId) : '');
+  if (!safePoolId || (windowKey !== '5h' && windowKey !== 'weekly' && windowKey !== 'base')) {
+    return null;
+  }
+  if (
+    remainingFraction !== null &&
+    remainingFraction !== undefined &&
+    (!Number.isFinite(remainingFraction) || remainingFraction < 0 || remainingFraction > 1)
+  ) {
+    return null;
+  }
+  const entry = store.entries[`${safePoolId}|${windowKey}`];
+  if (!entry || typeof entry !== 'object') return null;
+  const tsNow = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const ttlMs = windowKey === 'weekly' ? QUOTA_CAL_TTL_WEEKLY_MS : QUOTA_CAL_TTL_5H_MS;
+  const expired = Boolean(entry.emaTotalTokens > 0 && entry.updatedAt && (tsNow - entry.updatedAt > ttlMs));
+  const viewEntry = expired
+    ? { ...entry, emaTotalTokens: null, samples: 0, updatedAt: null }
+    : entry;
+  return formatQuotaCalibrationResult(viewEntry, remainingFraction);
+}
+
+export function computePoolTokenTotals(byModel = [], modelConfigs = [], quotaSummaryGroups = []) {
+  const totals = new Map();
+  if (!Array.isArray(byModel) || !byModel.length || !Array.isArray(modelConfigs) || !modelConfigs.length) {
+    return totals;
+  }
+  for (const m of byModel) {
+    if (!m || typeof m !== 'object') continue;
+    const tokens = Number(m.tokens || 0);
+    if (!Number.isFinite(tokens) || tokens <= 0) continue;
+    const primaryTarget = (m.modelKey && !String(m.modelKey).startsWith('unpriced:') && m.modelKey !== 'unidentified')
+      ? m.modelKey
+      : (m.displayName || m.modelKey);
+    let q = resolveModelQuota(primaryTarget, modelConfigs, quotaSummaryGroups);
+    if (!q && m.displayName && primaryTarget !== m.displayName) {
+      q = resolveModelQuota(m.displayName, modelConfigs, quotaSummaryGroups);
+    }
+    if (q?.poolId) {
+      totals.set(q.poolId, (totals.get(q.poolId) || 0) + tokens);
+    }
+  }
+  return totals;
+}
+
+export function enrichQuotasWithCalibration(quotas, poolTokenTotals = null, opts = {}) {
+  if (!Array.isArray(quotas) || !quotas.length) return [];
+  const calPath = getQuotaCalibrationPath();
+  const nowMs = Number(opts.nowMs) > 0 ? Number(opts.nowMs) : Date.now();
+  const hasTotalsObj = poolTokenTotals instanceof Map
+    ? poolTokenTotals.size > 0
+    : Boolean(poolTokenTotals && typeof poolTokenTotals === 'object' && Object.keys(poolTokenTotals).length > 0);
+  const store = loadQuotaCalibrationStore(calPath, hasTotalsObj);
+  let anyChanged = false;
+
+  const enriched = quotas.map((pool) => {
+    if (!pool || typeof pool !== 'object') return pool;
+    const rawTok = poolTokenTotals instanceof Map
+      ? poolTokenTotals.get(pool.id)
+      : (poolTokenTotals && typeof poolTokenTotals === 'object' ? poolTokenTotals[pool.id] : undefined);
+    const hasPoolTokens = typeof rawTok === 'number' && Number.isFinite(rawTok) && rawTok >= 0;
+
+    const resolveWin = (windowKey, remainingFraction, resetTime) => {
+      if (hasPoolTokens) {
+        const res = updateQuotaCapacityCalibration(
+          store,
+          { poolId: pool.id, windowKey, remainingFraction, totalTokens: rawTok, resetTime },
+          nowMs
+        );
+        if (res.changed) anyChanged = true;
+        return res.calibration;
+      }
+      return buildQuotaCalibrationSnapshot(store, pool.id, windowKey, remainingFraction, nowMs);
+    };
+
+    const nextPool = { ...pool };
+    if (pool.fiveHour && typeof pool.fiveHour === 'object') {
+      nextPool.fiveHour = {
+        ...pool.fiveHour,
+        calibration: resolveWin('5h', pool.fiveHour.remainingFraction, pool.fiveHour.resetTime)
+      };
+    }
+    if (pool.weekly && typeof pool.weekly === 'object') {
+      nextPool.weekly = {
+        ...pool.weekly,
+        calibration: resolveWin('weekly', pool.weekly.remainingFraction, pool.weekly.resetTime)
+      };
+    }
+    nextPool.calibration = resolveWin(
+      'base',
+      pool.baseRemainingFraction ?? pool.remainingFraction,
+      pool.baseResetTime ?? pool.resetTime
+    );
+    return nextPool;
+  });
+
+  if (anyChanged && opts.persist !== false) {
+    try {
+      writeJsonAtomic(calPath, store);
+      let st = null;
+      try { st = statSync(calPath); } catch {}
+      quotaCalibrationCache = {
+        path: calPath,
+        mtimeMs: st ? st.mtimeMs : -1,
+        size: st ? st.size : -1,
+        data: structuredClone(store)
+      };
+    } catch {}
+  }
+
+  return enriched;
+}
+
+function attachCalibrationToModelQuota(modelQuota, enrichedQuotas, nowMs = Date.now()) {
+  if (!modelQuota || typeof modelQuota !== 'object' || !modelQuota.poolId) return modelQuota;
+  const matchedPool = Array.isArray(enrichedQuotas)
+    ? enrichedQuotas.find((p) => p && p.id === modelQuota.poolId)
+    : null;
+  const store = matchedPool ? null : loadQuotaCalibrationStore(getQuotaCalibrationPath(), false);
+  const baseCal = matchedPool
+    ? (matchedPool.calibration ?? null)
+    : buildQuotaCalibrationSnapshot(
+        store,
+        modelQuota.poolId,
+        'base',
+        modelQuota.baseRemainingFraction ?? modelQuota.remainingFraction,
+        nowMs
+      );
+  const next = { ...modelQuota, calibration: baseCal };
+  if (modelQuota.fiveHour && typeof modelQuota.fiveHour === 'object') {
+    next.fiveHour = {
+      ...modelQuota.fiveHour,
+      calibration: matchedPool?.fiveHour
+        ? (matchedPool.fiveHour.calibration ?? null)
+        : buildQuotaCalibrationSnapshot(store, modelQuota.poolId, '5h', modelQuota.fiveHour.remainingFraction, nowMs)
+    };
+  }
+  if (modelQuota.weekly && typeof modelQuota.weekly === 'object') {
+    next.weekly = {
+      ...modelQuota.weekly,
+      calibration: matchedPool?.weekly
+        ? (matchedPool.weekly.calibration ?? null)
+        : buildQuotaCalibrationSnapshot(store, modelQuota.poolId, 'weekly', modelQuota.weekly.remainingFraction, nowMs)
+    };
+  }
+  return next;
 }
 
 function computeHostStatusTtlMs(options = {}, entry = null, nowMs = Date.now()) {
@@ -2758,6 +3084,9 @@ function findCachedModelBudget(modelKey, modelDisplay, dynamicModelMap = {}) {
   return null;
 }
 
+const VALID_UI_THEME_MODES = new Set(['auto', 'light', 'dark', 'oled']);
+const VALID_UI_LANGS = new Set(['zh', 'en']);
+
 export async function saveSettings(payload = {}) {
   const host = await getHostUserStatus(false, { background: true });
   const settings = loadRawSettings();
@@ -2775,12 +3104,22 @@ export async function saveSettings(payload = {}) {
   }
 
   if (payload.uiPreferences && typeof payload.uiPreferences === 'object') {
-    settings.uiPreferences = {
+    const nextPrefs = {
       ...settings.uiPreferences,
       ...payload.uiPreferences,
       updatedAt: new Date().toISOString()
     };
-    delete settings.uiPreferences.budgetOverride;
+    if (nextPrefs.themeMode !== undefined) {
+      nextPrefs.themeMode = VALID_UI_THEME_MODES.has(nextPrefs.themeMode) ? nextPrefs.themeMode : 'auto';
+    }
+    if (nextPrefs.glass !== undefined) {
+      nextPrefs.glass = Boolean(nextPrefs.glass);
+    }
+    if (nextPrefs.lang !== undefined) {
+      nextPrefs.lang = VALID_UI_LANGS.has(nextPrefs.lang) ? nextPrefs.lang : 'zh';
+    }
+    delete nextPrefs.budgetOverride;
+    settings.uiPreferences = nextPrefs;
   }
 
   writeJsonAtomic(getSettingsPath(), settings);
@@ -3139,23 +3478,34 @@ function resolveThinkingAndResponse(rawThinking, rawResponse, output, sqlUsage) 
 }
 
 function extractStepUsage(step) {
-  if (step?.input_tokens != null || step?.output_tokens != null || step?.cache_read_tokens != null) {
+  if (
+    step?.input_tokens != null ||
+    step?.output_tokens != null ||
+    step?.cache_read_tokens != null ||
+    step?.cache_write_tokens != null ||
+    step?.cache_creation_input_tokens != null
+  ) {
     const input = Number(step.input_tokens || 0);
     const cache = Number(step.cache_read_tokens || 0);
+    const cacheWrite = Math.max(0, Number(step.cache_write_tokens ?? step.cache_creation_input_tokens ?? 0) || 0);
     const output = Number(step.output_tokens || 0);
     const thinking = Number(step.thinking_output_tokens || 0);
-    return { input, cache, output, thinking, response: Math.max(0, output - thinking) };
+    return { input, cache, cacheWrite, output, thinking, response: Math.max(0, output - thinking) };
   }
   const u = step?.chatModel?.usage || step?.usage;
   if (u && typeof u === 'object') {
     const input = Number(u.inputTokens ?? u.input_tokens ?? 0);
     const cache = Number(u.cacheReadTokens ?? u.cache_read_tokens ?? 0);
+    const cacheWrite = Math.max(
+      0,
+      Number(u.cacheWriteTokens ?? u.cacheCreationInputTokens ?? u.cache_creation_input_tokens ?? u.cache_write_tokens ?? 0) || 0
+    );
     const output = Number(u.outputTokens ?? u.output_tokens ?? 0);
     const thinking = Number(u.thinkingOutputTokens ?? u.thinking_output_tokens ?? 0);
     const response = Number(u.responseOutputTokens ?? u.response_output_tokens ?? Math.max(0, output - thinking));
-    return { input, cache, output, thinking, response };
+    return { input, cache, cacheWrite, output, thinking, response };
   }
-  return { input: 0, cache: 0, output: 0, thinking: 0, response: 0 };
+  return { input: 0, cache: 0, cacheWrite: 0, output: 0, thinking: 0, response: 0 };
 }
 
 function isModelTurnStep(step) {
@@ -3165,7 +3515,7 @@ function isModelTurnStep(step) {
   }
   if (type === 'PLANNER_RESPONSE') return true;
   const u = extractStepUsage(step);
-  return (u.input + u.cache + u.output) > 0;
+  return (u.input + u.cache + (u.cacheWrite || 0) + u.output) > 0;
 }
 
 const annotationFileCache = new Map();
@@ -4170,7 +4520,12 @@ function hasCompleteGenStepMetrics(entry, sMeta = null) {
   const hasModel = Boolean(extractStepModel(null, entry, ''));
   const usage = getGenStepServerUsage(entry);
   const srvTotal = usage
-    ? (Number(usage.inputTokens || 0) + Number(usage.cacheReadTokens || 0) + Number(usage.outputTokens || 0))
+    ? (
+        Number(usage.inputTokens || 0) +
+        Number(usage.cacheReadTokens || 0) +
+        Math.max(0, Number(usage.cacheWriteTokens ?? usage.cacheCreationInputTokens ?? usage.cache_creation_input_tokens ?? usage.cache_write_tokens ?? 0) || 0) +
+        Number(usage.outputTokens || 0)
+      )
     : 0;
   return hasModel && srvTotal > 0;
 }
@@ -5232,7 +5587,7 @@ function buildCompactionsList(rawSteps = [], turns = [], sqliteCompactionSteps =
       ? '检测到上下文自动压缩（SQLite 压缩节点）'
       : '检测到上下文压缩检查点';
     const rawText = (ev.rawSummary || '').trim() || fallbackText;
-    resolved.push({
+    const item = {
       stepIndex: ev.stepIndex,
       createdAt: ev.createdAt || nextTurn?.createdAt || prevTurn?.createdAt || '',
       beforeTokens,
@@ -5241,7 +5596,12 @@ function buildCompactionsList(rawSteps = [], turns = [], sqliteCompactionSteps =
       savedPercent,
       summaryPreview: sanitizeSqliteText(rawText, 120),
       summaryFull: sanitizeCompactionFull(rawText, 2400)
+    };
+    Object.defineProperty(item, '_compactionMeta', {
+      value: { isExplicit: true, matchedTurnIndex: nextTurn?.turnIndex ?? null },
+      enumerable: false
     });
+    resolved.push(item);
   }
 
   // 3. Large context drop turns (deltaTokens <= -10000) not already matched by a checkpoint
@@ -5260,7 +5620,7 @@ function buildCompactionsList(rawSteps = [], turns = [], sqliteCompactionSteps =
       ? Number(cur.stepIndex)
       : cur.turnIndex;
     const fallbackText = `上下文窗口从 ${beforeTokens.toLocaleString()} 回落至 ${afterTokens.toLocaleString()} tokens（释放 ${savedTokens.toLocaleString()} tokens）`;
-    resolved.push({
+    const item = {
       stepIndex,
       createdAt: cur.createdAt || '',
       beforeTokens,
@@ -5269,15 +5629,98 @@ function buildCompactionsList(rawSteps = [], turns = [], sqliteCompactionSteps =
       savedPercent,
       summaryPreview: sanitizeSqliteText(fallbackText, 120),
       summaryFull: sanitizeCompactionFull(fallbackText, 2400)
+    };
+    Object.defineProperty(item, '_compactionMeta', {
+      value: { isExplicit: false, matchedTurnIndex: cur.turnIndex },
+      enumerable: false
     });
+    resolved.push(item);
   }
 
   resolved.sort((a, b) => (a.stepIndex - b.stepIndex) || String(a.createdAt).localeCompare(String(b.createdAt)));
-  const numbered = resolved.map((item, idx) => ({
-    index: idx + 1,
-    ...item
-  }));
+  const numbered = resolved.map((item, idx) => {
+    const out = {
+      index: idx + 1,
+      ...item
+    };
+    if (item._compactionMeta) {
+      Object.defineProperty(out, '_compactionMeta', {
+        value: item._compactionMeta,
+        enumerable: false
+      });
+    }
+    return out;
+  });
   return numbered.slice(-20).reverse();
+}
+
+export function annotateTurnsCompactionAndCacheBreak(turns = [], compactions = []) {
+  if (!Array.isArray(turns) || !turns.length) return turns;
+
+  const explicitCompacted = new Map();
+  if (Array.isArray(compactions)) {
+    for (const c of compactions) {
+      if (!c || typeof c !== 'object') continue;
+      if (c._compactionMeta && c._compactionMeta.isExplicit === false) continue;
+      const savedPct = Number(c.savedPercent || 0);
+      let matchedIdx = -1;
+      const targetTurnIdx = c._compactionMeta?.matchedTurnIndex ?? c.turnIndex ?? null;
+      if (targetTurnIdx != null && Number.isFinite(Number(targetTurnIdx))) {
+        matchedIdx = turns.findIndex((t, idx) => (t.turnIndex ?? (idx + 1)) === Number(targetTurnIdx));
+      }
+      if (matchedIdx < 0 && c.stepIndex != null && Number.isFinite(Number(c.stepIndex))) {
+        const cStep = Number(c.stepIndex);
+        matchedIdx = turns.findIndex((t) => t.stepIndex != null && Number(t.stepIndex) === cStep);
+        if (matchedIdx < 0) {
+          matchedIdx = turns.findIndex((t) => t.stepIndex != null && Number(t.stepIndex) > cStep);
+        }
+      }
+      if (matchedIdx >= 0) {
+        const prevPct = explicitCompacted.get(matchedIdx) || 0;
+        explicitCompacted.set(matchedIdx, Math.max(prevPct, savedPct > 0 ? savedPct : 0));
+      }
+    }
+  }
+
+  for (let i = 0; i < turns.length; i++) {
+    const t = turns[i];
+    if (!t || typeof t !== 'object') continue;
+    const promptTotal = (t.inputTokens || 0) + (t.cacheTokens || 0) + (t.cacheWriteTokens || 0);
+    const prev = i > 0 ? turns[i - 1] : null;
+    const prevPrompt = prev
+      ? ((prev.inputTokens || 0) + (prev.cacheTokens || 0) + (prev.cacheWriteTokens || 0))
+      : 0;
+    const hasExplicit = explicitCompacted.has(i);
+    const explicitSavedPct = hasExplicit ? explicitCompacted.get(i) : 0;
+    const heuristicCompacted = Boolean(prevPrompt >= 12000 && promptTotal > 0 && promptTotal < prevPrompt * 0.72);
+
+    if (hasExplicit || heuristicCompacted) {
+      t.isCompacted = true;
+      t.compactionDropPercent = explicitSavedPct > 0
+        ? Number(explicitSavedPct.toFixed(1))
+        : (prevPrompt > promptTotal && prevPrompt > 0
+            ? Number((((prevPrompt - promptTotal) / prevPrompt) * 100).toFixed(1))
+            : 0);
+      t.isCacheBreak = false;
+      t.cacheBreakPrevPercent = null;
+    } else if (
+      prev &&
+      (prev.cacheHitPercent || 0) >= 45 &&
+      promptTotal >= 6000 &&
+      (t.cacheHitPercent || 0) < 10
+    ) {
+      t.isCompacted = false;
+      t.compactionDropPercent = null;
+      t.isCacheBreak = true;
+      t.cacheBreakPrevPercent = prev.cacheHitPercent;
+    } else {
+      t.isCompacted = false;
+      t.compactionDropPercent = null;
+      t.isCacheBreak = false;
+      t.cacheBreakPrevPercent = null;
+    }
+  }
+  return turns;
 }
 
 function resolveProjectNameForConv(convId, summariesById = null) {
@@ -5366,13 +5809,18 @@ export async function scanConversation(requestedConvId = '', options = {}) {
             : {})
         })
       : null;
+    const emptyQuotas = emptyHost
+      ? (lightweight
+          ? (emptyHost.quotas || [])
+          : enrichQuotasWithCalibration(emptyHost.quotas || [], null, { persist: false, nowMs }))
+      : null;
     return {
       ok: true,
       conversationId: null,
       conversationSource: cliMode ? 'cli' : 'desktop',
       pinnedConvId: validatedPinnedConvId || null,
       recentConversations: [],
-      ...(emptyHost ? { quotas: emptyHost.quotas || [], quotaStatus: emptyHost.quotaStatus } : {}),
+      ...(emptyHost ? { quotas: emptyQuotas, quotaStatus: emptyHost.quotaStatus } : {}),
       empty: true,
       etag: 'empty'
     };
@@ -5505,7 +5953,8 @@ export async function scanConversation(requestedConvId = '', options = {}) {
 
   const swarmSig = lightweight ? '' : getFileMtimeSigSafe(join(convBrainDir, '.system_generated', 'swarm', 'members.json'));
   const subagentsSig = lightweight ? '' : getFileMtimeSigSafe(join(convBrainDir, '.system_generated', 'subagents'));
-  const baseSnapKey = lightweight ? '' : `${convId}|${logStatMtime}|${logStatSize}|${convDbSig}|${swarmSig}|${subagentsSig}|${host.sig}|${lsMemHash}|${agDir}|${stateDir}`;
+  const calSig = lightweight ? '' : getFileMtimeSigSafe(getQuotaCalibrationPath());
+  const baseSnapKey = lightweight ? '' : `${convId}|${logStatMtime}|${logStatSize}|${convDbSig}|${swarmSig}|${subagentsSig}|${calSig}|${host.sig}|${lsMemHash}|${agDir}|${stateDir}`;
   const prevHit = lightweight ? null : scanSnapCache.get(convId);
   const sameBaseKey = Boolean(!lightweight && prevHit && prevHit.baseKey === baseSnapKey);
   if (!lightweight && !force && sameBaseKey) {
@@ -5689,7 +6138,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         stepUsage,
         isError: step.status === 'ERROR'
       });
-      if ((stepUsage.input || stepUsage.cache || stepUsage.output) && step.status !== 'ERROR') {
+      if ((stepUsage.input || stepUsage.cache || stepUsage.cacheWrite || stepUsage.output) && step.status !== 'ERROR') {
         lastTranscriptPlannerArrayIdx = i;
       }
       if (step.status === 'ERROR') {
@@ -6010,13 +6459,23 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   let turnCandidateSeq = 0;
 
   const appendFallbackTurnFromTranscriptStep = (s, arrayIdx, fallbackModel) => {
-    const { input, cache, output, thinking: rawThinking, response: rawResponseTokens } = extractStepUsage(s);
-    const total = input + cache + output;
-    if (total <= 0) return;
-
+    const {
+      input,
+      cache,
+      cacheWrite: localCacheWrite,
+      output,
+      thinking: rawThinking,
+      response: rawResponseTokens
+    } = extractStepUsage(s);
     const sIdx = Number(s.step_index ?? arrayIdx);
     const sqlGen = sqliteSignals?.genByStep?.get(sIdx) || null;
     const sqlUsage = sqlGen?.usage || null;
+    const cacheWrite = localCacheWrite > 0
+      ? localCacheWrite
+      : Math.max(0, Number(sqlUsage?.cacheWriteTokens || 0) || 0);
+    const total = input + cache + cacheWrite + output;
+    if (total <= 0) return;
+
     const { thinking, responseTokens } = resolveThinkingAndResponse(rawThinking, rawResponseTokens, output, sqlUsage);
     const sqlModel = sqlGen
       ? String(sqlGen.modelDisplayName || sqlGen.responseModel || sqlGen.model || sqlGen.requestedModel || '').trim()
@@ -6030,13 +6489,13 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       ? (sqlTtft !== null && sqlStreamingSec !== null ? sqlTtft + sqlStreamingSec : (sqlTtft ?? sqlStreamingSec ?? null))
       : estimateStepDuration(rawSteps, arrayIdx, logMtimeMs);
     const tps = hasSqlTiming
-      ? (output > 0 && duration && duration > 0 ? Number((output / duration).toFixed(1)) : null)
+      ? (output > 0 && duration !== null && duration >= 0.05 ? Number((output / duration).toFixed(1)) : null)
       : (output > 0 && duration && duration > 0.1 ? Number((output / duration).toFixed(1)) : null);
     const streamTokBase = thinking > 0 && responseTokens > 0 ? responseTokens : output;
     const streamingTps = streamTokBase > 0 && sqlStreamingSec && sqlStreamingSec >= 0.4
       ? Number((streamTokBase / sqlStreamingSec).toFixed(1))
       : null;
-    const effectiveTps = (output > 0 && sqlTtft !== null && sqlTtft >= 0 && sqlStreamingSec !== null && sqlStreamingSec >= 0 && (sqlTtft + sqlStreamingSec) > 0)
+    const effectiveTps = (output > 0 && sqlTtft !== null && sqlTtft >= 0 && sqlStreamingSec !== null && sqlStreamingSec >= 0 && (sqlTtft + sqlStreamingSec) >= 0.05)
       ? Number((output / (sqlTtft + sqlStreamingSec)).toFixed(1))
       : null;
     const rawModel = extractStepModel(s, null, sqlModel || fallbackModel);
@@ -6048,6 +6507,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         modelKey,
         inputTokens: input,
         cacheTokens: cache,
+        cacheWriteTokens: cacheWrite,
         outputTokens: output,
         thinkingTokens: thinking,
         date: s.created_at
@@ -6057,11 +6517,11 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     if (costInfo.isPriced && costInfo.costUSD) {
       sessionCostUSD += costInfo.costUSD;
     }
-    if (costInfo.isPriced && costInfo.cacheSavingsUSD) {
+    if (costInfo.isPriced && typeof costInfo.cacheSavingsUSD === 'number' && Number.isFinite(costInfo.cacheSavingsUSD)) {
       sessionCacheSavingsUSD += costInfo.cacheSavingsUSD;
     }
     const sMeta = stepMetaMap.get(sIdx);
-    const promptSum = input + cache;
+    const promptSum = input + cache + cacheWrite;
     const turnCachePct = promptSum > 0 ? Number(((cache / promptSum) * 100).toFixed(1)) : 0;
     const sqlBudget = Number(sqlGen?.maxContextTokens || 0) || null;
 
@@ -6082,6 +6542,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       modelKey,
       inputTokens: input,
       cacheTokens: cache,
+      cacheWriteTokens: cacheWrite,
       outputTokens: output,
       thinkingTokens: thinking,
       responseTokens,
@@ -6117,7 +6578,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       for (const n of numericGmSteps) {
         coveredStepNums.add(n);
         const m = stepMetaMap.get(n);
-        if (m && (!matchedLocalMeta || (m.stepUsage && (m.stepUsage.input + m.stepUsage.cache + m.stepUsage.output) > 0))) {
+        if (m && (!matchedLocalMeta || (m.stepUsage && (m.stepUsage.input + m.stepUsage.cache + (m.stepUsage.cacheWrite || 0) + m.stepUsage.output) > 0))) {
           matchedLocalMeta = m;
         }
         const matchedArr = stepArrayIdxByStepNum.has(n) ? stepArrayIdxByStepNum.get(n) : (m?.arrayIdx ?? -1);
@@ -6132,10 +6593,14 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       const srvUsage = getGenStepServerUsage(gm);
       const srvInput = Number(srvUsage?.inputTokens || 0);
       const srvCache = Number(srvUsage?.cacheReadTokens || 0);
+      const srvCacheWrite = Math.max(
+        0,
+        Number(srvUsage?.cacheWriteTokens ?? srvUsage?.cacheCreationInputTokens ?? srvUsage?.cache_creation_input_tokens ?? srvUsage?.cache_write_tokens ?? 0) || 0
+      );
       const srvOutput = Number(srvUsage?.outputTokens || 0);
-      const hasServerUsage = Boolean(srvUsage && (srvInput + srvCache + srvOutput) > 0);
+      const hasServerUsage = Boolean(srvUsage && (srvInput + srvCache + srvCacheWrite + srvOutput) > 0);
       const localUsage = matchedLocalMeta?.stepUsage || sMeta?.stepUsage || null;
-      const hasLocalUsage = Boolean(localUsage && (localUsage.input + localUsage.cache + localUsage.output) > 0);
+      const hasLocalUsage = Boolean(localUsage && (localUsage.input + localUsage.cache + (localUsage.cacheWrite || 0) + localUsage.output) > 0);
       const input = hasServerUsage ? srvInput : (hasLocalUsage ? localUsage.input : 0);
       const cache = hasServerUsage ? srvCache : (hasLocalUsage ? localUsage.cache : 0);
       const output = hasServerUsage ? srvOutput : (hasLocalUsage ? localUsage.output : 0);
@@ -6147,6 +6612,11 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         }
       }
       const sqlUsage = sqlGen?.usage || null;
+      const localCacheWrite = hasLocalUsage ? (localUsage.cacheWrite || 0) : 0;
+      const sqlCacheWrite = Math.max(0, Number(sqlUsage?.cacheWriteTokens || 0) || 0);
+      const cacheWrite = srvCacheWrite > 0
+        ? srvCacheWrite
+        : (localCacheWrite > 0 ? localCacheWrite : sqlCacheWrite);
       const rawThinking = hasServerUsage
         ? Number(srvUsage?.thinkingOutputTokens || 0)
         : (hasLocalUsage ? localUsage.thinking : 0);
@@ -6154,7 +6624,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         ? Number(srvUsage?.responseOutputTokens ?? 0)
         : (hasLocalUsage ? localUsage.response : 0);
       const { thinking, responseTokens } = resolveThinkingAndResponse(rawThinking, rawResponseTokens, output, sqlUsage);
-      const total = input + cache + output;
+      const total = input + cache + cacheWrite + output;
       const timingMeta = matchedLocalMeta || sMeta;
       const rawModel = extractStepModel(null, gm, timingMeta?.stepModel || timingMeta?.runningSettingModel || activeSettingModel);
       const modelKey = normalizeModelId(rawModel, host.dynamicModelMap);
@@ -6175,13 +6645,13 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         ? (ttft !== null && streamingSec !== null ? ttft + streamingSec : (ttft ?? streamingSec ?? null))
         : (timingMeta?.arrayIdx >= 0 ? estimateStepDuration(rawSteps, timingMeta.arrayIdx, logMtimeMs) : null);
       const tps = hasServerTiming
-        ? (output > 0 && duration && duration > 0 ? Number((output / duration).toFixed(1)) : null)
+        ? (output > 0 && duration !== null && duration >= 0.05 ? Number((output / duration).toFixed(1)) : null)
         : (output > 0 && duration && duration > 0.1 ? Number((output / duration).toFixed(1)) : null);
       const streamTokBase = thinking > 0 && responseTokens > 0 ? responseTokens : output;
       const streamingTps = streamTokBase > 0 && streamingSec && streamingSec >= 0.4
         ? Number((streamTokBase / streamingSec).toFixed(1))
         : null;
-      const effectiveTps = (output > 0 && ttft !== null && ttft >= 0 && streamingSec !== null && streamingSec >= 0 && (ttft + streamingSec) > 0)
+      const effectiveTps = (output > 0 && ttft !== null && ttft >= 0 && streamingSec !== null && streamingSec >= 0 && (ttft + streamingSec) >= 0.05)
         ? Number((output / (ttft + streamingSec)).toFixed(1))
         : null;
 
@@ -6191,6 +6661,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
           modelKey,
           inputTokens: input,
           cacheTokens: cache,
+          cacheWriteTokens: cacheWrite,
           outputTokens: output,
           thinkingTokens: thinking,
           date: timingMeta?.createdAt
@@ -6200,11 +6671,11 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       if (costInfo.isPriced && costInfo.costUSD) {
         sessionCostUSD += costInfo.costUSD;
       }
-      if (costInfo.isPriced && costInfo.cacheSavingsUSD) {
+      if (costInfo.isPriced && typeof costInfo.cacheSavingsUSD === 'number' && Number.isFinite(costInfo.cacheSavingsUSD)) {
         sessionCacheSavingsUSD += costInfo.cacheSavingsUSD;
       }
 
-      const promptSum = input + cache;
+      const promptSum = input + cache + cacheWrite;
       const turnCachePct = promptSum > 0 ? Number(((cache / promptSum) * 100).toFixed(1)) : 0;
 
       const ctxMeta = cm.chatStartMetadata?.contextWindowMetadata || null;
@@ -6227,6 +6698,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         modelKey,
         inputTokens: input,
         cacheTokens: cache,
+        cacheWriteTokens: cacheWrite,
         outputTokens: output,
         thinkingTokens: thinking,
         responseTokens,
@@ -6292,7 +6764,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     const latestTurnObj = turns.length ? turns[turns.length - 1] : null;
     const latestValidTurnForCalib = [...turns].reverse().find((t) => t.totalTokens > 0 && !t.error) || latestTurnObj;
     const actualInputForCalib = latestValidTurnForCalib
-      ? ((latestValidTurnForCalib.inputTokens || 0) + (latestValidTurnForCalib.cacheTokens || 0))
+      ? ((latestValidTurnForCalib.inputTokens || 0) + (latestValidTurnForCalib.cacheTokens || 0) + (latestValidTurnForCalib.cacheWriteTokens || 0))
       : 0;
     latestInFlight = (latestCandidate && latestCandidate.totalTokens <= 0 && !latestCandidate.error)
       ? latestCandidate
@@ -6334,6 +6806,10 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       t.contextBreakdown = idx === turns.length - 1 ? candidateContextBreakdown : null;
     }
   }
+
+  // Compaction history & auto-compaction vs. cache-break disambiguation (runs before prompt-group classification)
+  const compactions = buildCompactionsList(rawSteps, turns, sqliteSignals?.compactionSteps || []);
+  annotateTurnsCompactionAndCacheBreak(turns, compactions);
 
   // Group completed chronological model turns by preceding USER_INPUT for prompt cold/warm/hot startup diagnostics
   const promptGroupsMap = new Map();
@@ -6387,14 +6863,19 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     promptGroupSeq++;
     const firstTurn = grp.turns[0];
     const lastTurn = grp.turns[grp.turns.length - 1];
-    const startTokens = (firstTurn.inputTokens || 0) + (firstTurn.cacheTokens || 0);
+    const startTokens = (firstTurn.inputTokens || 0) + (firstTurn.cacheTokens || 0) + (firstTurn.cacheWriteTokens || 0);
     const startupCacheHitPercent = startTokens > 0
       ? Number((((firstTurn.cacheTokens || 0) / startTokens) * 100).toFixed(1))
       : null;
+    const groupCompactedTurn = firstTurn.isCompacted
+      ? firstTurn
+      : (grp.turns.find((x) => x.isCompacted) || null);
+    const isGroupCompacted = Boolean(groupCompactedTurn);
+    const isGroupCacheBreak = Boolean(grp.turns.some((x) => x.isCacheBreak));
     let startupState = null;
     if (startTokens > 0) {
       if ((firstTurn.cacheTokens || 0) === 0 || startupCacheHitPercent < 25) {
-        startupState = 'cold';
+        startupState = firstTurn.isCompacted ? 'compacted' : 'cold';
       } else if (startupCacheHitPercent < 70) {
         startupState = 'warm';
       } else {
@@ -6432,6 +6913,11 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       promptFull: grp.promptFull,
       startupState,
       startupCacheHitPercent,
+      isCompacted: isGroupCompacted,
+      compactionDropPercent: firstTurn.isCompacted
+        ? (firstTurn.compactionDropPercent ?? null)
+        : (groupCompactedTurn?.compactionDropPercent ?? null),
+      isCacheBreak: isGroupCacheBreak,
       callsCount: grp.turns.length,
       startTokens,
       endTokens,
@@ -6451,7 +6937,10 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         state: latestPromptGroup.startupState,
         cacheHitPercent: latestPromptGroup.startupCacheHitPercent,
         promptIndex: latestPromptGroup.promptIndex,
-        callsCount: latestPromptGroup.callsCount
+        callsCount: latestPromptGroup.callsCount,
+        isCompacted: Boolean(latestPromptGroup.isCompacted),
+        compactionDropPercent: latestPromptGroup.compactionDropPercent ?? null,
+        isCacheBreak: Boolean(latestPromptGroup.isCacheBreak)
       }
     : null;
 
@@ -6515,6 +7004,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     turnsCount: turns.length,
     inputTokens: 0,
     cacheTokens: 0,
+    cacheWriteTokens: 0,
     cacheWrittenTokens: Number(sqlMetrics?.cacheWrittenTokens || 0),
     outputTokens: 0,
     thinkingTokens: 0,
@@ -6530,11 +7020,13 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   for (const t of turns) {
     const tIn = t.inputTokens || 0;
     const tCache = t.cacheTokens || 0;
+    const tCacheWrite = t.cacheWriteTokens || 0;
     const tOut = t.outputTokens || 0;
     const tThink = t.thinkingTokens || 0;
     const tTot = t.totalTokens || 0;
     sessionTotals.inputTokens += tIn;
     sessionTotals.cacheTokens += tCache;
+    sessionTotals.cacheWriteTokens += tCacheWrite;
     sessionTotals.outputTokens += tOut;
     sessionTotals.thinkingTokens += tThink;
     sessionTotals.responseTokens += t.responseTokens || 0;
@@ -6562,6 +7054,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         turnsCount: 0,
         inputTokens: 0,
         cacheTokens: 0,
+        cacheWriteTokens: 0,
         outputTokens: 0,
         thinkingTokens: 0,
         totalTokens: 0,
@@ -6576,6 +7069,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     mAgg.turnsCount += 1;
     mAgg.inputTokens += tIn;
     mAgg.cacheTokens += tCache;
+    mAgg.cacheWriteTokens += tCacheWrite;
     mAgg.outputTokens += tOut;
     mAgg.thinkingTokens += tThink;
     mAgg.totalTokens += tTot;
@@ -6589,7 +7083,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       mAgg.variants.add(rawDisp);
     }
   }
-  const cumPrompt = sessionTotals.inputTokens + sessionTotals.cacheTokens;
+  const cumPrompt = sessionTotals.inputTokens + sessionTotals.cacheTokens + sessionTotals.cacheWriteTokens;
   if (cumPrompt > 0) {
     sessionTotals.cacheHitPercent = Number(((sessionTotals.cacheTokens / cumPrompt) * 100).toFixed(1));
   }
@@ -6688,7 +7182,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     .toLowerCase();
   const sessionModels = [...sessionModelAggMap.values()]
     .map((m) => {
-      const mPrompt = m.inputTokens + m.cacheTokens;
+      const mPrompt = m.inputTokens + m.cacheTokens + m.cacheWriteTokens;
       const isCurrent = Boolean(
         (currentModelKey && m.modelKey && m.modelKey === currentModelKey) ||
         (!currentModelKey && cleanActiveModelDisp && cleanActiveModelDisp !== '未记录模型' && m.displayName.toLowerCase() === cleanActiveModelDisp)
@@ -6699,6 +7193,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         turnsCount: m.turnsCount,
         inputTokens: m.inputTokens,
         cacheTokens: m.cacheTokens,
+        cacheWriteTokens: m.cacheWriteTokens,
         outputTokens: m.outputTokens,
         thinkingTokens: m.thinkingTokens,
         totalTokens: m.totalTokens,
@@ -6783,10 +7278,34 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   const usedPercent = usedTokens !== null && budgetTokens !== null && budgetTokens > 0
     ? Number(((usedTokens / budgetTokens) * 100).toFixed(1))
     : null;
-  const promptTotal = (latestValidTurn?.inputTokens || 0) + (latestValidTurn?.cacheTokens || 0);
+  const promptTotal = (latestValidTurn?.inputTokens || 0) + (latestValidTurn?.cacheTokens || 0) + (latestValidTurn?.cacheWriteTokens || 0);
   const cacheHitPercent = promptTotal > 0
     ? Number((((latestValidTurn?.cacheTokens || 0) / promptTotal) * 100).toFixed(1))
     : null;
+
+  const cacheBreakCount = turns.filter((t) => t.isCacheBreak).length;
+  let cacheStatusState = 'idle';
+  if (!latestValidTurn) {
+    cacheStatusState = 'idle';
+  } else if (latestValidTurn.isCompacted) {
+    cacheStatusState = 'compacted';
+  } else if (latestValidTurn.isCacheBreak) {
+    cacheStatusState = 'drop';
+  } else if (turns.length === 1 && (latestValidTurn.cacheHitPercent || 0) < 10) {
+    cacheStatusState = 'warmup';
+  } else if ((latestValidTurn.cacheHitPercent || 0) >= 50) {
+    cacheStatusState = 'good';
+  } else {
+    cacheStatusState = 'low';
+  }
+  const cacheStatus = {
+    state: cacheStatusState,
+    latestTurnCompacted: Boolean(latestValidTurn?.isCompacted),
+    latestTurnCacheBreak: Boolean(latestValidTurn?.isCacheBreak),
+    compactionDropPercent: latestValidTurn?.compactionDropPercent ?? null,
+    breakPrevHitPercent: latestValidTurn?.cacheBreakPrevPercent ?? null,
+    cacheBreakCount
+  };
 
   const modelQuota = resolveModelQuota(currentModelDisplay, host.modelConfigs, host.quotaSummaryGroups);
   const unknownAttachmentsCount = attachments.filter((a) => a.status !== 'parsed').length;
@@ -6807,8 +7326,10 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       percent: usedPercent,
       inputTokens: latestValidTurn?.inputTokens ?? null,
       cacheTokens: latestValidTurn?.cacheTokens ?? null,
+      cacheWriteTokens: latestValidTurn?.cacheWriteTokens ?? null,
       outputTokens: latestValidTurn?.outputTokens ?? null,
       cacheHitPercent,
+      cacheStatus,
       sessionCostUSD: Number(sessionCostUSD.toFixed(4)),
       latestPromptStartup,
       quota: modelQuota
@@ -7041,9 +7562,6 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       }
     : null;
 
-  // Compaction history & summary drawer
-  const compactions = buildCompactionsList(rawSteps, turns, sqliteSignals?.compactionSteps || []);
-
   // Per-session diagnostics (transcript errors + SQLite events & routing)
   const sessionEventMap = new Map();
   const seenSessionEventReq = new Set();
@@ -7172,11 +7690,13 @@ export async function scanConversation(requestedConvId = '', options = {}) {
 
   const resolvedTitle = conversationTitle || sqlSummaryEntry?.title || `会话 ${convId.slice(0, 8)}`;
   const promptUsed = latestValidTurn
-    ? ((latestValidTurn.inputTokens || 0) + (latestValidTurn.cacheTokens || 0))
+    ? ((latestValidTurn.inputTokens || 0) + (latestValidTurn.cacheTokens || 0) + (latestValidTurn.cacheWriteTokens || 0))
     : null;
   const skillsTokens = (contextBreakdown?.groups?.find((g) => g.key === 'skills' || g.name === 'Skills')?.tokens)
     || (contextBreakdown?.categories?.find((c) => c.key === 'skills' || c.type === 5)?.tokens)
     || 0;
+  const enrichedQuotas = enrichQuotasWithCalibration(host.quotas || [], null, { persist: false, nowMs });
+  const enrichedModelQuota = attachCalibrationToModelQuota(modelQuota, enrichedQuotas, nowMs);
   const contextPayload = {
     model: currentModelDisplay,
     modelKey: currentModelKey,
@@ -7195,18 +7715,20 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     projectedNextPercent: usedPercent,
     inputTokens: latestValidTurn?.inputTokens ?? null,
     cacheTokens: latestValidTurn?.cacheTokens ?? null,
+    cacheWriteTokens: latestValidTurn?.cacheWriteTokens ?? null,
     outputTokens: latestValidTurn?.outputTokens ?? null,
     thinkingTokens: latestValidTurn?.thinkingTokens ?? 0,
     responseTokens: latestValidTurn?.responseTokens ?? (latestValidTurn?.outputTokens ?? 0),
     skillsTokens,
     cacheHitPercent,
+    cacheStatus,
     roundCostUSD: Number((latestValidTurn?.costUSD || 0).toFixed(5)),
     sessionCostUSD: Number(sessionCostUSD.toFixed(4)),
     sessionCacheSavingsUSD: Number(sessionCacheSavingsUSD.toFixed(4)),
     isPriced: Boolean(latestValidTurn?.isPriced),
     latestPromptStartup,
     error: errorInfo,
-    quota: modelQuota,
+    quota: enrichedModelQuota,
     breakdown: contextBreakdown,
     sessionTotals,
     sessionTiming,
@@ -7231,6 +7753,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     total: t.totalTokens,
     delta: t.deltaTokens,
     cache: t.cacheTokens,
+    cacheWrite: t.cacheWriteTokens || 0,
     output: t.outputTokens,
     tps: t.tps,
     costUSD: t.costUSD
@@ -7271,7 +7794,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     sessionDiagnostics,
     quotas: host.quotas || [],
     quotaState: toStableQuotaState(host.quotaStatus),
-    context: contextPayload,
+    context: modelQuota !== enrichedModelQuota ? { ...contextPayload, quota: modelQuota } : contextPayload,
     speed: speedPayload,
     sparkline: sparklinePayload,
     turns: turnsPayload,
@@ -7295,7 +7818,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     compactions,
     sessionDiagnostics,
     recentConversations: enrichedRecentConversations,
-    quotas: host.quotas || [],
+    quotas: enrichedQuotas,
     quotaStatus: host.quotaStatus,
     context: contextPayload,
     speed: speedPayload,
@@ -7764,6 +8287,7 @@ export async function collectTokenHistory(options = {}) {
     total: 0,
     input: 0,
     cache: 0,
+    cacheWrite: 0,
     output: 0,
     steps: 0,
     costUSD: 0
@@ -7774,13 +8298,14 @@ export async function collectTokenHistory(options = {}) {
     cli: { today: createEmpty24h(), yesterday: createEmpty24h() }
   };
 
-  const addHourly = (srcKey, dayBucket, hour, inp, cap, outp, cost) => {
+  const addHourly = (srcKey, dayBucket, hour, inp, cap, outp, cost, cw = 0) => {
     const arr = hourlyBySource[srcKey]?.[dayBucket];
     if (!arr || hour < 0 || hour > 23) return;
     const h = arr[hour];
-    h.total += inp + cap + outp;
+    h.total += inp + cap + cw + outp;
     h.input += inp;
     h.cache += cap;
+    h.cacheWrite += cw;
     h.output += outp;
     h.steps += 1;
     h.costUSD = Number((h.costUSD + cost).toFixed(6));
@@ -7797,12 +8322,13 @@ export async function collectTokenHistory(options = {}) {
     }
   };
 
-  const addDaily = (bucketMap, dateKey, inp, cap, outp, pricedCost, refCost, modelName = '未记录模型') => {
+  const addDaily = (bucketMap, dateKey, inp, cap, outp, pricedCost, refCost, modelName = '未记录模型', cw = 0) => {
     if (!bucketMap[dateKey]) {
       bucketMap[dateKey] = {
         total: 0,
         input: 0,
         cache: 0,
+        cacheWrite: 0,
         output: 0,
         steps: 0,
         costUSD: 0,
@@ -7811,10 +8337,11 @@ export async function collectTokenHistory(options = {}) {
       };
     }
     const b = bucketMap[dateKey];
-    const tok = inp + cap + outp;
+    const tok = inp + cap + cw + outp;
     b.total += tok;
     b.input += inp;
     b.cache += cap;
+    b.cacheWrite += cw;
     b.output += outp;
     b.steps += 1;
     b.costUSD = Number((b.costUSD + pricedCost).toFixed(6));
@@ -7822,12 +8349,13 @@ export async function collectTokenHistory(options = {}) {
     const mName = String(modelName || '未记录模型').trim() || '未记录模型';
     let mEntry = b._byModelMap.get(mName);
     if (!mEntry) {
-      mEntry = { name: mName, tokens: 0, input: 0, cache: 0, steps: 0, costUSD: 0 };
+      mEntry = { name: mName, tokens: 0, input: 0, cache: 0, cacheWrite: 0, steps: 0, costUSD: 0 };
       b._byModelMap.set(mName, mEntry);
     }
     mEntry.tokens += tok;
     mEntry.input += inp;
     mEntry.cache += cap;
+    mEntry.cacheWrite += cw;
     mEntry.steps += 1;
     mEntry.costUSD = Number((mEntry.costUSD + pricedCost).toFixed(6));
   };
@@ -7849,7 +8377,13 @@ export async function collectTokenHistory(options = {}) {
       if (st.mtimeMs > maxJobMtimeMs) maxJobMtimeMs = st.mtimeMs;
       let cached = transcriptHistCache.get(job.path);
 
-      if (!cached || cached.size !== st.size || cached.mtimeMs !== st.mtimeMs || !Array.isArray(cached.errorEvents)) {
+      if (
+        !cached ||
+        cached.cacheVersion !== TRANSCRIPT_HIST_CACHE_VERSION ||
+        cached.size !== st.size ||
+        cached.mtimeMs !== st.mtimeMs ||
+        !Array.isArray(cached.errorEvents)
+      ) {
         const rawRecords = [];
         const errorEvents = [];
         const missingStepSet = new Set();
@@ -7909,8 +8443,8 @@ export async function collectTokenHistory(options = {}) {
           }
 
           if (!isModelTurnStep(ev)) continue;
-          const { input: inp, cache: cap, output: outp, thinking } = extractStepUsage(ev);
-          const tot = inp + cap + outp;
+          const { input: inp, cache: cap, cacheWrite: cw, output: outp, thinking } = extractStepUsage(ev);
+          const tot = inp + cap + cw + outp;
           if (tot <= 0 || !dateKey) continue;
 
           const stepKey = String(stepNum);
@@ -7929,6 +8463,7 @@ export async function collectTokenHistory(options = {}) {
             fallbackRunningModel: activeModel,
             inputTokens: inp,
             cacheTokens: cap,
+            cacheWriteTokens: cw,
             outputTokens: outp,
             thinkingTokens: thinking,
             totalTokens: tot,
@@ -7937,6 +8472,7 @@ export async function collectTokenHistory(options = {}) {
         }
 
         cached = {
+          cacheVersion: TRANSCRIPT_HIST_CACHE_VERSION,
           size: st.size,
           mtimeMs: st.mtimeMs,
           firstDate,
@@ -8084,6 +8620,11 @@ export async function collectTokenHistory(options = {}) {
       const sqlModel = sqlStepGen
         ? String(sqlStepGen.modelDisplayName || sqlStepGen.responseModel || sqlStepGen.model || sqlStepGen.requestedModel || '').trim()
         : '';
+      const recCacheWrite = (rawRec.cacheWriteTokens || 0) > 0
+        ? rawRec.cacheWriteTokens
+        : Math.max(0, Number(sqlStepGen?.usage?.cacheWriteTokens || 0) || 0);
+      const recTotalTokens = rawRec.inputTokens + rawRec.cacheTokens + recCacheWrite + rawRec.outputTokens;
+
       const rec = {
         eventId: rawRec.eventId,
         source: rawRec.source,
@@ -8094,9 +8635,10 @@ export async function collectTokenHistory(options = {}) {
         model: String(gmModel || rawRec.stepOwnModel || sqlModel || rawRec.fallbackRunningModel || '').trim(),
         inputTokens: rawRec.inputTokens,
         cacheTokens: rawRec.cacheTokens,
+        cacheWriteTokens: recCacheWrite,
         outputTokens: rawRec.outputTokens,
         thinkingTokens: rawRec.thinkingTokens,
-        totalTokens: rawRec.totalTokens
+        totalTokens: recTotalTokens
       };
 
       const priced = calculateRequestApiCost(rec, host.dynamicModelMap);
@@ -8107,6 +8649,7 @@ export async function collectTokenHistory(options = {}) {
       const effSavings = priced.isPriced ? (priced.cacheSavingsUSD || 0) : (refCalc.cacheSavingsUSD || 0);
       rec._effCostUSD = effCost;
       rec._effSavingsUSD = effSavings;
+      rec._modelKey = priced.modelKey || normalizeModelId(rec.model, host.dynamicModelMap) || null;
 
       stepCostByNum.set(rawRec.stepNum, effCost);
       stepTimeByNum.set(rawRec.stepNum, { date: rawRec.date, createdAt: rawRec.created_at });
@@ -8114,16 +8657,16 @@ export async function collectTokenHistory(options = {}) {
       const modelDisp = priced.modelDisplayName
         || (rec.model ? formatModelDisplayName(rec.model, priced.modelKey || null) : '未记录模型');
 
-      addDaily(dailyBySource.all, rec.date, rec.inputTokens, rec.cacheTokens, rec.outputTokens, pCost, rCost, modelDisp);
-      addDaily(dailyBySource[rec.source] || dailyBySource.desktop, rec.date, rec.inputTokens, rec.cacheTokens, rec.outputTokens, pCost, rCost, modelDisp);
+      addDaily(dailyBySource.all, rec.date, rec.inputTokens, rec.cacheTokens, rec.outputTokens, pCost, rCost, modelDisp, rec.cacheWriteTokens);
+      addDaily(dailyBySource[rec.source] || dailyBySource.desktop, rec.date, rec.inputTokens, rec.cacheTokens, rec.outputTokens, pCost, rCost, modelDisp, rec.cacheWriteTokens);
 
       if (rec.date === todayKey || rec.date === yesterdayKey) {
         const dt = new Date(rec.created_at);
         if (!Number.isNaN(dt.getTime())) {
           const dayBucket = rec.date === todayKey ? 'today' : 'yesterday';
           const hr = dt.getHours();
-          addHourly('all', dayBucket, hr, rec.inputTokens, rec.cacheTokens, rec.outputTokens, effCost);
-          addHourly(rec.source === 'cli' ? 'cli' : 'desktop', dayBucket, hr, rec.inputTokens, rec.cacheTokens, rec.outputTokens, effCost);
+          addHourly('all', dayBucket, hr, rec.inputTokens, rec.cacheTokens, rec.outputTokens, effCost, rec.cacheWriteTokens);
+          addHourly(rec.source === 'cli' ? 'cli' : 'desktop', dayBucket, hr, rec.inputTokens, rec.cacheTokens, rec.outputTokens, effCost, rec.cacheWriteTokens);
         }
       }
 
@@ -8240,15 +8783,16 @@ export async function collectTokenHistory(options = {}) {
   const buildSourceAnalytics = (srcKey) => {
     const dMap = dailyBySource[srcKey] || {};
     const reqs = requestsBySource[srcKey] || [];
-    let grandTotal = 0, totalInput = 0, totalCache = 0, totalOutput = 0, totalSteps = 0;
+    let grandTotal = 0, totalInput = 0, totalCache = 0, totalCacheWrite = 0, totalOutput = 0, totalSteps = 0;
     let todayTokens = 0, monthTokens = 0, yearTokens = 0;
-    let monthInput = 0, monthCache = 0, monthOutput = 0, monthSteps = 0;
+    let monthInput = 0, monthCache = 0, monthCacheWrite = 0, monthOutput = 0, monthSteps = 0;
     let yearActiveDays = 0, monthActiveDays = 0;
 
     for (const [dKey, v] of Object.entries(dMap)) {
       grandTotal += v.total;
       totalInput += v.input;
       totalCache += v.cache;
+      totalCacheWrite += v.cacheWrite || 0;
       totalOutput += v.output;
       totalSteps += v.steps;
       if (dKey === todayKey) todayTokens += v.total;
@@ -8256,6 +8800,7 @@ export async function collectTokenHistory(options = {}) {
         monthTokens += v.total;
         monthInput += v.input;
         monthCache += v.cache;
+        monthCacheWrite += v.cacheWrite || 0;
         monthOutput += v.output;
         monthSteps += v.steps;
         if (v.total > 0) monthActiveDays++;
@@ -8272,24 +8817,38 @@ export async function collectTokenHistory(options = {}) {
     const identifiedAll = summarizeApiCost(reqs, host.dynamicModelMap);
     const identifiedPeriod = summarizeApiCost(periodReqs, host.dynamicModelMap);
 
-    const refAll = calculateReferenceCost({ inputTokens: totalInput, cacheTokens: totalCache, outputTokens: totalOutput, totalTokens: grandTotal }, 'gemini-3.8-flash', PRICING_VERIFIED_DATE);
-    const refPeriod = calculateReferenceCost({ inputTokens: monthInput, cacheTokens: monthCache, outputTokens: monthOutput, totalTokens: monthTokens }, 'gemini-3.8-flash', PRICING_VERIFIED_DATE);
+    const refAll = calculateReferenceCost(
+      { inputTokens: totalInput, cacheTokens: totalCache, cacheWriteTokens: totalCacheWrite, outputTokens: totalOutput, totalTokens: grandTotal },
+      'gemini-3.8-flash',
+      PRICING_VERIFIED_DATE
+    );
+    const refPeriod = calculateReferenceCost(
+      { inputTokens: monthInput, cacheTokens: monthCache, cacheWriteTokens: monthCacheWrite, outputTokens: monthOutput, totalTokens: monthTokens },
+      'gemini-3.8-flash',
+      PRICING_VERIFIED_DATE
+    );
 
     // Hybrid = identified priced requests + reference rate for residual unpriced tokens
     const buildHybrid = (ident, refBase) => {
       const resIn = Math.max(0, refBase.inputTokens - ident.byCategory.inputTokens);
       const resCache = Math.max(0, refBase.cacheTokens - ident.byCategory.cacheTokens);
+      const resCacheWrite = Math.max(0, (refBase.cacheWriteTokens || 0) - (ident.byCategory.cacheWriteTokens || 0));
       const resOut = Math.max(0, refBase.outputTokens - ident.byCategory.outputTokens);
-      const resCalc = calculateReferenceCost({ inputTokens: resIn, cacheTokens: resCache, outputTokens: resOut }, 'gemini-3.8-flash', PRICING_VERIFIED_DATE);
+      const resCalc = calculateReferenceCost(
+        { inputTokens: resIn, cacheTokens: resCache, cacheWriteTokens: resCacheWrite, outputTokens: resOut },
+        'gemini-3.8-flash',
+        PRICING_VERIFIED_DATE
+      );
       return {
         totalCostUSD: Number((ident.pricedCostUSD + resCalc.totalCostUSD).toFixed(4)),
         inputCostUSD: Number((ident.pricedInputCostUSD + resCalc.inputCostUSD).toFixed(4)),
         cacheCostUSD: Number((ident.pricedCacheCostUSD + resCalc.cacheCostUSD).toFixed(4)),
+        cacheWriteCostUSD: Number(((ident.pricedCacheWriteCostUSD || 0) + (resCalc.cacheWriteCostUSD || 0)).toFixed(4)),
         outputCostUSD: Number((ident.pricedOutputCostUSD + resCalc.outputCostUSD).toFixed(4)),
         cacheSavingsUSD: Number(((ident.pricedCacheSavingsUSD || 0) + (resCalc.cacheSavingsUSD || 0)).toFixed(4)),
         knownCostUSD: ident.pricedCostUSD,
         residualCostUSD: resCalc.totalCostUSD,
-        residualTokens: resIn + resCache + resOut
+        residualTokens: resIn + resCache + resCacheWrite + resOut
       };
     };
 
@@ -8306,6 +8865,7 @@ export async function collectTokenHistory(options = {}) {
           tokens: 0,
           inputTokens: 0,
           cacheTokens: 0,
+          cacheWriteTokens: 0,
           outputTokens: 0,
           costUSD: 0,
           cacheSavingsUSD: 0
@@ -8317,6 +8877,7 @@ export async function collectTokenHistory(options = {}) {
       p.tokens += r.totalTokens || 0;
       p.inputTokens += r.inputTokens || 0;
       p.cacheTokens += r.cacheTokens || 0;
+      p.cacheWriteTokens += r.cacheWriteTokens || 0;
       p.outputTokens += r.outputTokens || 0;
       p.costUSD += r._effCostUSD || 0;
       p.cacheSavingsUSD += r._effSavingsUSD || 0;
@@ -8329,6 +8890,7 @@ export async function collectTokenHistory(options = {}) {
         tokens: p.tokens,
         inputTokens: p.inputTokens,
         cacheTokens: p.cacheTokens,
+        cacheWriteTokens: p.cacheWriteTokens,
         outputTokens: p.outputTokens,
         costUSD: Number(p.costUSD.toFixed(4)),
         cacheSavingsUSD: Number(p.cacheSavingsUSD.toFixed(4))
@@ -8341,6 +8903,7 @@ export async function collectTokenHistory(options = {}) {
         grandTotalTokens: grandTotal,
         totalInputTokens: totalInput,
         totalCacheTokens: totalCache,
+        totalCacheWriteTokens: totalCacheWrite,
         totalOutputTokens: totalOutput,
         totalSteps,
         todayTokens,
@@ -8348,6 +8911,7 @@ export async function collectTokenHistory(options = {}) {
         yearTokens,
         monthInput,
         monthCache,
+        monthCacheWrite,
         monthOutput,
         monthSteps,
         activeDaysCount,
@@ -8404,6 +8968,12 @@ export async function collectTokenHistory(options = {}) {
   };
   const { updatedAt: _planUpdatedAt, ...stablePlan } = effectivePlan || {};
   const { updatedAt: _uiUpdatedAt, ...stableUiPrefs } = rawSettings.uiPreferences || {};
+  const allByModel = analyticsBySource.all?.costs?.allTime?.identified?.byModel || [];
+  const poolTokenTotals = computePoolTokenTotals(allByModel, host.modelConfigs, host.quotaSummaryGroups);
+  const enrichedModelQuotas = enrichQuotasWithCalibration(host.quotas || [], poolTokenTotals, {
+    persist: true,
+    nowMs
+  });
   const etag = computeContentEtag('hist', {
     todayKey,
     currentPeriod,
@@ -8429,7 +8999,7 @@ export async function collectTokenHistory(options = {}) {
     sources,
     historyStatus,
     planStatus: effectivePlan,
-    modelQuotas: host.quotas,
+    modelQuotas: enrichedModelQuotas,
     quotaStatus: host.quotaStatus,
     uiPreferences: rawSettings.uiPreferences || {},
     dailyMapBySource: dailyBySource,
