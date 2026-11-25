@@ -14,30 +14,32 @@
 </head>
 <body>
   <div class="af-shell">
-    <header class="af-header">
+    <header class="af-header" id="af-header">
       <div class="af-root-row">
         <img class="af-logo" src="/assets/logo.svg" alt="" width="18" height="18" />
         <select id="root-select" class="af-root-select" aria-label="切换项目根目录"></select>
         <div class="af-toolbar">
-          <button id="btn-paste-reveal" class="af-icon-btn" type="button" title="读取剪贴板路径并定位 (或粘贴到下方搜索框回车)">
+          <button id="btn-paste-reveal" class="af-icon-btn" type="button" title="读取剪贴板路径并定位（或粘贴到下方搜索框回车）" aria-label="读取剪贴板路径并定位">
             <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><circle cx="8" cy="8" r="1.6" class="af-fill"/><path d="M8 1v2.2M8 12.8V15M1 8h2.2M12.8 8H15"/></svg>
           </button>
-          <button id="btn-toggle-hidden" class="af-icon-btn" type="button" title="显示 / 隐藏 dotfiles 与忽略目录 (⌘/Ctrl+.)" aria-pressed="false">
+          <button id="btn-toggle-hidden" class="af-icon-btn" type="button" title="显示 / 隐藏 dotfiles 与忽略目录（⌘/Ctrl+.）" aria-label="显示或隐藏隐藏文件" aria-pressed="false">
             <span class="af-mono-badge">.*</span>
           </button>
-          <button id="btn-collapse-all" class="af-icon-btn" type="button" title="全部折叠">
+          <button id="btn-collapse-all" class="af-icon-btn" type="button" title="全部折叠" aria-label="全部折叠">
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 5.5 8 10l5-4.5M3 11.5h10"/></svg>
           </button>
-          <button id="btn-drawer" class="af-icon-btn" type="button" title="弹出 / 收回右侧独立目录树抽屉 (⌘⇧E)">
+          <button id="btn-drawer" class="af-icon-btn" type="button" title="弹出 / 收回右侧独立目录树抽屉（⌘⇧E）" aria-label="独立目录树抽屉">
             <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="1.6"/><path d="M10 2.5v11"/><path d="m6.2 6-1.8 2 1.8 2"/></svg>
           </button>
-          <button id="btn-shortcuts" class="af-icon-btn" type="button" title="快捷键设置与键盘导航 (?)" aria-expanded="false">
+          <button id="btn-shortcuts" class="af-icon-btn" type="button" title="快捷键设置与键盘导航（?）" aria-label="快捷键设置" aria-expanded="false">
             <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.8" y="3.5" width="12.4" height="9" rx="1.5"/><path d="M4.3 6.5h1M7 6.5h1M9.7 6.5h2M4.3 9.5h7.4"/></svg>
           </button>
-          <button id="btn-theme" class="af-icon-btn" type="button" title="切换主题（跟随宿主 / 浅色 / 深色）">
-            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.2a5.8 5.8 0 1 0 5.8 5.8A4.6 4.6 0 0 1 8 2.2Z"/></svg>
+          <button id="btn-theme" class="af-icon-btn af-theme-btn" type="button" data-theme-icon="auto" title="切换主题（跟随宿主 / 浅色 / 深色）" aria-label="切换主题">
+            <svg class="af-theme-ic af-theme-ic-auto" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5a5.5 5.5 0 0 1 0 11Z" class="af-fill"/></svg>
+            <svg class="af-theme-ic af-theme-ic-light" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M12.6 3.4l-1.1 1.1M4.5 11.5l-1.1 1.1"/></svg>
+            <svg class="af-theme-ic af-theme-ic-dark" viewBox="0 0 16 16" aria-hidden="true"><path d="M8.4 2.2a5.8 5.8 0 1 0 5.4 7.4A4.6 4.6 0 0 1 8.4 2.2Z"/></svg>
           </button>
-          <button id="btn-refresh" class="af-icon-btn" type="button" title="刷新目录树">
+          <button id="btn-refresh" class="af-icon-btn" type="button" title="刷新目录树" aria-label="刷新目录树">
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.6v3h-3"/></svg>
           </button>
         </div>
@@ -45,18 +47,24 @@
 
       <div class="af-search-row">
         <svg class="af-search-ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.2 3.2"/></svg>
-        <input id="search-input" class="af-search-input" type="text" placeholder="筛选文件名，或粘贴相对/绝对路径按 Enter 定位… (/)" autocomplete="off" spellcheck="false" />
-        <button id="btn-clear-search" class="af-clear-btn hidden" type="button" title="清空" aria-label="清空搜索">×</button>
+        <input id="search-input" class="af-search-input" type="text" placeholder="筛选文件名，或粘贴路径按 Enter 定位…（/）" autocomplete="off" spellcheck="false" />
+        <span id="search-spinner" class="af-search-spinner hidden" aria-hidden="true"></span>
+        <button id="btn-clear-search" class="af-clear-btn hidden" type="button" title="清空搜索" aria-label="清空搜索">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"/></svg>
+        </button>
+        <span id="search-live-status" class="af-sr-only" aria-live="polite"></span>
       </div>
+
+      <div id="workspace-progress" class="af-top-progress" aria-hidden="true"></div>
     </header>
 
-    <section id="shortcut-panel" class="af-shortcut-panel hidden" aria-label="快捷键与侧边栏开关">
+    <section id="shortcut-panel" class="af-shortcut-panel hidden" aria-label="快捷键与侧边栏开关" aria-hidden="true">
       <div class="af-shortcut-row">
         <span class="af-shortcut-label">独立抽屉快捷键</span>
         <div class="af-shortcut-actions">
           <button id="btn-record-drawer-shortcut" class="af-kbd-record-btn" type="button" title="点击后直接按下新的组合键（Esc 取消）">
             <kbd id="drawer-shortcut-kbd-label">⇧⌘E</kbd>
-            <span id="drawer-shortcut-record-hint" class="af-kbd-sub">点击修改</span>
+            <span id="drawer-shortcut-record-hint" class="af-kbd-sub">修改</span>
           </button>
           <select id="hotkey-preset-select" class="af-shortcut-select" aria-label="独立抽屉快捷预设"></select>
           <button id="btn-reset-drawer-shortcut" class="af-mini-btn" type="button" title="恢复默认快捷键">默认</button>
@@ -68,7 +76,7 @@
         <div class="af-shortcut-actions">
           <button id="btn-record-aux-shortcut" class="af-kbd-record-btn" type="button" title="点击后直接按下新的组合键（Esc 取消）">
             <kbd id="aux-shortcut-kbd-label">⌥⌘E</kbd>
-            <span id="aux-shortcut-record-hint" class="af-kbd-sub">点击修改</span>
+            <span id="aux-shortcut-record-hint" class="af-kbd-sub">修改</span>
           </button>
           <button id="btn-toggle-aux-shortcut" class="af-mini-btn" type="button" title="启用或关闭 AGY 侧栏目录树快捷键">已开启</button>
           <button id="btn-reset-aux-shortcut" class="af-mini-btn" type="button" title="恢复默认快捷键">默认</button>
@@ -87,16 +95,19 @@
           <code class="af-kbd">agy-finder toggle</code>
           <code class="af-kbd">agy-finder aux</code>
         </span>
-        <button id="btn-copy-cli" class="af-mini-btn" type="button">复制侧栏命令</button>
+        <button id="btn-copy-cli" class="af-mini-btn af-btn-with-ic" type="button">
+          <span class="af-btn-ic" aria-hidden="true"><svg viewBox="0 0 16 16"><rect x="5" y="5" width="8.5" height="8.5" rx="1.4"/><path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5"/></svg></span>
+          <span class="af-btn-text">复制侧栏命令</span>
+        </button>
       </div>
       <div class="af-shortcut-row af-shortcut-host">
-        <span class="af-shortcut-label" title="在 Antigravity 右侧辅助栏右键插件标签选择 Pin Tab，可跨会话常驻并防止被 × / ⌘W 关闭">宿主右侧辅助栏（右键 Pin Tab 跨会话固定）</span>
+        <span class="af-shortcut-label" title="在 Antigravity 右侧辅助栏右键插件标签选择 Pin Tab，可跨会话常驻并防止被 × / ⌘W 关闭">宿主右侧辅助栏（右键 Pin Tab 固定）</span>
         <span id="host-shortcut-summary" class="af-shortcut-host-keys"></span>
       </div>
       <div class="af-shortcut-cheats">
         <span><kbd class="af-kbd">↑</kbd><kbd class="af-kbd">↓</kbd> 移动</span>
         <span><kbd class="af-kbd">←</kbd><kbd class="af-kbd">→</kbd> 折展</span>
-        <span><kbd class="af-kbd">Enter</kbd> 预览/展开</span>
+        <span><kbd class="af-kbd">Enter</kbd> 预览 / 展开</span>
         <span><kbd class="af-kbd">/</kbd> 搜索</span>
         <span><kbd class="af-kbd">⌘.</kbd> 隐藏项</span>
         <span><kbd class="af-kbd">Esc</kbd> 收起</span>
@@ -105,33 +116,55 @@
 
     <section id="mentions-bar" class="af-mentions hidden" aria-label="对话提及文件">
       <button id="btn-toggle-mentions" class="af-mentions-head" type="button" aria-expanded="true">
-        <span class="af-mentions-title">对话提及 (<span id="mentions-count">0</span>)</span>
-        <span id="mentions-chevron" class="af-mentions-chev">▾</span>
+        <span class="af-mentions-title">对话提及（<span id="mentions-count" class="af-num">0</span>）</span>
+        <span id="mentions-chevron" class="af-mentions-chev" aria-hidden="true">
+          <svg viewBox="0 0 16 16"><path d="m6 4 4 4-4 4"/></svg>
+        </span>
       </button>
-      <div id="mentions-list" class="af-mentions-list"></div>
+      <div class="af-mentions-collapse">
+        <div class="af-mentions-collapse-inner">
+          <div id="mentions-list" class="af-mentions-list"></div>
+        </div>
+      </div>
     </section>
-
-    <div id="active-path-bar" class="af-path-bar hidden">
-      <span id="active-path-text" class="af-path-text"></span>
-      <button id="btn-copy-active" class="af-mini-btn" type="button" title="复制相对路径（Shift+点击复制绝对路径）">复制</button>
-      <button id="btn-preview-active" class="af-mini-btn" type="button" title="在原生预览中打开">预览</button>
-    </div>
 
     <main id="tree-viewport" class="af-tree-viewport" role="tree" tabindex="0">
       <div id="tree-content" class="af-tree-content"></div>
     </main>
 
-    <div id="preview-modal" class="af-preview-modal hidden" role="dialog" aria-label="文件快速预览">
+    <footer id="active-path-bar" class="af-path-bar is-empty" aria-label="当前选中路径">
+      <span id="active-path-text" class="af-path-text">未选中文件或目录</span>
+      <button id="btn-copy-active" class="af-mini-btn af-btn-with-ic" type="button" title="复制相对路径（Shift + 点击复制绝对路径）" disabled>
+        <span class="af-btn-ic" aria-hidden="true"><svg viewBox="0 0 16 16"><rect x="5" y="5" width="8.5" height="8.5" rx="1.4"/><path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5"/></svg></span>
+        <span class="af-btn-text">复制</span>
+      </button>
+      <button id="btn-preview-active" class="af-mini-btn af-btn-with-ic" type="button" title="在原生预览中打开" disabled>
+        <span class="af-btn-ic" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M9.5 2.5h4v4M13.5 2.5 7 9M6.5 4H4a1.5 1.5 0 0 0-1.5 1.5v6.5A1.5 1.5 0 0 0 4 13.5h6.5A1.5 1.5 0 0 0 12 12V9.5"/></svg></span>
+        <span class="af-btn-text">预览</span>
+      </button>
+    </footer>
+
+    <div id="preview-backdrop" class="af-modal-backdrop hidden" aria-hidden="true"></div>
+    <div id="preview-modal" class="af-preview-modal hidden" role="dialog" aria-modal="true" aria-label="文件快速预览" aria-hidden="true">
       <div class="af-preview-head">
         <span id="preview-title" class="af-preview-title"></span>
-        <button id="btn-preview-browser" class="af-mini-btn hidden" type="button" title="在系统默认浏览器中打开">🌐 浏览器</button>
-        <button id="btn-preview-os" class="af-mini-btn" type="button" title="在系统文件管理器中显示">🖥 定位</button>
-        <button id="btn-preview-close" class="af-mini-btn" type="button" title="关闭预览 (Esc)">关闭</button>
+        <div class="af-preview-actions">
+          <button id="btn-preview-retry" class="af-mini-btn hidden" type="button" title="重新加载预览">重试</button>
+          <button id="btn-preview-browser" class="af-mini-btn af-btn-with-ic hidden" type="button" title="在系统默认浏览器中打开">
+            <span class="af-btn-ic" aria-hidden="true"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.6"/><path d="M2.6 8h10.8M8 2.4c1.6 1.5 2.4 3.4 2.4 5.6S9.6 12.1 8 13.6C6.4 12.1 5.6 10.2 5.6 8S6.4 3.9 8 2.4Z"/></svg></span>
+            <span class="af-btn-text">浏览器</span>
+          </button>
+          <button id="btn-preview-os" class="af-mini-btn af-btn-with-ic" type="button" title="在系统文件管理器中显示">
+            <span class="af-btn-ic" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M2 4.2A1.4 1.4 0 0 1 3.4 2.8h2.8l1.2 1.4h5.2A1.4 1.4 0 0 1 14 5.6v6.2a1.4 1.4 0 0 1-1.4 1.4H3.4A1.4 1.4 0 0 1 2 11.8V4.2Z"/></svg></span>
+            <span class="af-btn-text">定位</span>
+          </button>
+          <button id="btn-preview-close" class="af-mini-btn" type="button" title="关闭预览（Esc）">关闭</button>
+        </div>
       </div>
       <pre id="preview-body" class="af-preview-body"></pre>
     </div>
 
-    <div id="toast" class="af-toast hidden" role="status" aria-live="polite"></div>
+    <div id="toast" class="af-toast hidden" role="status" aria-live="polite" aria-hidden="true"></div>
   </div>
 
   <script src="/app.js"></script>

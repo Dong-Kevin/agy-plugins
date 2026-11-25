@@ -10,15 +10,45 @@
   --af-surface: var(--card, #ffffff);
   --af-surface-2: color-mix(in srgb, var(--af-fg) 4.5%, var(--af-surface));
   --af-surface-hover: color-mix(in srgb, var(--af-fg) 7%, transparent);
+  --af-row-hover-bg: color-mix(in srgb, var(--af-fg) 6.5%, var(--af-bg));
+  --af-row-selected-bg: color-mix(in srgb, var(--af-accent) 14%, var(--af-bg));
   --af-fg: var(--foreground, #18181b);
   --af-muted: color-mix(in srgb, var(--muted-foreground, #52525b) 78%, var(--af-fg) 22%);
   --af-border: var(--card-border, var(--border, rgba(0, 0, 0, 0.1)));
   --af-accent: var(--user-accent, #2563eb);
   --af-accent-soft: color-mix(in srgb, var(--af-accent) 14%, transparent);
   --af-pulse-bg: color-mix(in srgb, var(--af-accent) 26%, transparent);
+  --af-success: #16a34a;
+  --af-success-soft: color-mix(in srgb, var(--af-success) 14%, transparent);
   --af-dir-col: #d97706;
+  --af-backdrop: rgba(15, 17, 23, 0.3);
+  --af-shadow-sm: 0 4px 12px rgba(0, 0, 0, 0.1);
+  --af-shadow-md: 0 8px 24px rgba(0, 0, 0, 0.16);
+  --af-shadow-lg: 0 14px 36px rgba(0, 0, 0, 0.22);
+  --af-scrollbar-thumb: color-mix(in srgb, var(--af-fg) 18%, transparent);
+  --af-scrollbar-thumb-hover: color-mix(in srgb, var(--af-fg) 32%, transparent);
+  --af-header-h: 76px;
   --af-font-sans: var(--font-family, "Inter", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei UI", system-ui, sans-serif);
   --af-font-mono: var(--editor-font-family, "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace);
+
+  /* Unified Apple-grade motion tokens */
+  --af-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --af-ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --af-ease-std: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --af-ease-spring: cubic-bezier(0.34, 1.35, 0.64, 1);
+  --af-ease-linear: linear;
+
+  --af-dur-instant: 80ms;
+  --af-dur-fast: 130ms;
+  --af-dur-base: 180ms;
+  --af-dur-slow: 240ms;
+  --af-dur-pulse: 1400ms;
+
+  --af-press-scale: 0.965;
+  --af-press-scale-row: 0.992;
+  --af-shift-xs: 4px;
+  --af-shift-sm: 6px;
+  --af-shift-md: 10px;
 }
 
 :root[data-af-theme="dark"] {
@@ -27,17 +57,48 @@
   --af-surface: var(--card, #18181b);
   --af-surface-2: color-mix(in srgb, var(--af-fg) 6%, var(--af-surface));
   --af-surface-hover: rgba(255, 255, 255, 0.065);
+  --af-row-hover-bg: color-mix(in srgb, var(--af-fg) 7.5%, var(--af-bg));
+  --af-row-selected-bg: color-mix(in srgb, var(--af-accent) 18%, var(--af-bg));
   --af-fg: var(--foreground, #f4f4f5);
   --af-muted: color-mix(in srgb, var(--muted-foreground, #a1a1aa) 78%, var(--af-fg) 22%);
   --af-border: var(--card-border, var(--border, rgba(255, 255, 255, 0.1)));
   --af-accent: var(--user-accent, #60a5fa);
   --af-accent-soft: color-mix(in srgb, var(--af-accent) 18%, transparent);
   --af-pulse-bg: color-mix(in srgb, var(--af-accent) 34%, transparent);
+  --af-success: #4ade80;
+  --af-success-soft: color-mix(in srgb, var(--af-success) 18%, transparent);
   --af-dir-col: #f59e0b;
+  --af-backdrop: rgba(0, 0, 0, 0.52);
+  --af-shadow-sm: 0 4px 14px rgba(0, 0, 0, 0.34);
+  --af-shadow-md: 0 10px 28px rgba(0, 0, 0, 0.46);
+  --af-shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.58);
+  --af-scrollbar-thumb: rgba(255, 255, 255, 0.16);
+  --af-scrollbar-thumb-hover: rgba(255, 255, 255, 0.28);
 }
 
 * {
   box-sizing: border-box;
+}
+
+/* Lockstep theme transition without persistent overhead */
+html.is-theme-switching body,
+html.is-theme-switching .af-header,
+html.is-theme-switching .af-path-bar,
+html.is-theme-switching .af-mentions,
+html.is-theme-switching .af-shortcut-panel,
+html.is-theme-switching .af-preview-modal,
+html.is-theme-switching .af-preview-head,
+html.is-theme-switching .af-preview-body,
+html.is-theme-switching .af-root-select,
+html.is-theme-switching .af-search-row,
+html.is-theme-switching .af-mini-btn,
+html.is-theme-switching .af-chip,
+html.is-theme-switching .af-kbd-record-btn,
+html.is-theme-switching .af-shortcut-select {
+  transition:
+    background-color var(--af-dur-base) var(--af-ease-std),
+    border-color var(--af-dur-base) var(--af-ease-std),
+    color var(--af-dur-base) var(--af-ease-std);
 }
 
 html, body {
@@ -52,7 +113,73 @@ html, body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Unified focus rings */
+:focus-visible {
+  outline: 2px solid var(--af-accent);
+  outline-offset: 2px;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* Subtle native-feel scrollbars */
+.af-tree-viewport,
+.af-mentions-list,
+.af-preview-body,
+.af-shortcut-panel {
+  scrollbar-width: thin;
+  scrollbar-color: var(--af-scrollbar-thumb) transparent;
+}
+
+.af-tree-viewport::-webkit-scrollbar,
+.af-mentions-list::-webkit-scrollbar,
+.af-preview-body::-webkit-scrollbar,
+.af-shortcut-panel::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.af-tree-viewport::-webkit-scrollbar-track,
+.af-mentions-list::-webkit-scrollbar-track,
+.af-preview-body::-webkit-scrollbar-track,
+.af-shortcut-panel::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.af-tree-viewport::-webkit-scrollbar-thumb,
+.af-mentions-list::-webkit-scrollbar-thumb,
+.af-preview-body::-webkit-scrollbar-thumb,
+.af-shortcut-panel::-webkit-scrollbar-thumb {
+  background: var(--af-scrollbar-thumb);
+  border-radius: 999px;
+}
+
+.af-tree-viewport::-webkit-scrollbar-thumb:hover,
+.af-mentions-list::-webkit-scrollbar-thumb:hover,
+.af-preview-body::-webkit-scrollbar-thumb:hover,
+.af-shortcut-panel::-webkit-scrollbar-thumb:hover {
+  background: var(--af-scrollbar-thumb-hover);
+}
+
+.af-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.af-num {
+  font-variant-numeric: tabular-nums;
+}
+
 .af-shell {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100vh;
@@ -60,6 +187,8 @@ html, body {
 }
 
 .af-header {
+  position: relative;
+  z-index: 30;
   flex: 0 0 auto;
   padding: 8px 10px;
   border-bottom: 1px solid var(--af-border);
@@ -69,10 +198,46 @@ html, body {
   gap: 6px;
 }
 
+.af-top-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--af-dur-fast) var(--af-ease-std);
+}
+
+.af-top-progress::after {
+  content: "";
+  display: block;
+  width: 42%;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--af-accent);
+  transform: translate3d(-110%, 0, 0);
+}
+
+.af-top-progress.is-active {
+  opacity: 1;
+}
+
+.af-top-progress.is-active::after {
+  animation: af-progress-scan 1100ms var(--af-ease-linear) infinite;
+}
+
+@keyframes af-progress-scan {
+  0% { transform: translate3d(-110%, 0, 0); }
+  100% { transform: translate3d(260%, 0, 0); }
+}
+
 .af-root-row {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
 }
 
 .af-logo {
@@ -82,7 +247,7 @@ html, body {
 
 .af-root-select {
   flex: 1 1 auto;
-  min-width: 0;
+  min-width: 64px;
   height: 26px;
   padding: 0 6px;
   border-radius: 6px;
@@ -91,12 +256,21 @@ html, body {
   color: var(--af-fg);
   font-size: 12px;
   font-weight: 600;
-  outline: none;
   cursor: pointer;
+  text-overflow: ellipsis;
+  transition:
+    border-color var(--af-dur-fast) var(--af-ease-std),
+    background-color var(--af-dur-fast) var(--af-ease-std);
 }
 
-.af-root-select:focus {
+.af-root-select:hover {
+  border-color: color-mix(in srgb, var(--af-accent) 55%, var(--af-border));
+}
+
+.af-root-select:focus-visible {
   border-color: var(--af-accent);
+  outline: none;
+  box-shadow: 0 0 0 2.5px var(--af-accent-soft);
 }
 
 .af-toolbar {
@@ -107,6 +281,7 @@ html, body {
 }
 
 .af-icon-btn {
+  position: relative;
   width: 24px;
   height: 24px;
   padding: 0;
@@ -118,11 +293,25 @@ html, body {
   align-items: center;
   justify-content: center;
   cursor: pointer;
+  transition:
+    background-color var(--af-dur-fast) var(--af-ease-std),
+    color var(--af-dur-fast) var(--af-ease-std),
+    border-color var(--af-dur-fast) var(--af-ease-std),
+    transform var(--af-dur-instant) var(--af-ease-out);
 }
 
-.af-icon-btn:hover {
+.af-icon-btn:hover:not(:disabled) {
   background: var(--af-surface-hover);
   color: var(--af-fg);
+}
+
+.af-icon-btn:active:not(:disabled) {
+  transform: scale(var(--af-press-scale));
+}
+
+.af-icon-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .af-icon-btn.is-active {
@@ -146,6 +335,37 @@ html, body {
   stroke: none;
 }
 
+/* 3-state morphing theme icon */
+.af-theme-btn .af-theme-ic {
+  position: absolute;
+  opacity: 0;
+  transform: rotate(-30deg) scale(0.8);
+  transition:
+    opacity 160ms var(--af-ease-spring),
+    transform 160ms var(--af-ease-spring);
+}
+
+.af-theme-btn[data-theme-icon="auto"] .af-theme-ic-auto,
+.af-theme-btn[data-theme-icon="light"] .af-theme-ic-light,
+.af-theme-btn[data-theme-icon="dark"] .af-theme-ic-dark {
+  opacity: 1;
+  transform: rotate(0deg) scale(1);
+}
+
+/* Smooth full-turn refresh spinner */
+.af-icon-btn.is-spinning {
+  color: var(--af-accent);
+}
+
+.af-icon-btn.is-spinning svg {
+  animation: af-spin 700ms var(--af-ease-linear) infinite;
+}
+
+@keyframes af-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 .af-mono-badge {
   font-family: var(--af-font-mono);
   font-size: 11px;
@@ -156,6 +376,18 @@ html, body {
   position: relative;
   display: flex;
   align-items: center;
+  height: 26px;
+  border-radius: 6px;
+  border: 1px solid var(--af-border);
+  background: var(--af-bg);
+  transition:
+    border-color var(--af-dur-fast) var(--af-ease-std),
+    box-shadow var(--af-dur-fast) var(--af-ease-std);
+}
+
+.af-search-row:focus-within {
+  border-color: var(--af-accent);
+  box-shadow: 0 0 0 3px var(--af-accent-soft);
 }
 
 .af-search-ic {
@@ -166,37 +398,116 @@ html, body {
   fill: none;
   stroke: var(--af-muted);
   stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
   pointer-events: none;
+  transition: stroke var(--af-dur-fast) var(--af-ease-std);
+}
+
+.af-search-row:focus-within .af-search-ic {
+  stroke: var(--af-accent);
 }
 
 .af-search-input {
   width: 100%;
-  height: 26px;
-  padding: 0 24px 0 26px;
+  height: 100%;
+  padding: 0 42px 0 26px;
+  border: none;
   border-radius: 6px;
-  border: 1px solid var(--af-border);
-  background: var(--af-bg);
+  background: transparent;
   color: var(--af-fg);
+  font-family: var(--af-font-sans);
   font-size: 12px;
   outline: none;
 }
 
-.af-search-input:focus {
-  border-color: var(--af-accent);
+.af-search-input:focus-visible {
+  outline: none;
 }
 
-.af-clear-btn {
+.af-search-input::placeholder {
+  color: var(--af-muted);
+  opacity: 0.78;
+}
+
+/* Inline search spinner + smooth clear button (dual-state .hidden override) */
+.af-shell .af-search-spinner {
+  display: inline-block !important;
   position: absolute;
-  right: 4px;
+  right: 24px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, var(--af-accent) 26%, transparent);
+  border-top-color: var(--af-accent);
+  pointer-events: none;
+  opacity: 1;
+  visibility: visible;
+  transform: scale(1);
+  animation: af-spin 700ms var(--af-ease-linear) infinite;
+  transition:
+    opacity var(--af-dur-fast) var(--af-ease-out),
+    transform var(--af-dur-fast) var(--af-ease-out),
+    visibility 0s linear 0s;
+}
+
+.af-shell .af-search-spinner.hidden {
+  display: inline-block !important;
+  opacity: 0;
+  visibility: hidden;
+  transform: scale(0.85);
+  animation: none;
+  transition:
+    opacity var(--af-dur-fast) var(--af-ease-in),
+    transform var(--af-dur-fast) var(--af-ease-in),
+    visibility 0s linear var(--af-dur-fast);
+}
+
+.af-shell .af-clear-btn {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  position: absolute;
+  right: 3px;
   width: 18px;
   height: 18px;
+  padding: 0;
   border: none;
   border-radius: 4px;
   background: transparent;
   color: var(--af-muted);
   cursor: pointer;
-  font-size: 14px;
-  line-height: 1;
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: scale(1);
+  transition:
+    opacity var(--af-dur-fast) var(--af-ease-out),
+    transform var(--af-dur-fast) var(--af-ease-out),
+    background-color var(--af-dur-fast) var(--af-ease-std),
+    color var(--af-dur-fast) var(--af-ease-std),
+    visibility 0s linear 0s;
+}
+
+.af-shell .af-clear-btn.hidden {
+  display: inline-flex !important;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: scale(0.85);
+  transition:
+    opacity var(--af-dur-fast) var(--af-ease-in),
+    transform var(--af-dur-fast) var(--af-ease-in),
+    visibility 0s linear var(--af-dur-fast);
+}
+
+.af-clear-btn svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
 }
 
 .af-clear-btn:hover {
@@ -204,6 +515,11 @@ html, body {
   color: var(--af-fg);
 }
 
+.af-clear-btn:active {
+  transform: scale(var(--af-press-scale));
+}
+
+/* Mentions bar with CSS Grid 0fr <-> 1fr smooth collapse */
 .af-mentions {
   flex: 0 0 auto;
   border-bottom: 1px solid var(--af-border);
@@ -214,6 +530,7 @@ html, body {
 .af-mentions-head {
   width: 100%;
   border: none;
+  border-radius: 4px;
   padding: 0;
   background: transparent;
   color: var(--af-muted);
@@ -223,10 +540,55 @@ html, body {
   align-items: center;
   justify-content: space-between;
   cursor: pointer;
+  transition: color var(--af-dur-fast) var(--af-ease-std);
 }
 
 .af-mentions-head:hover {
   color: var(--af-fg);
+}
+
+.af-mentions-chev {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.af-mentions-chev svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transform: rotate(90deg);
+  transition: transform var(--af-dur-fast) var(--af-ease-out);
+}
+
+.af-mentions.is-collapsed .af-mentions-chev svg {
+  transform: rotate(0deg);
+}
+
+.af-mentions-collapse {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows var(--af-dur-base) var(--af-ease-std);
+}
+
+.af-mentions.is-collapsed .af-mentions-collapse {
+  grid-template-rows: 0fr;
+}
+
+.af-mentions-collapse-inner {
+  overflow: hidden;
+  opacity: 1;
+  transition: opacity var(--af-dur-fast) var(--af-ease-std);
+}
+
+.af-mentions.is-collapsed .af-mentions-collapse-inner {
+  opacity: 0;
 }
 
 .af-mentions-list {
@@ -236,10 +598,6 @@ html, body {
   margin-top: 5px;
   max-height: 76px;
   overflow-y: auto;
-}
-
-.af-mentions.is-collapsed .af-mentions-list {
-  display: none;
 }
 
 .af-chip {
@@ -254,6 +612,10 @@ html, body {
   color: var(--af-fg);
   font-size: 11.5px;
   cursor: pointer;
+  transition:
+    border-color var(--af-dur-fast) var(--af-ease-std),
+    background-color var(--af-dur-fast) var(--af-ease-std),
+    transform var(--af-dur-instant) var(--af-ease-out);
 }
 
 .af-chip:hover {
@@ -261,21 +623,55 @@ html, body {
   background: var(--af-accent-soft);
 }
 
+.af-chip:active {
+  transform: scale(var(--af-press-scale-row));
+}
+
+.af-chip-ic {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.af-chip-ic svg {
+  width: 13px;
+  height: 13px;
+}
+
 .af-chip-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 160px;
+  max-width: 150px;
 }
 
 .af-chip-open {
   border: none;
   background: transparent;
   color: var(--af-muted);
-  padding: 0 2px;
-  font-size: 11px;
+  padding: 1px 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
   border-radius: 3px;
+  transition:
+    color var(--af-dur-fast) var(--af-ease-std),
+    background-color var(--af-dur-fast) var(--af-ease-std),
+    transform var(--af-dur-instant) var(--af-ease-out);
+}
+
+.af-chip-open svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .af-chip-open:hover {
@@ -283,15 +679,27 @@ html, body {
   background: var(--af-surface-hover);
 }
 
+.af-chip-open:active {
+  transform: scale(var(--af-press-scale));
+}
+
+/* Permanent fixed-height bottom active path bar (zero CLS) */
 .af-path-bar {
-  flex: 0 0 auto;
+  flex: 0 0 28px;
+  height: 28px;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 10px;
-  border-bottom: 1px solid var(--af-border);
+  padding: 0 10px;
+  border-top: 1px solid var(--af-border);
   background: var(--af-surface);
   font-size: 11px;
+  min-width: 0;
+}
+
+.af-path-bar.is-empty .af-path-text {
+  font-family: var(--af-font-sans);
+  opacity: 0.65;
 }
 
 .af-path-text {
@@ -306,29 +714,136 @@ html, body {
 
 .af-mini-btn {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 20px;
   border: 1px solid var(--af-border);
   border-radius: 4px;
   background: var(--af-bg);
   color: var(--af-fg);
+  font-family: var(--af-font-sans);
   font-size: 11px;
-  padding: 1px 6px;
+  font-weight: 500;
+  padding: 0 7px;
   cursor: pointer;
+  white-space: nowrap;
+  transition:
+    border-color var(--af-dur-fast) var(--af-ease-std),
+    color var(--af-dur-fast) var(--af-ease-std),
+    background-color var(--af-dur-fast) var(--af-ease-std),
+    transform var(--af-dur-instant) var(--af-ease-out);
 }
 
-.af-mini-btn:hover {
+.af-mini-btn:hover:not(:disabled) {
   border-color: var(--af-accent);
   color: var(--af-accent);
 }
 
+.af-mini-btn:active:not(:disabled) {
+  transform: scale(var(--af-press-scale));
+}
+
+.af-mini-btn:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.af-mini-btn.is-active {
+  background: var(--af-accent-soft);
+  border-color: color-mix(in srgb, var(--af-accent) 42%, transparent);
+  color: var(--af-accent);
+}
+
+.af-mini-btn.is-pending,
+.af-icon-btn.is-pending {
+  cursor: progress;
+}
+
+.af-mini-btn.is-pending::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1.4px solid color-mix(in srgb, currentColor 28%, transparent);
+  border-top-color: currentColor;
+  animation: af-spin 700ms var(--af-ease-linear) infinite;
+}
+
+.af-btn-ic {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.af-btn-ic svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* In-place copy checkmark spring feedback */
+.is-copied {
+  color: var(--af-success) !important;
+  border-color: color-mix(in srgb, var(--af-success) 45%, transparent) !important;
+  background: var(--af-success-soft) !important;
+}
+
+.is-copied svg {
+  animation: af-pop-in var(--af-dur-base) var(--af-ease-spring);
+}
+
+@keyframes af-pop-in {
+  0% { opacity: 0; transform: scale(0.72); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+/* Tree viewport & rows */
 .af-tree-viewport {
   flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 4px 0 18px;
+  padding: 4px 0 12px;
+  transition: opacity var(--af-dur-fast) var(--af-ease-std);
+}
+
+.af-tree-viewport:focus-visible {
   outline: none;
+  box-shadow: inset 0 0 0 2px var(--af-accent);
+}
+
+.af-tree-viewport.is-switching {
+  opacity: 0.58;
+  pointer-events: none;
+}
+
+.af-tree-viewport.is-scrolling .af-tree-row.is-revealed {
+  animation-play-state: paused;
+}
+
+.af-tree-content {
+  transition: opacity var(--af-dur-fast) var(--af-ease-std);
+}
+
+.af-tree-content.is-search-updating {
+  opacity: 0.62;
+}
+
+.af-tree-content.is-kbd-nav .af-tree-row {
+  transition: none;
 }
 
 .af-tree-row {
+  position: relative;
   height: 26px;
   display: flex;
   align-items: center;
@@ -337,25 +852,63 @@ html, body {
   cursor: pointer;
   user-select: none;
   border-left: 2px solid transparent;
-  transition: background-color 0.12s ease;
+  contain: layout style;
+  content-visibility: auto;
+  contain-intrinsic-size: 0 26px;
+  --af-row-action-bg: var(--af-bg);
+  transition:
+    background-color var(--af-dur-fast) var(--af-ease-std),
+    border-color var(--af-dur-fast) var(--af-ease-std),
+    transform var(--af-dur-instant) var(--af-ease-out);
 }
 
 .af-tree-row:hover {
-  background: var(--af-surface-hover);
+  background: var(--af-row-hover-bg);
+  --af-row-action-bg: var(--af-row-hover-bg);
+}
+
+.af-tree-row:active {
+  transform: scale(var(--af-press-scale-row));
 }
 
 .af-tree-row.is-selected {
-  background: var(--af-accent-soft);
+  background: var(--af-row-selected-bg);
   border-left-color: var(--af-accent);
+  --af-row-action-bg: var(--af-row-selected-bg);
+}
+
+.af-tree-row.is-entering {
+  animation: af-row-enter 140ms var(--af-ease-out);
+}
+
+@keyframes af-row-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, -3px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
 }
 
 .af-tree-row.is-revealed {
-  animation: af-reveal-pulse 2s ease-out;
+  animation: af-reveal-pulse var(--af-dur-pulse) var(--af-ease-out) 1;
 }
 
 @keyframes af-reveal-pulse {
   0% { background: var(--af-pulse-bg); }
-  100% { background: var(--af-accent-soft); }
+  100% { background: var(--af-row-selected-bg); }
+}
+
+.af-tree-loading-row {
+  cursor: default;
+}
+
+.af-tree-loading-row:hover,
+.af-tree-loading-row:active {
+  background: transparent;
+  transform: none;
 }
 
 .af-twistie {
@@ -366,8 +919,17 @@ html, body {
   align-items: center;
   justify-content: center;
   color: var(--af-muted);
-  font-size: 10px;
-  transition: transform 0.12s ease;
+  transition: transform var(--af-dur-fast) var(--af-ease-out);
+}
+
+.af-twistie svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .af-twistie.is-open {
@@ -405,8 +967,17 @@ html, body {
   font-size: 12.5px;
 }
 
+.af-match {
+  background: var(--af-accent-soft);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0;
+  font-weight: inherit;
+}
+
 .af-node-sub {
   flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -415,47 +986,87 @@ html, body {
   font-family: var(--af-font-mono);
 }
 
+/* Zero-CLS overlaid row actions with left gradient feather */
 .af-row-actions {
-  display: none;
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  right: 4px;
+  display: inline-flex;
   align-items: center;
   gap: 2px;
-  flex: 0 0 auto;
+  padding-left: 16px;
+  padding-right: 2px;
+  background: linear-gradient(90deg, transparent 0%, var(--af-row-action-bg) 14px, var(--af-row-action-bg) 100%);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate3d(var(--af-shift-xs), 0, 0);
+  transition:
+    opacity var(--af-dur-fast) var(--af-ease-in),
+    transform var(--af-dur-fast) var(--af-ease-in);
 }
 
 .af-tree-row:hover .af-row-actions,
-.af-tree-row.is-selected .af-row-actions {
-  display: inline-flex;
+.af-tree-row.is-selected .af-row-actions,
+.af-tree-row:focus-within .af-row-actions {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate3d(0, 0, 0);
+  transition:
+    opacity var(--af-dur-fast) var(--af-ease-out),
+    transform var(--af-dur-fast) var(--af-ease-out);
 }
 
 .af-act-btn {
   width: 20px;
   height: 20px;
-  border: none;
+  padding: 0;
+  border: 1px solid transparent;
   border-radius: 4px;
   background: transparent;
   color: var(--af-muted);
-  font-size: 11px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
+  transition:
+    background-color var(--af-dur-fast) var(--af-ease-std),
+    color var(--af-dur-fast) var(--af-ease-std),
+    border-color var(--af-dur-fast) var(--af-ease-std),
+    transform var(--af-dur-instant) var(--af-ease-out);
+}
+
+.af-act-btn svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .af-act-btn:hover {
   background: var(--af-surface);
   color: var(--af-accent);
+  border-color: var(--af-border);
+}
+
+.af-act-btn:active {
+  transform: scale(var(--af-press-scale));
 }
 
 .af-empty {
-  padding: 20px 14px;
+  padding: 22px 14px;
   text-align: center;
   color: var(--af-muted);
   font-size: 12px;
+  line-height: 1.5;
 }
 
 .af-search-note,
 .af-search-error {
-  margin: 4px 8px 6px;
+  margin: 6px 8px;
   padding: 6px 10px;
   border-radius: 7px;
   font-size: 11px;
@@ -470,33 +1081,84 @@ html, body {
   color: var(--af-fg);
 }
 
-.af-toast {
+/* Floating Toast (dual-state .hidden override, always pointer-events: none) */
+.af-shell .af-toast {
+  display: block !important;
   position: fixed;
   left: 50%;
-  bottom: 14px;
-  transform: translateX(-50%);
+  bottom: 36px;
   padding: 6px 12px;
-  border-radius: 7px;
+  border-radius: 999px;
   background: var(--af-fg);
   color: var(--af-bg);
   font-size: 11.5px;
+  font-weight: 500;
   max-width: calc(100vw - 24px);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--af-shadow-md);
   z-index: 99;
+  pointer-events: none !important;
+  visibility: visible;
+  opacity: 1;
+  transform: translate3d(-50%, 0, 0) scale(1);
+  transition:
+    opacity var(--af-dur-base) var(--af-ease-out),
+    transform var(--af-dur-base) var(--af-ease-out),
+    visibility 0s linear 0s;
 }
 
-.af-shortcut-panel {
-  flex: 0 0 auto;
+.af-shell .af-toast.hidden {
+  display: block !important;
+  visibility: hidden;
+  opacity: 0;
+  transform: translate3d(-50%, var(--af-shift-sm), 0) scale(0.97);
+  transition:
+    opacity var(--af-dur-fast) var(--af-ease-in),
+    transform var(--af-dur-fast) var(--af-ease-in),
+    visibility 0s linear var(--af-dur-fast);
+}
+
+/* Shortcut Panel Overlay (position: absolute below header, zero CLS, dual-state) */
+.af-shell .af-shortcut-panel {
+  display: flex !important;
+  position: absolute;
+  top: var(--af-header-h, 76px);
+  left: 0;
+  right: 0;
+  max-height: calc(100vh - var(--af-header-h, 76px) - 34px);
+  overflow-y: auto;
+  z-index: 45;
   border-bottom: 1px solid var(--af-border);
-  background: var(--af-surface-2);
-  padding: 8px 10px;
-  display: flex;
+  background: var(--af-surface);
+  box-shadow: var(--af-shadow-md);
+  padding: 9px 10px;
   flex-direction: column;
-  gap: 6px;
+  gap: 7px;
   font-size: 11.5px;
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate3d(0, 0, 0) scale(1);
+  transform-origin: top center;
+  will-change: transform, opacity;
+  transition:
+    opacity var(--af-dur-base) var(--af-ease-out),
+    transform var(--af-dur-base) var(--af-ease-out),
+    visibility 0s linear 0s;
+}
+
+.af-shell .af-shortcut-panel.hidden {
+  display: flex !important;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate3d(0, calc(var(--af-shift-sm) * -1), 0) scale(0.99);
+  transition:
+    opacity var(--af-dur-fast) var(--af-ease-in),
+    transform var(--af-dur-fast) var(--af-ease-in),
+    visibility 0s linear var(--af-dur-fast);
 }
 
 .af-shortcut-row {
@@ -525,20 +1187,31 @@ html, body {
 .af-kbd-record-btn {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 5px;
+  min-width: 98px;
   height: 24px;
   padding: 0 7px;
   border-radius: 5px;
   border: 1px solid var(--af-border);
   background: var(--af-bg);
   color: var(--af-fg);
+  font-family: var(--af-font-sans);
   font-size: 11px;
   cursor: pointer;
-  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+  white-space: nowrap;
+  transition:
+    border-color var(--af-dur-fast) var(--af-ease-std),
+    background-color var(--af-dur-fast) var(--af-ease-std),
+    transform var(--af-dur-instant) var(--af-ease-out);
 }
 
 .af-kbd-record-btn:hover {
   border-color: var(--af-accent);
+}
+
+.af-kbd-record-btn:active {
+  transform: scale(var(--af-press-scale));
 }
 
 .af-kbd-record-btn kbd {
@@ -560,7 +1233,16 @@ html, body {
 .af-kbd-record-btn.is-recording {
   border-color: var(--af-accent);
   background: var(--af-accent-soft);
-  box-shadow: 0 0 0 2px var(--af-accent-soft);
+  animation: af-record-breathe var(--af-dur-pulse) var(--af-ease-std) infinite;
+}
+
+@keyframes af-record-breathe {
+  0%, 100% {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--af-accent) 25%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 3.5px color-mix(in srgb, var(--af-accent) 62%, transparent);
+  }
 }
 
 .af-kbd-record-btn.is-recording kbd {
@@ -569,7 +1251,7 @@ html, body {
 
 .af-shortcut-select {
   flex: 0 1 130px;
-  min-width: 96px;
+  min-width: 90px;
   height: 24px;
   padding: 0 6px;
   border-radius: 5px;
@@ -577,7 +1259,14 @@ html, body {
   background: var(--af-bg);
   color: var(--af-fg);
   font-size: 11px;
+  cursor: pointer;
+  transition: border-color var(--af-dur-fast) var(--af-ease-std);
+}
+
+.af-shortcut-select:focus-visible {
+  border-color: var(--af-accent);
   outline: none;
+  box-shadow: 0 0 0 2.5px var(--af-accent-soft);
 }
 
 .af-shortcut-cli-cmds {
@@ -587,18 +1276,14 @@ html, body {
   flex-wrap: wrap;
 }
 
-.af-shortcut-select:focus {
-  border-color: var(--af-accent);
-}
-
 .af-shortcut-sub {
   color: var(--af-muted);
   font-size: 11px;
-  line-height: 1.35;
+  line-height: 1.4;
 }
 
 .af-shortcut-host {
-  padding-top: 4px;
+  padding-top: 5px;
   border-top: 1px dashed var(--af-border);
 }
 
@@ -623,24 +1308,70 @@ html, body {
   margin-right: 1px;
   border-radius: 3px;
   border: 1px solid var(--af-border);
-  background: var(--af-surface);
+  background: var(--af-surface-2);
   color: var(--af-fg);
   font-family: var(--af-font-mono);
   font-size: 10px;
   line-height: 1.45;
 }
 
-.af-preview-modal {
+/* Preview Modal Backdrop & Dialog (dual-state reversible transition: 220ms in / 150ms out) */
+.af-shell .af-modal-backdrop {
+  display: block !important;
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  background: var(--af-backdrop);
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+  transition:
+    opacity 220ms var(--af-ease-out),
+    visibility 0s linear 0s;
+}
+
+.af-shell .af-modal-backdrop.hidden {
+  display: block !important;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 150ms var(--af-ease-in),
+    visibility 0s linear 150ms;
+}
+
+.af-shell .af-preview-modal {
+  display: flex !important;
   position: fixed;
   inset: 38px 8px 10px;
   z-index: 60;
-  display: flex;
   flex-direction: column;
-  border-radius: 8px;
+  border-radius: 9px;
   border: 1px solid var(--af-border);
   background: var(--af-surface);
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.24);
+  box-shadow: var(--af-shadow-lg);
   overflow: hidden;
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate3d(0, 0, 0) scale(1);
+  will-change: transform, opacity;
+  transition:
+    opacity 220ms var(--af-ease-out),
+    transform 220ms var(--af-ease-out),
+    visibility 0s linear 0s;
+}
+
+.af-shell .af-preview-modal.hidden {
+  display: flex !important;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate3d(0, var(--af-shift-md), 0) scale(0.97);
+  transition:
+    opacity 150ms var(--af-ease-in),
+    transform 150ms var(--af-ease-in),
+    visibility 0s linear 150ms;
 }
 
 .af-preview-head {
@@ -651,6 +1382,7 @@ html, body {
   padding: 6px 8px;
   border-bottom: 1px solid var(--af-border);
   background: var(--af-surface-2);
+  min-width: 0;
 }
 
 .af-preview-title {
@@ -662,6 +1394,13 @@ html, body {
   font-family: var(--af-font-mono);
   font-size: 11px;
   font-weight: 600;
+}
+
+.af-preview-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
 }
 
 .af-preview-body {
@@ -676,4 +1415,210 @@ html, body {
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* Responsive Breakpoints: 390px narrow sidebar & 280px minimum drawer */
+@media (max-width: 390px) {
+  .af-header {
+    padding: 7px 8px;
+    gap: 5px;
+  }
+
+  .af-root-row {
+    gap: 4px;
+  }
+
+  .af-toolbar {
+    gap: 1px;
+  }
+
+  .af-icon-btn {
+    width: 23px;
+    height: 23px;
+  }
+
+  .af-path-bar {
+    padding: 0 8px;
+    gap: 5px;
+  }
+
+  .af-shortcut-row {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  .af-shortcut-actions {
+    justify-content: flex-start;
+  }
+
+  .af-shortcut-host-keys {
+    text-align: left;
+  }
+
+  .af-preview-head {
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+}
+
+@media (max-width: 300px) {
+  .af-header {
+    padding: 6px;
+  }
+
+  .af-logo {
+    width: 15px;
+    height: 15px;
+  }
+
+  .af-root-select {
+    font-size: 11.5px;
+    padding: 0 4px;
+    min-width: 54px;
+  }
+
+  .af-icon-btn {
+    width: 21px;
+    height: 21px;
+  }
+
+  .af-icon-btn svg {
+    width: 13px;
+    height: 13px;
+  }
+
+  .af-mini-btn {
+    padding: 0 5px;
+    font-size: 10.5px;
+  }
+
+  .af-path-bar {
+    padding: 0 6px;
+    gap: 4px;
+  }
+
+  .af-kbd-record-btn {
+    min-width: 84px;
+    padding: 0 5px;
+  }
+
+  .af-preview-modal {
+    inset: 34px 5px 8px;
+  }
+}
+
+@media (min-width: 640px) {
+  .af-preview-modal {
+    inset: 42px 24px 20px;
+  }
+}
+
+/* Complete prefers-reduced-motion degradation matrix */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --af-dur-instant: 0ms;
+    --af-dur-fast: 0ms;
+    --af-dur-base: 0ms;
+    --af-dur-slow: 0ms;
+  }
+
+  html.is-theme-switching *,
+  .af-icon-btn,
+  .af-mini-btn,
+  .af-kbd-record-btn,
+  .af-act-btn,
+  .af-chip,
+  .af-chip-open,
+  .af-tree-row,
+  .af-twistie,
+  .af-mentions-chev svg,
+  .af-mentions-collapse,
+  .af-mentions-collapse-inner,
+  .af-theme-btn .af-theme-ic,
+  .af-row-actions,
+  .af-search-row,
+  .af-search-ic,
+  .af-root-select,
+  .af-shortcut-select {
+    transition-duration: 0ms !important;
+  }
+
+  .af-icon-btn:active:not(:disabled),
+  .af-mini-btn:active:not(:disabled),
+  .af-kbd-record-btn:active:not(:disabled),
+  .af-act-btn:active:not(:disabled),
+  .af-clear-btn:active:not(:disabled),
+  .af-chip-open:active:not(:disabled),
+  .af-tree-row:active,
+  .af-chip:active {
+    transform: none !important;
+  }
+
+  .af-theme-btn .af-theme-ic {
+    transform: none !important;
+  }
+
+  .af-shell .af-toast,
+  .af-shell .af-toast.hidden {
+    transform: translate3d(-50%, 0, 0) !important;
+    transition: opacity 80ms linear, visibility 0s linear 80ms;
+  }
+
+  .af-shell .af-toast:not(.hidden) {
+    transition: opacity 80ms linear, visibility 0s linear 0s;
+  }
+
+  .af-shell .af-shortcut-panel,
+  .af-shell .af-shortcut-panel.hidden,
+  .af-shell .af-preview-modal,
+  .af-shell .af-preview-modal.hidden,
+  .af-shell .af-clear-btn,
+  .af-shell .af-clear-btn.hidden,
+  .af-shell .af-search-spinner,
+  .af-shell .af-search-spinner.hidden,
+  .af-row-actions {
+    transform: none !important;
+    transition: opacity 80ms linear, visibility 0s linear 0s;
+  }
+
+  .af-shell .af-shortcut-panel.hidden,
+  .af-shell .af-preview-modal.hidden,
+  .af-shell .af-clear-btn.hidden,
+  .af-shell .af-search-spinner.hidden {
+    transition: opacity 80ms linear, visibility 0s linear 80ms;
+  }
+
+  .af-shell .af-modal-backdrop,
+  .af-shell .af-modal-backdrop.hidden {
+    transition: opacity 80ms linear, visibility 0s linear 0s;
+  }
+
+  .af-shell .af-modal-backdrop.hidden {
+    transition: opacity 80ms linear, visibility 0s linear 80ms;
+  }
+
+  .af-icon-btn.is-spinning svg,
+  .af-shell .af-search-spinner,
+  .af-mini-btn.is-pending::before,
+  .af-top-progress.is-active::after,
+  .af-tree-row.is-entering,
+  .is-copied svg {
+    animation: none !important;
+  }
+
+  .af-top-progress.is-active::after {
+    width: 100%;
+    transform: none;
+  }
+
+  .af-tree-row.is-revealed {
+    animation: none !important;
+    background: var(--af-pulse-bg);
+    box-shadow: inset 0 0 0 1.5px var(--af-accent);
+  }
+
+  .af-kbd-record-btn.is-recording {
+    animation: none !important;
+    box-shadow: 0 0 0 2px var(--af-accent-soft);
+  }
 }

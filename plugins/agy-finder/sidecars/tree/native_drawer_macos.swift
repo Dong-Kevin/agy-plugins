@@ -1,6 +1,7 @@
 import Cocoa
 import WebKit
 import Carbon
+import QuartzCore
 
 // Native macOS Right-Side Quick-Toggle File Tree Drawer for AGY Finder.
 // Uses Carbon RegisterEventHotKey scoped exclusively to Antigravity / this drawer
@@ -148,6 +149,15 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
   var hudPanel: NSPanel?
   var hudLabel: NSTextField?
   var hudHideWorkItem: DispatchWorkItem?
+  var hudToken: Int = 0
+  var isHudShowing: Bool = false
+  var visibilityToken: Int = 0
+  var isAnimatingVisibility: Bool = false
+  var restingOriginX: CGFloat? = nil
+
+  func shouldReduceMotion() -> Bool {
+    return NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+  }
 
   var shouldStayResident: Bool {
     return hotkeySpec != nil || auxHotkeySpec != nil
@@ -257,6 +267,7 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
     window.minSize = NSSize(width: 280, height: 360)
     window.isReleasedWhenClosed = false
     window.delegate = self
+    window.backgroundColor = NSColor.windowBackgroundColor
     window.setFrameAutosaveName("AntigravityFinderDrawerV1")
 
     let accVC = NSTitlebarAccessoryViewController()
@@ -274,6 +285,7 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
     let config = WKWebViewConfiguration()
     config.userContentController.add(bridge, name: "afBridge")
     webView = WKWebView(frame: window.contentView!.bounds, configuration: config)
+    webView.setValue(false, forKey: "drawsBackground")
     webView.autoresizingMask = [.width, .height]
     window.contentView?.addSubview(webView)
 
@@ -552,6 +564,10 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
     }
 
     guard let panel = hudPanel, let label = hudLabel else { return }
+    hudToken += 1
+    let token = hudToken
+    hudHideWorkItem?.cancel()
+
     label.stringValue = trimmed
     let textWidth = min(max(ceil(label.attributedStringValue.size().width) + 36, 220), 660)
     let height: CGFloat = 42
@@ -561,18 +577,56 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
     panel.setFrame(NSRect(x: x, y: y, width: textWidth, height: height), display: true)
     panel.contentView?.frame = NSRect(x: 0, y: 0, width: textWidth, height: height)
     label.frame = NSRect(x: 16, y: 11, width: textWidth - 32, height: 20)
-    panel.alphaValue = 1
-    panel.orderFrontRegardless()
 
-    hudHideWorkItem?.cancel()
+    if isHudShowing && panel.isVisible {
+      panel.alphaValue = 1.0
+      panel.orderFrontRegardless()
+    } else {
+      isHudShowing = true
+      if shouldReduceMotion() {
+        panel.alphaValue = 1.0
+        panel.orderFrontRegardless()
+      } else {
+        panel.alphaValue = 0.0
+        panel.orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup({ ctx in
+          ctx.duration = 0.15
+          ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
+          panel.animator().alphaValue = 1.0
+        }, completionHandler: nil)
+      }
+    }
+
     let item = DispatchWorkItem { [weak self] in
-      self?.hudPanel?.orderOut(nil)
+      guard let self = self, self.hudToken == token, let activePanel = self.hudPanel else { return }
+      if self.shouldReduceMotion() {
+        self.isHudShowing = false
+        activePanel.orderOut(nil)
+        activePanel.alphaValue = 1.0
+      } else {
+        NSAnimationContext.runAnimationGroup({ ctx in
+          ctx.duration = 0.20
+          ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.4, 0.0, 1.0, 1.0)
+          activePanel.animator().alphaValue = 0.0
+        }, completionHandler: { [weak self] in
+          guard let self = self, self.hudToken == token else { return }
+          self.isHudShowing = false
+          self.hudPanel?.orderOut(nil)
+          self.hudPanel?.alphaValue = 1.0
+        })
+      }
     }
     hudHideWorkItem = item
-    DispatchQueue.main.asyncAfter(deadline: .now() + 3.4, execute: item)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.6, execute: item)
   }
 
   // MARK: - Window & Pin Controls
+
+  func windowDidMove(_ notification: Notification) {
+    if !isAnimatingVisibility {
+      restingOriginX = window?.frame.origin.x
+    }
+  }
 
   func updateWindowTitle() {
     let suffix = hotkeySpec.map { " (\($0.displayLabel))" } ?? ""
@@ -593,6 +647,7 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
         height: h
       )
       window.setFrame(frame, display: true)
+      restingOriginX = frame.origin.x
     }
   }
 
@@ -601,8 +656,44 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
       _ = isTargetHostApp(front)
     }
     ensureWindowOnVisibleScreen()
-    window.makeKeyAndOrderFront(nil)
-    NSApp.activate(ignoringOtherApps: true)
+
+    visibilityToken += 1
+    let token = visibilityToken
+    let targetX = restingOriginX ?? window.frame.origin.x
+    restingOriginX = targetX
+    let targetOrigin = NSPoint(x: targetX, y: window.frame.origin.y)
+
+    if shouldReduceMotion() {
+      isAnimatingVisibility = false
+      window.setFrameOrigin(targetOrigin)
+      window.alphaValue = 1.0
+      window.makeKeyAndOrderFront(nil)
+      NSApp.activate(ignoringOtherApps: true)
+    } else if !window.isVisible || window.alphaValue < 0.99 || isAnimatingVisibility {
+      if !window.isVisible {
+        window.alphaValue = 0.0
+        window.setFrameOrigin(NSPoint(x: targetOrigin.x + 12.0, y: targetOrigin.y))
+      }
+      window.makeKeyAndOrderFront(nil)
+      NSApp.activate(ignoringOtherApps: true)
+      isAnimatingVisibility = true
+      NSAnimationContext.runAnimationGroup({ ctx in
+        ctx.duration = 0.18
+        ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
+        ctx.allowsImplicitAnimation = true
+        window.animator().alphaValue = 1.0
+        window.animator().setFrameOrigin(targetOrigin)
+      }, completionHandler: { [weak self] in
+        guard let self = self, self.visibilityToken == token else { return }
+        self.isAnimatingVisibility = false
+        self.window.alphaValue = 1.0
+        self.window.setFrameOrigin(targetOrigin)
+      })
+    } else {
+      window.makeKeyAndOrderFront(nil)
+      NSApp.activate(ignoringOtherApps: true)
+    }
+
     isWindowVisible = true
 
     if let revealPath = revealPath, !revealPath.isEmpty,
@@ -619,8 +710,37 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
   }
 
   func hideWindow(restoreHostFocus: Bool, notifyParent: Bool) {
-    window.orderOut(nil)
+    visibilityToken += 1
+    let token = visibilityToken
     isWindowVisible = false
+
+    let restX = restingOriginX ?? window.frame.origin.x
+    restingOriginX = restX
+    let restOrigin = NSPoint(x: restX, y: window.frame.origin.y)
+
+    if shouldReduceMotion() || !window.isVisible {
+      isAnimatingVisibility = false
+      window.orderOut(nil)
+      window.alphaValue = 1.0
+      window.setFrameOrigin(restOrigin)
+    } else {
+      let endOrigin = NSPoint(x: restOrigin.x + 8.0, y: restOrigin.y)
+      isAnimatingVisibility = true
+      NSAnimationContext.runAnimationGroup({ ctx in
+        ctx.duration = 0.13
+        ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.4, 0.0, 1.0, 1.0)
+        ctx.allowsImplicitAnimation = true
+        window.animator().alphaValue = 0.0
+        window.animator().setFrameOrigin(endOrigin)
+      }, completionHandler: { [weak self] in
+        guard let self = self, self.visibilityToken == token else { return }
+        self.isAnimatingVisibility = false
+        self.window.orderOut(nil)
+        self.window.alphaValue = 1.0
+        self.window.setFrameOrigin(restOrigin)
+      })
+    }
+
     if restoreHostFocus, let hostApp = lastAntigravityApp, !hostApp.isTerminated {
       hostApp.activate(options: [])
     }
@@ -634,7 +754,7 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
   }
 
   @objc func toggleWindowAction() {
-    if window.isVisible {
+    if isWindowVisible {
       hideWindow(restoreHostFocus: true, notifyParent: true)
     } else {
       showWindow(notifyParent: true)
@@ -778,7 +898,7 @@ final class DrawerWindowController: NSObject, NSApplicationDelegate, NSWindowDel
       toggleWindowAction()
     case "revealPath":
       if let revealPath = msg["revealPath"] as? String, !revealPath.isEmpty {
-        if !window.isVisible {
+        if !isWindowVisible {
           showWindow(notifyParent: true, revealPath: revealPath)
         } else if let data = try? JSONSerialization.data(withJSONObject: ["type": "revealPath", "revealPath": revealPath], options: []),
                   let jsonStr = String(data: data, encoding: .utf8) {

@@ -1,6 +1,7 @@
 import Cocoa
 import WebKit
 import Carbon
+import QuartzCore
 
 // Native macOS Menu Bar (`NSStatusItem`), Carbon HotKey & Right-Side Floating Window Host
 // for Antigravity Context & Token Viewer.
@@ -81,6 +82,12 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
   var lastAuxHotkeyAt: TimeInterval = 0
   var hudWindow: NSWindow?
   var hudHideWorkItem: DispatchWorkItem?
+  var visibilityToken: Int = 0
+  var hudToken: Int = 0
+
+  private var shouldReduceMotion: Bool {
+    return NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+  }
 
   var shouldStayResident: Bool {
     return isMenubarEnabled || isShortcutEnabled || isAuxShortcutEnabled
@@ -395,6 +402,10 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
 
   func showHudNotice(_ text: String) {
     hudHideWorkItem?.cancel()
+    hudHideWorkItem = nil
+    hudToken += 1
+    let token = hudToken
+
     let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
     let font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
     let textWidth = ceil((text as NSString).size(withAttributes: [.font: font]).width)
@@ -407,6 +418,7 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
       height: panelHeight
     )
 
+    let wasVisible = (hudWindow?.isVisible == true) && ((hudWindow?.alphaValue ?? 0) > 0.05)
     let panel: NSWindow
     if let existing = hudWindow {
       panel = existing
@@ -443,14 +455,38 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
     container.addSubview(label)
 
     panel.contentView = container
-    panel.alphaValue = 1.0
-    panel.orderFrontRegardless()
+    if shouldReduceMotion || wasVisible {
+      panel.alphaValue = 1.0
+      panel.orderFrontRegardless()
+    } else {
+      panel.alphaValue = 0.0
+      panel.orderFrontRegardless()
+      NSAnimationContext.runAnimationGroup({ ctx in
+        ctx.duration = 0.15
+        ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
+        panel.animator().alphaValue = 1.0
+      }, completionHandler: nil)
+    }
 
     let work = DispatchWorkItem { [weak self] in
-      self?.hudWindow?.orderOut(nil)
+      guard let self = self, self.hudToken == token, let activePanel = self.hudWindow else { return }
+      if self.shouldReduceMotion {
+        activePanel.orderOut(nil)
+        activePanel.alphaValue = 1.0
+        return
+      }
+      NSAnimationContext.runAnimationGroup({ ctx in
+        ctx.duration = 0.20
+        ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.4, 0.0, 1.0, 1.0)
+        activePanel.animator().alphaValue = 0.0
+      }, completionHandler: { [weak self] in
+        guard let self = self, self.hudToken == token else { return }
+        activePanel.orderOut(nil)
+        activePanel.alphaValue = 1.0
+      })
     }
     hudHideWorkItem = work
-    DispatchQueue.main.asyncAfter(deadline: .now() + 3.4, execute: work)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.6, execute: work)
   }
 
   func toggleWindowFromHotkey() {
@@ -630,9 +666,27 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
   // MARK: - Window Show / Hide / Pin
 
   func showWindow(notifyParent: Bool = true) {
+    visibilityToken += 1
     if window.isMiniaturized { window.deminiaturize(nil) }
-    window.makeKeyAndOrderFront(nil)
-    NSApp.activate(ignoringOtherApps: true)
+    if shouldReduceMotion {
+      window.alphaValue = 1.0
+      window.makeKeyAndOrderFront(nil)
+      NSApp.activate(ignoringOtherApps: true)
+    } else {
+      let alreadyVisible = window.isVisible
+      if !alreadyVisible {
+        window.alphaValue = 0.0
+      }
+      window.makeKeyAndOrderFront(nil)
+      NSApp.activate(ignoringOtherApps: true)
+      if !alreadyVisible || window.alphaValue < 0.99 {
+        NSAnimationContext.runAnimationGroup({ ctx in
+          ctx.duration = 0.18
+          ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
+          window.animator().alphaValue = 1.0
+        }, completionHandler: nil)
+      }
+    }
     isWindowVisible = true
     syncHotKeyRegistration()
     webView?.evaluateJavaScript("window.__cvOnHostVisibility && window.__cvOnHostVisibility(true);", completionHandler: nil)
@@ -645,13 +699,28 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
     if isRecordingShortcut {
       isRecordingShortcut = false
     }
-    window.orderOut(nil)
+    visibilityToken += 1
+    let token = visibilityToken
     isWindowVisible = false
     syncHotKeyRegistration()
     webView?.evaluateJavaScript("window.__cvOnHostVisibility && window.__cvOnHostVisibility(false);", completionHandler: nil)
     if notifyParent {
       emitJson(["type": "visibilityChanged", "windowVisible": false])
     }
+    if shouldReduceMotion || !window.isVisible {
+      window.orderOut(nil)
+      window.alphaValue = 1.0
+      return
+    }
+    NSAnimationContext.runAnimationGroup({ ctx in
+      ctx.duration = 0.13
+      ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.4, 0.0, 1.0, 1.0)
+      window.animator().alphaValue = 0.0
+    }, completionHandler: { [weak self] in
+      guard let self = self, self.visibilityToken == token else { return }
+      self.window.orderOut(nil)
+      self.window.alphaValue = 1.0
+    })
   }
 
   @objc func hideWindowAction() {

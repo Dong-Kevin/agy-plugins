@@ -86,6 +86,9 @@
     hourlyDay: 'today', // 'today' | 'yesterday'
     diagTab: 'events', // 'events' | 'routing'
     heatPageOffset: 0,
+    chartScrollKey: '',
+    chartScrollPending: '',
+    chartScrollMode: 'latest',
     selectedBucketKey: '',
     customRange: {
       start: '',
@@ -97,6 +100,7 @@
     // Cost view controls
     costScope: 'period',
     costMode: 'hybrid',
+    projectLimit: 5, // 5 | 10
     turnsFilter: 'all', // 'all' | 'spike' | 'tools'
     turnsView: 'steps', // 'steps' | 'prompts'
     promptTurnsFilter: 'all', // 'all' | 'cold'
@@ -152,12 +156,25 @@
     floatPinned: Boolean(window.__CV_FLOAT_PINNED__ ?? true),
     toastTimer: null,
     customTooltipsReady: false,
+    openDetailsKeys: new Set(),
+    hoveredSpectrumCat: '',
+    heatScrollInited: false,
+    lastHeatWindowKey: '',
+    lastRenderSigs: {},
+    themeSwitchTimer: null,
+    sessionSwitchTimer: null,
+    scrollIdleTimer: null,
+    numTweenHandles: {},
+    numTweenLastValues: {},
+    refreshSpinPendingStop: false,
+    refreshSpinFallbackTimer: null,
     capPopover: {
       open: false,
       pinned: false,
       activeKey: '',
       lastSig: '',
-      closeTimer: null
+      closeTimer: null,
+      hideTimer: null
     }
   };
 
@@ -446,7 +463,7 @@
     'menubar.speed.title': 'Show latest speed, latency, avg & peak',
     'menubar.quota': '5h/Week Quota',
     'menubar.quota.title': 'Show 5h / Weekly quota remaining & reset countdown',
-    'drawer.float': 'Floating Window (📌)',
+    'drawer.float': 'Floating Window',
     'drawer.float.title': 'Pop out a dedicated always-on-top floating panel on the right',
     'drawer.floatSc': 'Floating Hotkey',
     'drawer.floatSc.title': 'Toggle the floating panel with one shortcut (no Accessibility prompt)',
@@ -624,6 +641,8 @@
     'cost.cat.out': 'Output (Incl. Thinking)',
     'cost.modelBoard': 'Per-Model Usage & Value Breakdown',
     'cost.projBoard': 'Per-Project / Workspace Usage',
+    'cost.projTop5': 'Top 5',
+    'cost.projTop10': 'Top 10',
     'cost.finePrint': 'Note: API equivalent is estimated from public Google / Anthropic list prices (cache reads discounted; output includes thinking tokens) to gauge usage intensity. Flat-rate subscriptions differ from pay-as-you-go retail billing.'
   };
 
@@ -665,14 +684,108 @@
     });
   }
 
-  function showToast(msg, durationMs = 2600) {
+  let reducedMotionMql = null;
+  let reducedMotionCached = false;
+  function prefersReducedMotion() {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
+    if (!reducedMotionMql) {
+      try {
+        reducedMotionMql = window.matchMedia('(prefers-reduced-motion: reduce)');
+        reducedMotionCached = Boolean(reducedMotionMql?.matches);
+        reducedMotionMql?.addEventListener?.('change', (ev) => {
+          reducedMotionCached = Boolean(ev.matches);
+        });
+      } catch {
+        reducedMotionCached = false;
+      }
+    }
+    return Boolean(reducedMotionMql ? reducedMotionMql.matches : reducedMotionCached);
+  }
+
+  function setGpuBarRatio(el, pctVal) {
+    if (!el || !el.style) return;
+    const clamped = pctVal !== null && pctVal !== undefined && Number.isFinite(Number(pctVal))
+      ? Math.min(100, Math.max(0, Number(pctVal)))
+      : 0;
+    const ratio = (clamped / 100).toFixed(4);
+    el.style.width = `${clamped}%`;
+    if (typeof el.style.setProperty === 'function') {
+      el.style.setProperty('--cv-ratio', ratio);
+    }
+  }
+
+  function tweenDisplayNumber(elId, targetNum, formatFn, key = elId) {
+    const el = typeof elId === 'string' ? $(elId) : elId;
+    if (!el) return;
+    const handles = state.numTweenHandles || (state.numTweenHandles = {});
+    const lastVals = state.numTweenLastValues || (state.numTweenLastValues = {});
+    if (handles[key] && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(handles[key]);
+      handles[key] = 0;
+    }
+    if (targetNum === null || targetNum === undefined || !Number.isFinite(Number(targetNum))) {
+      delete lastVals[key];
+      setText(el, formatFn(null));
+      return;
+    }
+    const nextVal = Number(targetNum);
+    const prevVal = lastVals[key];
+    lastVals[key] = nextVal;
+    const canAnimate = (
+      typeof prevVal === 'number' &&
+      Number.isFinite(prevVal) &&
+      Math.abs(nextVal - prevVal) > 1e-4 &&
+      !prefersReducedMotion() &&
+      typeof document !== 'undefined' &&
+      !document.hidden &&
+      typeof requestAnimationFrame === 'function' &&
+      typeof cancelAnimationFrame === 'function' &&
+      typeof performance !== 'undefined' &&
+      typeof performance.now === 'function'
+    );
+    if (!canAnimate) {
+      setText(el, formatFn(nextVal));
+      return;
+    }
+    const startTs = performance.now();
+    const duration = 180;
+    const step = (now) => {
+      const t = Math.min(1, Math.max(0, (now - startTs) / duration));
+      const eased = 1 - Math.pow(1 - t, 3);
+      const cur = prevVal + (nextVal - prevVal) * eased;
+      setText(el, formatFn(t >= 1 ? nextVal : cur));
+      if (t < 1) {
+        handles[key] = requestAnimationFrame(step);
+      } else {
+        handles[key] = 0;
+      }
+    };
+    handles[key] = requestAnimationFrame(step);
+  }
+
+  function applySpectrumHoverState(catKey) {
+    const bar = $('ctx-seg-bar');
+    const leg = $('ctx-seg-legend');
+    const active = Boolean(catKey);
+    bar?.classList?.toggle('has-hover', active);
+    leg?.classList?.toggle('has-hover', active);
+    [bar, leg].forEach((container) => {
+      container?.querySelectorAll?.('[data-cat-key]')?.forEach((node) => {
+        node.classList?.toggle('is-highlighted', active && node.dataset?.catKey === catKey);
+      });
+    });
+  }
+
+  function showToast(msg, durationMs = 2400) {
     const el = $('toast');
     if (!el) return;
     setText(el, msg);
     el.classList.remove('hidden');
+    el.setAttribute?.('aria-hidden', 'false');
     if (state.toastTimer) clearTimeout(state.toastTimer);
     state.toastTimer = setTimeout(() => {
       el.classList.add('hidden');
+      el.setAttribute?.('aria-hidden', 'true');
     }, durationMs);
   }
 
@@ -716,8 +829,20 @@
     }
   }
 
-  function applyAppearanceToDom() {
+  function triggerThemeTransition() {
+    if (typeof document === 'undefined' || !document.documentElement?.classList || prefersReducedMotion()) return;
+    const root = document.documentElement;
+    root.classList.add('is-theme-switching');
+    if (state.themeSwitchTimer) clearTimeout(state.themeSwitchTimer);
+    state.themeSwitchTimer = setTimeout(() => {
+      root.classList.remove('is-theme-switching');
+      state.themeSwitchTimer = null;
+    }, 200);
+  }
+
+  function applyAppearanceToDom({ animate = false } = {}) {
     if (typeof document === 'undefined' || !document.documentElement) return;
+    if (animate) triggerThemeTransition();
     const root = document.documentElement;
     const dark = isEffectiveDark();
 
@@ -776,7 +901,10 @@
     const icTheme = $('ic-theme');
     const btnTheme = $('btn-theme');
     if (icTheme) {
-      if (state.ui.themeMode === 'light') {
+      if (icTheme.classList?.contains('theme-ic-stack')) {
+        if (icTheme.dataset) icTheme.dataset.themeIcon = state.ui.themeMode || 'auto';
+        icTheme.setAttribute?.('data-theme-icon', state.ui.themeMode || 'auto');
+      } else if (state.ui.themeMode === 'light') {
         icTheme.innerHTML = '<circle cx="8" cy="8" r="3.3"/><path d="M8 1.6v1.8M8 12.6v1.8M1.6 8h1.8M12.6 8h1.8M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3"/>';
       } else if (state.ui.themeMode === 'dark') {
         icTheme.innerHTML = '<path d="M8.4 2.1a5.8 5.8 0 1 0 5.5 7.5A4.6 4.6 0 0 1 8.4 2.1Z"/>';
@@ -806,6 +934,9 @@
     }
 
     applyLanguageToDom();
+    if (typeof syncAllSegIndicators === 'function') {
+      syncAllSegIndicators({ animate: false });
+    }
   }
 
   async function persistUiPreferences() {
@@ -871,7 +1002,25 @@
 
   const CONTEXT_INFLIGHT_STALE_MS = 25000;
 
-  async function loadContext(force = false) {
+  function beginSessionSwitchVisual() {
+    if (state.sessionSwitchTimer) clearTimeout(state.sessionSwitchTimer);
+    state.sessionSwitchTimer = setTimeout(() => {
+      state.sessionSwitchTimer = null;
+      document.querySelector?.('.viewport')?.classList?.add('is-switching');
+      document.body?.classList?.add('is-session-switching');
+    }, 120);
+  }
+
+  function endSessionSwitchVisual() {
+    if (state.sessionSwitchTimer) {
+      clearTimeout(state.sessionSwitchTimer);
+      state.sessionSwitchTimer = null;
+    }
+    document.querySelector?.('.viewport')?.classList?.remove('is-switching');
+    document.body?.classList?.remove('is-session-switching');
+  }
+
+  async function loadContext(force = false, opts = {}) {
     const syncLiveHost = () => {
       const liveHostId = window.sidecar?.conversationId || '';
       if (liveHostId && liveHostId !== state.hostConvId) {
@@ -892,6 +1041,7 @@
       (nowMs - state.contextInFlightSince > CONTEXT_INFLIGHT_STALE_MS)
     );
     const switchingConv = (state.contextInFlightConv || '') !== targetConv;
+    const showSwitchVisual = Boolean(opts.showSwitchIndicator || (state.contextData && targetConv && state.contextData.conversationId && state.contextData.conversationId !== targetConv));
 
     if (!force && !inFlightStale && state.contextInFlight && !switchingConv) {
       return;
@@ -912,6 +1062,7 @@
     state.contextInFlight = true;
     state.contextInFlightConv = targetConv;
     state.contextInFlightSince = nowMs;
+    if (showSwitchVisual) beginSessionSwitchVisual();
     const qs = new URLSearchParams();
     if (targetConv) qs.set('conversationId', targetConv);
     if (force) qs.set('force', '1');
@@ -929,12 +1080,14 @@
       }
 
       let needReconcileRefetch = false;
+      let expiredUnpinned = false;
       if (snap && snap.pinnedConvId !== undefined && !state.pinSyncPending && pinSeqAtStart === state.pinSyncSeq) {
         const backendPinned = typeof snap.pinnedConvId === 'string' ? snap.pinnedConvId.trim() : '';
         if (!backendPinned && state.selectedConvId) {
           state.selectedConvId = '';
           state.contextEtag = '';
           state.contextEtagConv = state.hostConvId || '';
+          expiredUnpinned = true;
           needReconcileRefetch = Boolean(
             snap.unchanged || !snap.ok || (snap.conversationId && snap.conversationId === targetConv)
           );
@@ -946,6 +1099,10 @@
             snap.unchanged || !snap.ok || snap.conversationId !== backendPinned
           );
         }
+      }
+
+      if (expiredUnpinned) {
+        showToast(tr('原会话已结束，已切回当前会话', 'Session ended · Following active'), 2600);
       }
 
       if (snap?.recentConversations) {
@@ -969,7 +1126,13 @@
       }
       if (snap?.ok) {
         const prevConvId = state.contextData?.conversationId || '';
-        if (prevConvId && snap.conversationId && prevConvId !== snap.conversationId && typeof closeCapPopover === 'function') {
+        if (
+          prevConvId &&
+          snap.conversationId &&
+          prevConvId !== snap.conversationId &&
+          !state.capPopover?.pinned &&
+          typeof closeCapPopover === 'function'
+        ) {
           closeCapPopover();
         }
         state.contextEtag = snap.etag || '';
@@ -992,6 +1155,7 @@
         if (state.contextAbortCtrl === abortCtrl) {
           state.contextAbortCtrl = null;
         }
+        endSessionSwitchVisual();
       }
     }
   }
@@ -1186,7 +1350,11 @@
     const win = computeEffectiveWindow(ctx);
     const pct = win.pct;
     const healthPct = win.serverBudget ? win.serverPct : pct;
-    setText('cap-ctx-pct', pct !== null ? `${pct.toFixed(0)}%` : (win.used !== null ? fmtTokens(win.used) : '--%'));
+    if (pct !== null) {
+      tweenDisplayNumber('cap-ctx-pct', pct, (v) => (v !== null ? `${v.toFixed(0)}%` : '--%'), 'cap-ctx-pct');
+    } else {
+      tweenDisplayNumber('cap-ctx-pct', null, () => (win.used !== null ? fmtTokens(win.used) : '--%'), 'cap-ctx-pct');
+    }
 
     const miniRing = $('mini-ring-fill');
     if (miniRing) {
@@ -1199,7 +1367,12 @@
     }
 
     const tps = spd?.tps ?? spd?.streamingTps ?? null;
-    setText('cap-speed-val', tps !== null ? `${tps} tok/s` : '-- tok/s');
+    tweenDisplayNumber(
+      'cap-speed-val',
+      tps !== null && Number.isFinite(Number(tps)) ? Number(tps) : null,
+      (v) => (v !== null ? `${Number(v).toFixed(Number.isInteger(Number(tps)) ? 0 : 1)} tok/s` : '-- tok/s'),
+      'cap-speed-val'
+    );
 
     const srcSummary = hist?.analyticsBySource?.[state.sourceFilter]?.summary
       || hist?.analyticsBySource?.all?.summary;
@@ -1345,6 +1518,8 @@
     if (!pop || !trigger) return;
     state.convPicker.open = true;
     pop.classList.remove('hidden');
+    pop.setAttribute?.('aria-hidden', 'false');
+    if ('inert' in pop) pop.inert = false;
     trigger.setAttribute('aria-expanded', 'true');
     renderConvPopoverPills(true);
     renderConvPopoverBody(true);
@@ -1359,7 +1534,11 @@
     const pop = $('conv-popover');
     const trigger = $('conv-picker-trigger');
     state.convPicker.open = false;
-    if (pop) pop.classList.add('hidden');
+    if (pop) {
+      pop.classList.add('hidden');
+      pop.setAttribute?.('aria-hidden', 'true');
+      if ('inert' in pop) pop.inert = true;
+    }
     if (trigger) {
       trigger.setAttribute('aria-expanded', 'false');
       if (restoreFocus) {
@@ -1603,40 +1782,38 @@
       for (const g of filteredGroups) {
         const gDisplayName = displayProjName(g.name);
         const activeDot = g.hasActive ? `<span class="conv-group-active-dot" title="${escZh(tr('当前会话所在项目', 'Project of active session'))}"></span>` : '';
-        const itemsHtml = g.expanded
-          ? g.items.map((item) => {
-              const title = item.title || item.annTitle || item.shortId || item.id.slice(0, 8);
-              const cliBadge = item.source === 'cli'
-                ? `<span class="conv-cli-badge" title="${escZh(tr('agy CLI 会话', 'agy CLI session'))}">CLI</span>`
-                : '';
-              const runningBadge = item.isRunning
-                ? `<span class="conv-running-pill" title="${escZh(tr('正在运行中', 'Running'))}"><i class="conv-running-dot"></i>${escZh(tr('运行中', 'Running'))}</span>`
-                : '';
-              const isCur = item.id === displayConvId;
-              const curBadge = isCur ? `<span class="conv-cur-badge">${escZh(tr('当前', 'Active'))}</span>` : '';
-              const tokText = `${fmtTokens(item.lastContextTokens || 0, 1)} tok`;
-              const turnsText = tr(`${fmtInt(item.turnsCount || 0)} 轮`, `${fmtInt(item.turnsCount || 0)} turns`);
-              const relText = fmtRelativeTime(item.effectiveActiveMs || item.updatedAtMs, nowMs);
-              const line2 = `${tokText} · ${turnsText} · ${relText}`;
-              const tipParts = [title, item.repoLabel || gDisplayName, line2].filter(Boolean);
-              return (
-                `<button type="button" class="conv-item${isCur ? ' is-selected' : ''}" data-conv-id="${esc(item.id)}" title="${escZh(tipParts.join(' · '))}">` +
-                `<div class="conv-item-line1">${cliBadge}<span class="conv-item-title">${escZh(title)}</span>${runningBadge}${curBadge}</div>` +
-                `<div class="conv-item-line2">${escZh(line2)}</div>` +
-                `</button>`
-              );
-            }).join('')
-          : '';
+        const itemsHtml = g.items.map((item) => {
+          const title = item.title || item.annTitle || item.shortId || item.id.slice(0, 8);
+          const cliBadge = item.source === 'cli'
+            ? `<span class="conv-cli-badge" title="${escZh(tr('agy CLI 会话', 'agy CLI session'))}">CLI</span>`
+            : '';
+          const runningBadge = item.isRunning
+            ? `<span class="conv-running-pill" title="${escZh(tr('正在运行中', 'Running'))}"><i class="conv-running-dot"></i>${escZh(tr('运行中', 'Running'))}</span>`
+            : '';
+          const isCur = item.id === displayConvId;
+          const curBadge = isCur ? `<span class="conv-cur-badge">${escZh(tr('当前', 'Active'))}</span>` : '';
+          const tokText = `${fmtTokens(item.lastContextTokens || 0, 1)} tok`;
+          const turnsText = tr(`${fmtInt(item.turnsCount || 0)} 轮`, `${fmtInt(item.turnsCount || 0)} turns`);
+          const relText = fmtRelativeTime(item.effectiveActiveMs || item.updatedAtMs, nowMs);
+          const line2 = `${tokText} · ${turnsText} · ${relText}`;
+          const tipParts = [title, item.repoLabel || gDisplayName, line2].filter(Boolean);
+          return (
+            `<button type="button" class="conv-item${isCur ? ' is-selected' : ''}" data-conv-id="${esc(item.id)}" title="${escZh(tipParts.join(' · '))}">` +
+            `<div class="conv-item-line1">${cliBadge}<span class="conv-item-title">${escZh(title)}</span>${runningBadge}${curBadge}</div>` +
+            `<div class="conv-item-line2">${escZh(line2)}</div>` +
+            `</button>`
+          );
+        }).join('');
 
         htmlParts.push(
-          `<div class="conv-group">` +
+          `<div class="conv-group${g.expanded ? '' : ' is-collapsed'}" data-proj-group="${esc(g.name)}">` +
           `<button type="button" class="conv-group-head" data-proj-toggle="${esc(g.name)}" aria-expanded="${g.expanded ? 'true' : 'false'}">` +
           `<span class="conv-group-chevron" aria-hidden="true">▸</span>` +
           `<span class="conv-group-name" title="${escZh(gDisplayName)}">${escZh(gDisplayName)}</span>` +
           activeDot +
           `<span class="conv-group-count">${esc(g.items.length)}</span>` +
           `</button>` +
-          (g.expanded ? `<div class="conv-group-items">${itemsHtml}</div>` : '') +
+          `<div class="conv-group-items-wrap"><div class="conv-group-items">${itemsHtml}</div></div>` +
           `</div>`
         );
       }
@@ -1678,10 +1855,10 @@
     state.contextInFlightSince = 0;
 
     if (closePopover) closeConvPopover();
-    if (typeof closeCapPopover === 'function') closeCapPopover();
+    if (!state.capPopover?.pinned && typeof closeCapPopover === 'function') closeCapPopover();
     renderConversationPicker(state.recentConversations, state.activeConvId || normalized);
     if (showFollowToast && !normalized) {
-      showToast(tr('已切回自动跟随当前对话', 'Switched back to auto-follow active session'));
+      showToast(tr('已恢复自动跟随', 'Auto-follow resumed'), 1800);
     }
 
     try {
@@ -1692,7 +1869,7 @@
     } finally {
       state.pinSyncPending = Math.max(0, state.pinSyncPending - 1);
     }
-    loadContext(true).catch(() => {});
+    loadContext(true, { showSwitchIndicator: true }).catch(() => {});
   }
 
   // -------------------------------------------------------------------------
@@ -1854,7 +2031,7 @@
 
     // Hero circular gauge (r = 35 => C = 219.91)
     const circum = 219.91;
-    setText('ctx-pct-big', pct !== null ? `${pct.toFixed(1)}%` : '--%');
+    tweenDisplayNumber('ctx-pct-big', pct, (v) => (v !== null ? `${v.toFixed(1)}%` : '--%'), 'ctx-pct-big');
     setText('ctx-gauge-sub', win.budget ? tr('预算占比', '% of budget') : tr('上限未知', 'Cap unknown'));
 
     const heroFill = $('hero-ring-fill');
@@ -2288,7 +2465,6 @@
     const leg = $('ctx-seg-legend');
 
     if (bar) {
-      bar.classList?.remove('has-hover');
       if (sum <= 0 || !items.length) {
         bar.innerHTML = '';
       } else {
@@ -2305,7 +2481,6 @@
     }
 
     if (leg) {
-      leg.classList?.remove('has-hover');
       if (sum <= 0 || !items.length) {
         leg.innerHTML = `<span class="muted">${escZh(tr('暂无上下文构成明细', 'No context breakdown available'))}</span>`;
       } else {
@@ -2320,6 +2495,14 @@
           );
         }).join('') + (!isExact ? `<span class="muted">${escZh(tr('· 本地启发式占比', '· Local heuristic'))}</span>` : '');
       }
+    }
+
+    // Preserve active spectrum hover across 1.5s polling redraws
+    const hoveredCat = state.hoveredSpectrumCat || '';
+    if (hoveredCat && items.some((it) => it.key === hoveredCat)) {
+      applySpectrumHoverState(hoveredCat);
+    } else {
+      applySpectrumHoverState('');
     }
   }
 
@@ -2350,7 +2533,13 @@
       }
     }
 
-    setText('sp-tps', spd?.tps != null ? `${spd.tps} tok/s` : '--');
+    const tpsVal = spd?.tps != null && Number.isFinite(Number(spd.tps)) ? Number(spd.tps) : null;
+    tweenDisplayNumber(
+      'sp-tps',
+      tpsVal,
+      (v) => (v !== null ? `${Number(v).toFixed(Number.isInteger(tpsVal) ? 0 : 1)} tok/s` : '--'),
+      'sp-tps'
+    );
     const hasEffTpsGap = Boolean(spd?.effectiveTps > 0 && (!(spd.tps > 0) || Math.abs(spd.effectiveTps - spd.tps) / spd.tps >= 0.2));
     const streamTpsText = spd?.streamingTps != null
       ? (hasEffTpsGap
@@ -2488,14 +2677,14 @@
         const bar = $('ctx-quota-bar');
         if (bar) {
           if (barPct !== null) {
-            bar.style.width = `${Math.min(100, Math.max(0, barPct))}%`;
+            setGpuBarRatio(bar, barPct);
             bar.style.background = barPct <= 15
               ? 'var(--danger)'
               : barPct <= 40
                 ? 'var(--warn)'
                 : 'var(--good)';
           } else {
-            bar.style.width = '0%';
+            setGpuBarRatio(bar, 0);
             bar.style.background = 'var(--cv-muted)';
           }
         }
@@ -2641,6 +2830,14 @@
 
     const listEl = $('turns-timeline');
     if (!listEl) return;
+    const renderSigs = state.lastRenderSigs || (state.lastRenderSigs = {});
+    const applyListHtmlPreservingScroll = (sigKey, html) => {
+      if (renderSigs[sigKey] === html) return;
+      renderSigs[sigKey] = html;
+      const prevTop = listEl.scrollTop || 0;
+      listEl.innerHTML = html;
+      if (prevTop > 0) listEl.scrollTop = prevTop;
+    };
 
     if (viewMode === 'prompts') {
       const safePrompts = Array.isArray(promptTurns) ? promptTurns : [];
@@ -2661,11 +2858,11 @@
         const emptyMsg = safePrompts.length > 0
           ? tr('当前筛选条件下没有匹配的 Prompt 轮次', 'No prompts match the current filter')
           : tr('暂无按 Prompt 分组的轮次记录', 'No prompt-grouped turns recorded yet');
-        listEl.innerHTML = `<div class="kv-row"><span class="muted">${escZh(emptyMsg)}</span></div>`;
+        applyListHtmlPreservingScroll('turns-timeline', `<div class="kv-row"><span class="muted">${escZh(emptyMsg)}</span></div>`);
         return;
       }
 
-      listEl.innerHTML = filteredPrompts.map((p) => {
+      const promptsHtml = filteredPrompts.map((p) => {
         const st = p.startupState;
         const pctNum = p.startupCacheHitPercent != null && Number.isFinite(Number(p.startupCacheHitPercent))
           ? Math.round(Number(p.startupCacheHitPercent))
@@ -2736,6 +2933,7 @@
           `</div>`
         );
       }).join('');
+      applyListHtmlPreservingScroll('turns-timeline', promptsHtml);
       return;
     }
 
@@ -2759,11 +2957,11 @@
       const emptyMsg = turns.length > 0
         ? tr('当前筛选条件下没有匹配的轮次', 'No turns match the current filter')
         : tr('暂无已完成轮次记录', 'No completed turns yet');
-      listEl.innerHTML = `<div class="kv-row"><span class="muted">${escZh(emptyMsg)}</span></div>`;
+      applyListHtmlPreservingScroll('turns-timeline', `<div class="kv-row"><span class="muted">${escZh(emptyMsg)}</span></div>`);
       return;
     }
 
-    listEl.innerHTML = filtered.map((t) => {
+    const stepsHtml = filtered.map((t) => {
       const delta = Number(t.deltaTokens || 0);
       const sign = delta >= 0 ? '+' : '-';
       const deltaCls = delta < -1000 ? 'compact' : delta >= 8000 ? 'spike' : '';
@@ -2842,6 +3040,7 @@
         `</div>`
       );
     }).join('');
+    applyListHtmlPreservingScroll('turns-timeline', stepsHtml);
   }
 
   function renderHeavyItemsCard(heavyItems = []) {
@@ -2895,7 +3094,7 @@
         `</span>` +
         `<span class="heavy-val num-strong">${escZh(`~${fmtTokens(estTok, 1)} tok${shareStr}`)}</span>` +
         `</div>` +
-        `<div class="heavy-bar-track"><div class="heavy-bar-fill ${km.cls}" style="width:${barW}%"></div></div>` +
+        `<div class="heavy-bar-track"><div class="heavy-bar-fill is-gpu ${km.cls}" style="--cv-ratio:${(Number(barW) / 100).toFixed(4)};width:${barW}%"></div></div>` +
         (preview ? `<div class="heavy-preview" title="${esc(preview)}">${esc(preview)}</div>` : '') +
         `</div>`
       );
@@ -3164,7 +3363,8 @@
         : tr('按消耗排序 · 模型级平均缓存', 'Sorted by tokens · Per-model avg cache')
     );
 
-    list.innerHTML = models.map((m) => {
+    const renderSigs = state.lastRenderSigs || (state.lastRenderSigs = {});
+    const modelsHtml = models.map((m) => {
       const pct = typeof m.cacheHitPercent === 'number' && Number.isFinite(m.cacheHitPercent)
         ? m.cacheHitPercent
         : null;
@@ -3204,10 +3404,16 @@
         `<span class="session-model-rate ${rateCls}">${esc(pct !== null ? `${pct.toFixed(1)}%` : '--')}</span>` +
         `</span>` +
         `</div>` +
-        `<div class="thin-track xs"><div class="thin-fill" style="width:${barW.toFixed(1)}%;background:${barCol}"></div></div>` +
+        `<div class="thin-track xs"><div class="thin-fill is-gpu" style="--cv-ratio:${(barW / 100).toFixed(4)};width:${barW.toFixed(1)}%;background:${barCol}"></div></div>` +
         `</div>`
       );
     }).join('');
+    if (renderSigs['session-models-list'] !== modelsHtml) {
+      renderSigs['session-models-list'] = modelsHtml;
+      const prevTop = list.scrollTop || 0;
+      list.innerHTML = modelsHtml;
+      if (prevTop > 0) list.scrollTop = prevTop;
+    }
   }
 
   function renderAgentTreeCard(agentTree) {
@@ -3314,7 +3520,8 @@
       failed: { text: tr('失败', 'Failed'), cls: 'danger' }
     };
 
-    list.innerHTML = children.map((c) => {
+    const renderSigs = state.lastRenderSigs || (state.lastRenderSigs = {});
+    const treeHtml = children.map((c) => {
       const name = c.name || (c.id ? String(c.id).slice(0, 8) : tr('未命名子代理', 'Unnamed subagent'));
       const roleChip = c.role ? `<span class="turn-chip">${escZh(c.role)}</span>` : '';
       const rawState = String(c.state || '').toLowerCase();
@@ -3345,6 +3552,12 @@
         `</div>`
       );
     }).join('');
+    if (renderSigs['agent-tree-list'] !== treeHtml) {
+      renderSigs['agent-tree-list'] = treeHtml;
+      const prevTop = list.scrollTop || 0;
+      list.innerHTML = treeHtml;
+      if (prevTop > 0) list.scrollTop = prevTop;
+    }
   }
 
   function renderCompactionsCard(compactions = []) {
@@ -3371,7 +3584,19 @@
         : `累计释放约 ${fmtTokens(totalSaved, 1)} Token 上下文窗口`
     );
 
-    list.innerHTML = items.map((c, idx) => {
+    const renderSigs = state.lastRenderSigs || (state.lastRenderSigs = {});
+    const openKeys = state.openDetailsKeys instanceof Set ? state.openDetailsKeys : null;
+    if (openKeys && typeof list.querySelectorAll === 'function') {
+      list.querySelectorAll('.compaction-item[data-detail-key]').forEach((itemEl) => {
+        const k = itemEl.dataset?.detailKey || itemEl.getAttribute?.('data-detail-key');
+        const det = itemEl.querySelector?.('details.compaction-details');
+        if (!k || !det) return;
+        if (det.open) openKeys.add(k);
+        else openKeys.delete(k);
+      });
+    }
+    const convPrefix = state.contextData?.conversationId || '';
+    const compHtml = items.map((c, idx) => {
       const cIdx = c.index ?? (items.length - idx);
       const beforeTok = Number(c.beforeTokens || 0);
       const afterTok = Number(c.afterTokens || 0);
@@ -3383,9 +3608,11 @@
       const stepStr = c.stepIndex != null ? `Step ${c.stepIndex}` : '';
       const preview = c.summaryPreview ? String(c.summaryPreview).trim() : tr('（点击展开查看压缩摘要原文）', '(Click to expand compaction summary)');
       const full = c.summaryFull ? String(c.summaryFull) : preview;
+      const detailKey = `${convPrefix}:compaction:${cIdx}:${c.stepIndex ?? ''}`;
+      const isOpenAttr = openKeys && openKeys.has(detailKey) ? ' open' : '';
 
       return (
-        `<div class="compaction-item">` +
+        `<div class="compaction-item" data-detail-key="${esc(detailKey)}">` +
         `<div class="compaction-top">` +
         `<span class="turn-top-left">` +
         `<span class="turn-idx">${esc(`#C${cIdx}`)}</span>` +
@@ -3398,13 +3625,19 @@
         (timeStr && stepStr ? `<span>·</span>` : '') +
         (stepStr ? `<span>${esc(stepStr)}</span>` : '') +
         `</div>` +
-        `<details class="compaction-details">` +
+        `<details class="compaction-details"${isOpenAttr}>` +
         `<summary class="compaction-summary-toggle"><span class="compaction-preview-text">${esc(preview)}</span></summary>` +
         `<pre class="compaction-summary">${esc(full)}</pre>` +
         `</details>` +
         `</div>`
       );
     }).join('');
+    if (renderSigs['compactions-list'] !== compHtml) {
+      renderSigs['compactions-list'] = compHtml;
+      const prevTop = list.scrollTop || 0;
+      list.innerHTML = compHtml;
+      if (prevTop > 0) list.scrollTop = prevTop;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -3607,6 +3840,59 @@
     }
   }
 
+  function scrollChartStageNow(stage, mode = 'latest') {
+    if (!stage) return false;
+    const hasClientW = typeof stage.clientWidth === 'number';
+    if (hasClientW && stage.clientWidth <= 0) return false;
+    const maxScroll = hasClientW
+      ? Math.max(0, (stage.scrollWidth || 0) - stage.clientWidth)
+      : (stage.scrollWidth || 0);
+    if (mode === 'selected' && hasClientW && maxScroll > 0 && typeof stage.querySelector === 'function') {
+      const sel = stage.querySelector('.bar-col.selected, .heat-cell.selected');
+      if (sel && typeof sel.offsetLeft === 'number') {
+        const target = Math.max(0, sel.offsetLeft + (sel.offsetWidth || 0) - stage.clientWidth + 24);
+        stage.scrollLeft = Math.min(maxScroll, target);
+        return true;
+      }
+    }
+    stage.scrollLeft = maxScroll;
+    return true;
+  }
+
+  function applyChartStageScroll(stage, scopeKey, { prevScrollLeft = 0, mode = 'latest' } = {}) {
+    if (!stage) return;
+    const isNewScope = state.chartScrollKey !== scopeKey;
+    const wasPending = state.chartScrollPending === scopeKey;
+    state.chartScrollKey = scopeKey;
+    state.chartScrollMode = mode;
+
+    if (isNewScope || wasPending) {
+      state.chartScrollPending = scopeKey;
+      const run = () => {
+        if (state.chartScrollKey !== scopeKey) return;
+        if (scrollChartStageNow(stage, mode)) {
+          state.chartScrollPending = '';
+        }
+      };
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(run);
+      } else {
+        run();
+      }
+    } else if (prevScrollLeft > 0) {
+      stage.scrollLeft = prevScrollLeft;
+    }
+  }
+
+  function flushPendingChartStageScroll() {
+    if (!state.chartScrollPending) return;
+    const stage = $('chart-stage');
+    if (!stage) return;
+    if (scrollChartStageNow(stage, state.chartScrollMode || 'latest')) {
+      state.chartScrollPending = '';
+    }
+  }
+
   function renderDailyHeatmap(dailyMap, hist) {
     const stage = $('chart-stage');
     if (!stage) return;
@@ -3677,11 +3963,15 @@
       const cells = days.map((cell) => {
         const lvl = cell.isFuture ? 0 : levelForValue(cell.tot, thresholds);
         const cls = `heat-cell${cell.isFuture ? ' future' : ''}${state.selectedBucketKey === cell.key ? ' selected' : ''}`;
+        const todayAttr = !cell.isFuture && cell.key === hist.todayKey ? ' data-today="1"' : '';
         const tip = cell.isFuture ? cell.key : `${cell.key}：${fmtTokens(cell.tot)}`;
-        return `<div class="${cls}" data-lvl="${lvl}" data-day="${cell.key}" title="${escZh(tip)}"></div>`;
+        return `<div class="${cls}" data-lvl="${lvl}" data-day="${cell.key}"${todayAttr} title="${escZh(tip)}"></div>`;
       }).join('');
       return `<div class="heat-week">${cells}</div>`;
     }).join('');
+
+    const prevScrollLeft = stage.scrollLeft || 0;
+    const scopeKey = `daily|${state.heatPageOffset || 0}|${state.sourceFilter || 'all'}|${hist.todayKey || ''}`;
 
     stage.innerHTML =
       `<div class="heatmap-wrap">` +
@@ -3689,10 +3979,7 @@
       `<div class="heat-cols">${colsHtml}</div>` +
       `</div>`;
 
-    // Scroll right to show latest week by default
-    if (state.heatPageOffset === 0) {
-      requestAnimationFrame(() => { stage.scrollLeft = stage.scrollWidth; });
-    }
+    applyChartStageScroll(stage, scopeKey, { prevScrollLeft, mode: 'latest' });
 
     stage.__cvStageInspect = (el, lock) => {
       const k = el?.dataset?.day;
@@ -3705,9 +3992,16 @@
       updateInspector(k, dailyMap[k]);
     };
 
-    const inspectKey = state.selectedBucketKey && dailyMap[state.selectedBucketKey]
+    const inCurrentWindow = Boolean(
+      state.selectedBucketKey &&
+      weeks.some((days) => days.some((c) => !c.isFuture && c.key === state.selectedBucketKey))
+    );
+    const inspectKey = state.selectedBucketKey && (inCurrentWindow || dailyMap[state.selectedBucketKey])
       ? state.selectedBucketKey
       : hist.todayKey;
+    if (state.selectedBucketKey && !inCurrentWindow && !dailyMap[state.selectedBucketKey]) {
+      state.selectedBucketKey = '';
+    }
     updateInspector(inspectKey, dailyMap[inspectKey]);
     updateSummaryRibbon(
       { totalTokens: rangeTotal, costUSD: rangeCost, calendarDays, activeDays },
@@ -3755,7 +4049,9 @@
       });
     }
 
-    renderBarBuckets(stage, buckets, dailyMap, hist, 6);
+    renderBarBuckets(stage, buckets, dailyMap, hist, 6, {
+      scrollScopeKey: `weekly|${state.sourceFilter || 'all'}|${hist.todayKey || ''}`
+    });
   }
 
   function mergeDayByModel(agg, rec) {
@@ -3825,10 +4121,13 @@
       });
     }
 
-    renderBarBuckets(stage, buckets, dailyMap, hist, 12);
+    renderBarBuckets(stage, buckets, dailyMap, hist, 12, {
+      scrollScopeKey: `monthly|${state.sourceFilter || 'all'}|${hist.todayKey || ''}`
+    });
   }
 
   function renderBarBuckets(stage, buckets, dailyMap, hist, monthsSpan, opts = {}) {
+    const prevScrollLeft = stage.scrollLeft || 0;
     const maxVal = Math.max(...buckets.map((b) => b.agg.total), 1);
     let sumTok = 0;
     let sumCost = 0;
@@ -3844,14 +4143,20 @@
 
     stage.innerHTML = `<div class="bar-chart">${buckets.map((b, idx) => {
       const hPct = b.agg.total > 0 ? Math.max(4, (b.agg.total / maxVal) * 100) : 2;
+      const ratio = (hPct / 100).toFixed(4);
       const showLbl = labelStep === 1 || (idx % labelStep === labelMod) || idx === buckets.length - 1;
       return (
         `<div class="bar-col${idx === defaultIdx ? ' selected' : ''}" data-bidx="${idx}" title="${escZh(`${b.key}：${fmtTokens(b.agg.total)}`)}">` +
-        `<div class="bar-pillar" style="height:${hPct.toFixed(1)}%"></div>` +
+        `<div class="bar-pillar-track"><div class="bar-pillar" style="--cv-ratio:${ratio}"></div></div>` +
         `<span class="bar-lbl">${showLbl ? escZh(b.shortLabel) : ''}</span>` +
         `</div>`
       );
     }).join('')}</div>`;
+
+    const scopeKey = opts.scrollScopeKey || `bars|${state.chartMode || ''}|${state.sourceFilter || 'all'}|${buckets.length}`;
+    if (typeof applyChartStageScroll === 'function') {
+      applyChartStageScroll(stage, scopeKey, { prevScrollLeft, mode: opts.scrollMode || 'latest' });
+    }
 
     stage.__cvStageInspect = (col, lock) => {
       const idxAttr = col?.dataset?.bidx;
@@ -3942,6 +4247,9 @@
     updateInspector(months[curMonthIdx].key, months[curMonthIdx].agg);
 
     const yearActive = Object.entries(dailyMap).filter(([k, v]) => k.startsWith(year) && v.total > 0).length;
+    state.chartScrollKey = `yearly|${year}`;
+    state.chartScrollPending = '';
+    stage.scrollLeft = 0;
     updateSummaryRibbon(
       { totalTokens: yearTok, costUSD: yearCost, calendarDays: 365, activeDays: yearActive },
       hist.planStatus,
@@ -3952,6 +4260,9 @@
   function renderCumulativeCurve(dailyMap, hist) {
     const stage = $('chart-stage');
     if (!stage) return;
+    state.chartScrollKey = `cumulative|${state.sourceFilter || 'all'}`;
+    state.chartScrollPending = '';
+    stage.scrollLeft = 0;
     const en = isEn();
     const start = parseLocalDate(hist.firstUseDate || hist.todayKey);
     const end = parseLocalDate(hist.todayKey);
@@ -4005,17 +4316,26 @@
       `</linearGradient></defs>` +
       (area ? `<path d="${area}" fill="url(#cumFill)"/>` : '') +
       `<path d="${line}" fill="none" stroke="var(--cv-accent)" stroke-width="2.1" stroke-linecap="round"/>` +
-      `<circle id="cum-dot" cx="${last.x}" cy="${last.y}" r="3.5" fill="var(--cv-accent)"/>` +
+      `<line id="cum-crosshair" class="cum-crosshair" x1="0" y1="6" x2="0" y2="${H - 4}" style="transform:translate3d(${last.x}px,0,0)"/>` +
+      `<circle id="cum-dot" class="cum-dot" cx="0" cy="0" r="3.5" fill="var(--cv-accent)" style="transform:translate3d(${last.x}px,${last.y}px,0)"/>` +
       `</svg>`;
 
     const svgEl = $('cum-svg-el');
     const dotEl = $('cum-dot');
+    const crossEl = $('cum-crosshair');
     const box = $('day-inspector');
     const showPoint = (pt) => {
       if (!pt || !box) return;
+      if (crossEl) {
+        if (crossEl.style) crossEl.style.transform = `translate3d(${pt.x}px, 0, 0)`;
+        else crossEl.setAttribute?.('transform', `translate(${pt.x}, 0)`);
+      }
       if (dotEl) {
-        dotEl.setAttribute('cx', pt.x);
-        dotEl.setAttribute('cy', pt.y);
+        if (dotEl.style) dotEl.style.transform = `translate3d(${pt.x}px, ${pt.y}px, 0)`;
+        else {
+          dotEl.setAttribute?.('cx', pt.x);
+          dotEl.setAttribute?.('cy', pt.y);
+        }
       }
       const dayTok = pt.dayRec?.total
         ? (en ? `Day +${fmtTokens(pt.dayRec.total)}` : `当日 +${fmtTokens(pt.dayRec.total)}`)
@@ -4112,16 +4432,25 @@
       : (dayKey === 'today' ? Math.min(23, Math.max(0, new Date().getHours())) : 23);
     const maxVal = Math.max(...buckets.map((b) => b.agg.total), 1);
 
+    const prevScrollLeft = stage.scrollLeft || 0;
     stage.innerHTML = `<div class="bar-chart bar-chart-hourly">${buckets.map((b, idx) => {
       const hPct = b.agg.total > 0 ? Math.max(4, (b.agg.total / maxVal) * 100) : 2;
+      const ratio = (hPct / 100).toFixed(4);
       const showLbl = idx % 3 === 0 || idx === 23;
       return (
         `<div class="bar-col${idx === defaultIdx ? ' selected' : ''}" data-hidx="${idx}" title="${escZh(`${b.key}：${fmtTokens(b.agg.total)}`)}">` +
-        `<div class="bar-pillar" style="height:${hPct.toFixed(1)}%"></div>` +
+        `<div class="bar-pillar-track"><div class="bar-pillar" style="--cv-ratio:${ratio}"></div></div>` +
         `<span class="bar-lbl">${showLbl ? esc(b.shortLabel) : ''}</span>` +
         `</div>`
       );
     }).join('')}</div>`;
+
+    if (typeof applyChartStageScroll === 'function') {
+      applyChartStageScroll(stage, `hourly|${state.sourceFilter || 'all'}|${dayKey}|${hist?.todayKey || ''}`, {
+        prevScrollLeft,
+        mode: 'selected'
+      });
+    }
 
     stage.__cvStageInspect = (col, lock) => {
       const hidx = col?.dataset?.hidx;
@@ -4389,6 +4718,7 @@
     const monthsSpan = Math.max(1, effectiveCalDays / 30);
     renderBarBuckets(stage, buckets, dailyMap, hist, monthsSpan, {
       defaultSelectedIdx: lastActiveBucketIdx >= 0 ? lastActiveBucketIdx : Math.max(0, buckets.length - 1),
+      scrollScopeKey: `custom|${state.sourceFilter || 'all'}|${startYmd}|${endYmd}|${effectiveGran}`,
       calendarDaysOverride: effectiveCalDays,
       activeDaysOverride: activeDays,
       rangeTotalOverride: rangeAgg.total,
@@ -4534,23 +4864,24 @@
     }
 
     if (!copied) {
-      showToast(tr('复制失败，请检查剪贴板权限', 'Copy failed; check clipboard permissions'));
+      showToast(tr('复制失败 · 请检查剪贴板权限', 'Copy failed · Check clipboard permission'));
       return false;
     }
 
     const btn = $('btn-copy-md');
     const ic = $('ic-copy-md');
+    const hasCheckIcon = Boolean($('ic-copy-check'));
     if (btn) btn.classList.add('cv-copied');
-    if (ic) ic.innerHTML = '<path d="M3.2 8.4 6.5 11.7 12.8 4.8"/>';
+    if (ic && !hasCheckIcon) ic.innerHTML = '<path d="M3.2 8.4 6.5 11.7 12.8 4.8"/>';
     if (state.copyMdTimer) clearTimeout(state.copyMdTimer);
     state.copyMdTimer = setTimeout(() => {
       btn?.classList.remove('cv-copied');
-      if (ic) {
+      if (ic && !hasCheckIcon) {
         ic.innerHTML = '<rect x="5" y="4" width="8" height="9.5" rx="1.4"/><path d="M3.5 11V3.4A1.4 1.4 0 0 1 4.9 2h5.6"/>';
       }
       state.copyMdTimer = null;
-    }, 1600);
-    showToast(tr('已复制脱敏 Markdown 遥测摘要', 'Copied anonymized Markdown telemetry summary'));
+    }, 1400);
+    showToast(tr('已复制脱敏摘要', 'Summary copied'), 1800);
     return true;
   }
 
@@ -4572,7 +4903,7 @@
   function exportHistoryCsv() {
     const hist = state.historyData;
     if (!hist) {
-      showToast(tr('暂无可导出的历史统计数据', 'No history data available to export'));
+      showToast(tr('当前范围暂无历史记录', 'No history in this range'));
       return;
     }
     const src = state.sourceFilter || 'all';
@@ -4626,7 +4957,7 @@
   function exportHistoryJson() {
     const hist = state.historyData;
     if (!hist) {
-      showToast(tr('暂无可导出的历史统计数据', 'No history data available to export'));
+      showToast(tr('当前范围暂无历史记录', 'No history in this range'));
       return;
     }
     const src = state.sourceFilter || 'all';
@@ -4760,6 +5091,14 @@
     document.querySelectorAll('#diag-tab-seg .seg-btn').forEach((b) => {
       b.classList.toggle('active', b.dataset.dtab === activeTab);
     });
+    const renderSigs = state.lastRenderSigs || (state.lastRenderSigs = {});
+    const applyDiagListHtml = (html) => {
+      if (renderSigs['diagnostics-list'] === html) return;
+      renderSigs['diagnostics-list'] = html;
+      const prevTop = list.scrollTop || 0;
+      list.innerHTML = html;
+      if (prevTop > 0) list.scrollTop = prevTop;
+    };
 
     if (activeTab === 'routing') {
       const routing = Array.isArray(diag?.recentRouting) ? diag.recentRouting.filter(Boolean) : [];
@@ -4774,10 +5113,10 @@
               : `共 ${fmtInt(totalRouting || routing.length)} 次路由变化`)
       );
       if (!routing.length) {
-        list.innerHTML = `<div class="kv-row"><span class="muted">${escZh(tr('暂未检测到服务端灰度路由或模型回退记录', 'No server shadow routing or model fallback detected'))}</span></div>`;
+        applyDiagListHtml(`<div class="kv-row"><span class="muted">${escZh(tr('暂未检测到服务端灰度路由或模型回退记录', 'No server shadow routing or model fallback detected'))}</span></div>`);
         return;
       }
-      list.innerHTML = routing.map((r) => {
+      applyDiagListHtml(routing.map((r) => {
         const title = r.convTitle || (r.convId ? String(r.convId).slice(0, 8) : tr('未知会话', 'Unknown session'));
         const stepPart = r.stepIndex != null ? `Step ${r.stepIndex}` : '';
         const timePart = r.date || '--';
@@ -4797,7 +5136,7 @@
           reasonPart +
           `</div>`
         );
-      }).join('');
+      }).join(''));
       return;
     }
 
@@ -4809,7 +5148,7 @@
         : (en ? `${fmtInt(totalEvents || events.length)} anomalies` : `共 ${fmtInt(totalEvents || events.length)} 条异常事件`)
     );
     if (!events.length) {
-      list.innerHTML = `<div class="kv-row"><span class="muted">${escZh(tr('暂未检测到 429 限流、安全过滤或上游重试异常', 'No 429 rate limits, safety filters, or upstream retries detected'))}</span></div>`;
+      applyDiagListHtml(`<div class="kv-row"><span class="muted">${escZh(tr('暂未检测到 429 限流、安全过滤或上游重试异常', 'No 429 rate limits, safety filters, or upstream retries detected'))}</span></div>`);
       return;
     }
 
@@ -4825,7 +5164,7 @@
       overflow: { text: tr('上下文溢出', 'Context Overflow'), cls: 'danger' }
     };
 
-    list.innerHTML = events.map((ev) => {
+    applyDiagListHtml(events.map((ev) => {
       const km = kindMap[String(ev.kind || '').toLowerCase()] || { text: ev.kind || tr('异常事件', 'Anomaly'), cls: 'neutral' };
       const title = ev.convTitle || (ev.convId ? String(ev.convId).slice(0, 8) : tr('未知会话', 'Unknown session'));
       const timeStr = fmtDiagTime(ev.createdAt, ev.date);
@@ -4855,7 +5194,7 @@
         detailHtml +
         `</div>`
       );
-    }).join('');
+    }).join(''));
   }
 
   // -------------------------------------------------------------------------
@@ -4938,20 +5277,20 @@
       plan.isCustomized
         ? `${plan.subscriptionRegionName || tr('默认美区', 'Default US')} · ${plan.acquisitionLabel || tr('常规订阅', 'Standard Plan')}`
         : (plan.status === 'identified'
-            ? tr('默认公开参考价 · 家庭组共享 / 拼车点右上角设置', 'Public list price · Click Customize Plan for family split / promo')
-            : tr('未连接语言服务识别档位 · 可点右上角手动设置', 'Host language service offline · Click Customize Plan to set manually'))
+            ? tr('公开参考价 · 点右上角可改实付', 'Public list price · Customize in top-right')
+            : tr('未连接语言服务 · 点右上角手动设置', 'Host offline · Set manually in top-right'))
     );
 
     if (plan.monthlyNormalized === 0) {
       setText('plan-price-main', en ? `${plan.symbol || '$'}0 / mo` : `${plan.symbol || '$'}0 / 月`);
-      setText('plan-price-cny', tr('免额外订阅费（¥0.00）', 'No extra subscription fee (¥0.00)'));
+      setText('plan-price-cny', tr('免额外付费（¥0.00）', 'No extra fee (¥0.00)'));
     } else if (plan.monthlyNormalized !== null && plan.monthlyNormalized !== undefined) {
       setText('plan-price-main', en ? `${plan.symbol || '$'}${plan.monthlyNormalized} / mo` : `${plan.symbol || '$'}${plan.monthlyNormalized} / 月`);
       setText(
         'plan-price-cny',
         plan.isCustomized
-          ? (en ? `Actual paid ~¥${(plan.monthlyCNY ?? 0).toFixed(2)} / mo` : `实付折合人民币约 ¥${(plan.monthlyCNY ?? 0).toFixed(2)} / 月`)
-          : (en ? `List ref ~¥${(plan.monthlyCNY ?? 0).toFixed(2)} / mo` : `公开参考约 ¥${(plan.monthlyCNY ?? 0).toFixed(2)} / 月`)
+          ? (en ? `Paid ~¥${(plan.monthlyCNY ?? 0).toFixed(2)} / mo` : `实付约 ¥${(plan.monthlyCNY ?? 0).toFixed(2)} / 月`)
+          : (en ? `~¥${(plan.monthlyCNY ?? 0).toFixed(2)} / mo` : `约 ¥${(plan.monthlyCNY ?? 0).toFixed(2)} / 月`)
       );
     } else {
       setText('plan-price-main', tr('待指定金额', 'Amount Unset'));
@@ -4959,21 +5298,18 @@
     }
 
     const planRows = [
-      [tr('当前账号（脱敏）', 'Account (Masked)'), plan.maskedEmail || tr('本机已登录会话', 'Local signed-in session')],
+      [tr('当前账号', 'Account'), plan.maskedEmail || tr('本机已登录会话', 'Local signed-in session')],
       [
-        plan.isCustomized ? tr('计价地区与周期', 'Billing Region & Cycle') : tr('默认参考基准', 'Default Reference'),
+        plan.isCustomized ? tr('计价与周期', 'Billing Cycle') : tr('参考基准', 'Price Reference'),
         plan.isCustomized
           ? `${plan.subscriptionRegionName || '--'} · ${plan.billingCycle || tr('月付', 'Monthly')}`
-          : tr(
-              `${plan.subscriptionRegionName || '美国 (US)'} 标准价（客户端 API 不返回家庭组与账单实付）`,
-              `${plan.subscriptionRegionName || 'US'} list price (client API omits family split & receipt)`
-            )
+          : tr(`${plan.subscriptionRegionName || '美国 (US)'} 标准价`, `${plan.subscriptionRegionName || 'US'} list price`),
+        plan.isCustomized ? '' : tr('API 不返回家庭组与实付账单', 'Client API omits family split & receipt')
       ],
       [
-        tr('权益获取渠道', 'Acquisition Channel'),
-        plan.isCustomized
-          ? (plan.acquisitionLabel || '--')
-          : tr('未指定（支持设为家庭组共享 / AA 拼车 / 赠送）', 'Not specified (supports family split / promo / gift)')
+        tr('获取渠道', 'Channel'),
+        plan.isCustomized ? (plan.acquisitionLabel || '--') : tr('未指定', 'Not specified'),
+        plan.isCustomized ? '' : tr('可设为家庭组共享 / AA 拼车 / 赠送', 'Supports family split / promo / gift')
       ]
     ];
     if (plan.accountCountry && plan.accountCountry !== '自动 / 未设置') {
@@ -5007,9 +5343,15 @@
 
     const planKv = $('plan-kv');
     if (planKv) {
-      planKv.innerHTML = planRows.map(([k, v]) =>
-        `<div class="kv-row"><span class="kv-k">${escZh(k)}</span><span class="kv-v">${escZh(v)}</span></div>`
-      ).join('');
+      planKv.innerHTML = planRows.map(([k, v, sub]) => (
+        `<div class="kv-row">` +
+        `<span class="kv-k">${escZh(k)}</span>` +
+        `<span class="kv-v-stack">` +
+        `<span class="kv-v">${escZh(v)}</span>` +
+        (sub ? `<span class="kv-v-sub">${escZh(sub)}</span>` : '') +
+        `</span>` +
+        `</div>`
+      )).join('');
     }
 
     // Live Model Quota Pools (5h burst window + Weekly tier/family shared pool)
@@ -5253,11 +5595,11 @@
     );
 
     const maxBar = Math.max(totalUSD, subUSD || 0, 0.01);
-    if ($('bar-api-val')) $('bar-api-val').style.width = `${Math.min(100, (totalUSD / maxBar) * 100).toFixed(1)}%`;
+    if ($('bar-api-val')) setGpuBarRatio($('bar-api-val'), Number(Math.min(100, (totalUSD / maxBar) * 100).toFixed(1)));
     setText('lbl-api-val', fmtUSD(totalUSD));
 
     if (subUSD !== null) {
-      if ($('bar-sub-val')) $('bar-sub-val').style.width = `${Math.min(100, (subUSD / maxBar) * 100).toFixed(1)}%`;
+      if ($('bar-sub-val')) setGpuBarRatio($('bar-sub-val'), Number(Math.min(100, (subUSD / maxBar) * 100).toFixed(1)));
       setText('lbl-sub-val', fmtUSD(subUSD));
       const diff = totalUSD - subUSD;
       if (subUSD === 0) {
@@ -5281,7 +5623,7 @@
         );
       }
     } else {
-      if ($('bar-sub-val')) $('bar-sub-val').style.width = '0%';
+      if ($('bar-sub-val')) setGpuBarRatio($('bar-sub-val'), 0);
       setText('lbl-sub-val', tr('未设实付', 'Unset'));
       setText('compare-diff', tr('设置订阅实付后可对比性价比', 'Set paid plan rate to compare ROI'));
     }
@@ -5347,7 +5689,7 @@
             `<span class="model-name">${escZh(m.displayName)}</span>` +
             `<span class="num-strong">${escZh(costLabel)}</span>` +
             `</div>` +
-            `<div class="thin-track"><div class="thin-fill accent" style="width:${wPct}%"></div></div>` +
+            `<div class="thin-track"><div class="thin-fill accent is-gpu" style="--cv-ratio:${(Number(wPct) / 100).toFixed(4)};width:${wPct}%"></div></div>` +
             `<div class="model-row-sub">` +
             `<span>${escZh(en ? `${fmtInt(m.requests)} reqs · Total ${fmtTokens(m.tokens)}` : `${fmtInt(m.requests)} 次请求 · 总计 ${fmtTokens(m.tokens)}`)}${mSavSpan}</span>` +
             `<span class="num">${escZh(en ? `In ${fmtTokens(m.inputTokens, 1)} / C ${fmtTokens(m.cacheTokens, 1)}${mCwPart} / Out ${fmtTokens(m.outputTokens, 1)}` : `入 ${fmtTokens(m.inputTokens, 1)} / 缓 ${fmtTokens(m.cacheTokens, 1)}${mCwPart} / 出 ${fmtTokens(m.outputTokens, 1)}`)}</span>` +
@@ -5358,18 +5700,27 @@
       }
     }
 
-    // Project / Workspace Leaderboard (Top 10)
+    // Project / Workspace Leaderboard (Default Top 5, switchable to Top 10)
     const projWrap = $('project-leaderboard-wrap');
     const projBoard = $('project-leaderboard');
     if (projWrap && projBoard) {
-      const projects = Array.isArray(srcAnalytics.byProject)
+      const projLimit = state.projectLimit === 10 ? 10 : 5;
+      const allProjects = Array.isArray(srcAnalytics.byProject)
         ? srcAnalytics.byProject.filter(Boolean).slice(0, 10)
         : [];
+      const projects = allProjects.slice(0, projLimit);
+      const projSeg = $('proj-limit-seg');
+      if (projSeg && typeof projSeg.querySelectorAll === 'function') {
+        projSeg.querySelectorAll('.seg-btn').forEach((btn) => {
+          btn.classList.toggle('active', Number(btn.dataset.projLimit) === projLimit);
+        });
+      }
       if (!projects.length) {
         projWrap.classList.add('hidden');
         projBoard.innerHTML = '';
       } else {
         projWrap.classList.remove('hidden');
+        if (projSeg && typeof syncSegIndicator === 'function') syncSegIndicator(projSeg, { animate: false });
         const maxProjTok = Math.max(...projects.map((p) => Number(p.tokens || 0)), 1);
         projBoard.innerHTML = projects.map((p) => {
           const tok = Number(p.tokens || 0);
@@ -5390,7 +5741,7 @@
             `<span class="model-name">${esc(displayProjName(p.name || UNCATEGORIZED_PROJECT))}</span>` +
             `<span class="num-strong">${escZh(`${fmtUSD(costUSD)}（${fmtCNY(costUSD)}）`)}</span>` +
             `</div>` +
-            `<div class="thin-track"><div class="thin-fill accent" style="width:${wPct}%"></div></div>` +
+            `<div class="thin-track"><div class="thin-fill accent is-gpu" style="--cv-ratio:${(Number(wPct) / 100).toFixed(4)};width:${wPct}%"></div></div>` +
             `<div class="model-row-sub">` +
             `<span>${escZh(en ? `${fmtInt(p.conversations || 0)} sessions · ${fmtInt(p.requests || 0)} reqs · Total ${fmtTokens(tok)}` : `${fmtInt(p.conversations || 0)} 会话 · ${fmtInt(p.requests || 0)} 次请求 · 总计 ${fmtTokens(tok)}`)}</span>` +
             rightSub +
@@ -5416,6 +5767,81 @@
     document.querySelectorAll('.tab-panel').forEach((panel) => {
       panel.classList.toggle('active', panel.id === `panel-${tabName}`);
     });
+    syncSegIndicator(document.querySelector?.('.main-tabs'), { animate: true });
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => {
+        syncAllSegIndicators({ animate: false });
+        if (tabName === 'history' && typeof flushPendingChartStageScroll === 'function') {
+          flushPendingChartStageScroll();
+          requestAnimationFrame(() => flushPendingChartStageScroll());
+        }
+      });
+    } else if (tabName === 'history' && typeof flushPendingChartStageScroll === 'function') {
+      flushPendingChartStageScroll();
+    }
+  }
+
+  function syncSegIndicator(groupEl, { animate = true } = {}) {
+    if (!groupEl || typeof document === 'undefined' || typeof document.createElement !== 'function') return;
+    if (typeof groupEl.querySelector !== 'function' || typeof groupEl.querySelectorAll !== 'function') return;
+    const isMain = groupEl.classList?.contains('main-tabs');
+    const btns = [...groupEl.querySelectorAll(isMain ? '.main-tab' : '.seg-btn')];
+    if (btns.length < 2) return;
+    const activeBtn = btns.find((b) => b.classList?.contains('active'));
+    const firstTop = btns[0]?.offsetTop;
+    const isSingleRow = btns.every((b) => b.offsetTop === firstTop && b.offsetWidth > 0);
+    if (!activeBtn || !isSingleRow || !(activeBtn.offsetWidth > 0)) {
+      if (groupEl.dataset) delete groupEl.dataset.hasIndicator;
+      const existing = groupEl.querySelector(':scope > .seg-indicator');
+      if (existing?.style) existing.style.opacity = '0';
+      return;
+    }
+
+    let ind = groupEl.querySelector(':scope > .seg-indicator');
+    const isNew = !ind;
+    if (!ind) {
+      ind = document.createElement('span');
+      ind.className = 'seg-indicator no-anim';
+      ind.setAttribute?.('aria-hidden', 'true');
+      groupEl.insertBefore ? groupEl.insertBefore(ind, groupEl.firstChild) : groupEl.appendChild(ind);
+    }
+    if (groupEl.dataset) groupEl.dataset.hasIndicator = '1';
+    const noAnim = isNew || !animate || prefersReducedMotion();
+    if (noAnim) ind.classList?.add('no-anim');
+    else ind.classList?.remove('no-anim');
+
+    ind.style.width = `${activeBtn.offsetWidth}px`;
+    ind.style.transform = `translate3d(${activeBtn.offsetLeft}px, 0, 0)`;
+    ind.style.opacity = '1';
+
+    if (noAnim && typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => {
+        ind.classList?.remove('no-anim');
+      });
+    }
+  }
+
+  function syncAllSegIndicators({ animate = false } = {}) {
+    if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return;
+    document.querySelectorAll('.main-tabs, .seg-group').forEach((grp) => {
+      syncSegIndicator(grp, { animate });
+    });
+  }
+
+  function withButtonPending(btn, fn) {
+    if (!btn) return Promise.resolve().then(fn);
+    if (btn.disabled || btn.classList?.contains('is-pending')) return Promise.resolve();
+    const prevDisabled = Boolean(btn.disabled);
+    btn.disabled = true;
+    btn.classList?.add('is-pending');
+    btn.setAttribute?.('aria-busy', 'true');
+    return Promise.resolve()
+      .then(fn)
+      .finally(() => {
+        btn.disabled = prevDisabled;
+        btn.classList?.remove('is-pending');
+        btn.removeAttribute?.('aria-busy');
+      });
   }
 
   // -------------------------------------------------------------------------
@@ -5433,8 +5859,16 @@
     const w = typeof window !== 'undefined' && typeof window.innerWidth === 'number'
       ? window.innerWidth
       : 999;
-    const compact = isHostSidebarContext() || (w > 0 && w <= 390);
-    document.body.classList.toggle('cv-compact', compact);
+    if (isHostSidebarContext()) {
+      document.body.classList.add('cv-compact');
+      return;
+    }
+    const isCurrentlyCompact = document.body.classList.contains('cv-compact');
+    if (isCurrentlyCompact) {
+      if (w >= 415) document.body.classList.remove('cv-compact');
+    } else if (w > 0 && w <= 385) {
+      document.body.classList.add('cv-compact');
+    }
   }
 
   function buildCapPopRows(rows) {
@@ -5635,8 +6069,13 @@
     state.capPopover.lastSig = sig;
 
     const badgeCls = badgeTone ? ` ${esc(badgeTone)}-text` : '';
+    const swapCls = force && state.capPopover.open && !prefersReducedMotion() ? ' is-swapping' : '';
+    const pinLabelHtml = pinned
+      ? `<span class="cap-pin-short">${escZh(tr('已钉住', 'Pinned'))}</span><span class="cap-pin-detail">${escZh(tr(' · 再次点击取消', ' · Click to unpin'))}</span>`
+      : escZh(tr('钉住', 'Pin'));
     pop.setAttribute('aria-label', title);
     pop.innerHTML =
+      `<div class="cap-pop-content${swapCls}">` +
       `<div class="cap-pop-head">` +
       `<div class="cap-pop-title-group">` +
       `<div class="cap-pop-title"><span>${escZh(title)}</span>` +
@@ -5645,13 +6084,14 @@
       `<div class="cap-pop-sub num">${escZh(sub)}</div>` +
       `</div>` +
       `<div class="cap-pop-head-right">` +
-      `<button type="button" class="cap-pop-act-btn${pinned ? ' is-pinned' : ''}" data-cap-pin="1" title="${escZh(pinned ? tr('取消钉住浮层', 'Unpin popover') : tr('钉住浮层便于细看', 'Pin popover open'))}">${escZh(pinned ? tr('已钉住', 'Pinned') : tr('钉住', 'Pin'))}</button>` +
+      `<button type="button" class="cap-pop-act-btn${pinned ? ' is-pinned' : ''}" data-cap-pin="1" title="${escZh(pinned ? tr('再次点击取消钉住', 'Click again to unpin') : tr('钉住浮层便于细看', 'Pin popover open'))}">${pinLabelHtml}</button>` +
       `<button type="button" class="cap-pop-act-btn" data-cap-jump="${esc(jumpTab)}" data-cap-scroll="${esc(jumpTargetId)}">${escZh(jumpLabel)}</button>` +
       `</div>` +
       `</div>` +
       bodyHtml +
       footHtml +
-      noteHtml;
+      noteHtml +
+      `</div>`;
   }
 
   function positionCapPopover() {
@@ -5667,13 +6107,19 @@
     const popH = pop.offsetHeight || 220;
     const vw = window.innerWidth;
     const vh = window.innerHeight || 600;
-    const left = Math.max(8, Math.min(btnRect.left, vw - popW - 8));
+    const left = Math.round(Math.max(8, Math.min(btnRect.left, vw - popW - 8)));
     let top = btnRect.bottom + 8;
     if (top + popH > vh - 8 && btnRect.top >= popH + 12) {
       top = btnRect.top - popH - 8;
     }
-    pop.style.left = `${Math.round(left)}px`;
-    pop.style.top = `${Math.round(Math.max(8, Math.min(top, vh - popH - 8)))}px`;
+    top = Math.round(Math.max(8, Math.min(top, vh - popH - 8)));
+    if (typeof pop.style?.setProperty === 'function') {
+      pop.style.setProperty('--cv-pop-x', `${left}px`);
+      pop.style.setProperty('--cv-pop-y', `${top}px`);
+    } else if (pop.style) {
+      pop.style.left = `${left}px`;
+      pop.style.top = `${top}px`;
+    }
   }
 
   function openCapPopover(key, { pin = false } = {}) {
@@ -5686,8 +6132,13 @@
       clearTimeout(state.capPopover.closeTimer);
       state.capPopover.closeTimer = null;
     }
+    if (state.capPopover.hideTimer) {
+      clearTimeout(state.capPopover.hideTimer);
+      state.capPopover.hideTimer = null;
+    }
     if (pin) state.capPopover.pinned = true;
 
+    const wasOpen = Boolean(state.capPopover.open);
     const prevKey = state.capPopover.activeKey;
     if (prevKey && prevKey !== key) {
       $(CAP_BTN_IDS[prevKey])?.setAttribute('aria-expanded', 'false');
@@ -5698,22 +6149,26 @@
 
     renderCapPopover(key, true);
     pop.classList.remove('hidden');
+    pop.setAttribute?.('aria-hidden', 'false');
+    if ('inert' in pop) pop.inert = false;
     if (typeof pop.showPopover === 'function' && typeof pop.matches === 'function' && !pop.matches(':popover-open')) {
       try {
         if (!pop.hasAttribute('popover')) pop.setAttribute('popover', 'manual');
         pop.showPopover();
       } catch {}
     }
-    if (typeof requestAnimationFrame === 'function') {
+    positionCapPopover();
+    if (wasOpen) {
+      pop.classList.add('is-open');
+    } else if (typeof requestAnimationFrame === 'function') {
       requestAnimationFrame(() => {
         if (state.capPopover.open) {
-          pop.classList.add('is-open');
           positionCapPopover();
+          pop.classList.add('is-open');
         }
       });
     } else {
       pop.classList.add('is-open');
-      positionCapPopover();
     }
   }
 
@@ -5721,6 +6176,10 @@
     if (state.capPopover.closeTimer) {
       clearTimeout(state.capPopover.closeTimer);
       state.capPopover.closeTimer = null;
+    }
+    if (state.capPopover.hideTimer) {
+      clearTimeout(state.capPopover.hideTimer);
+      state.capPopover.hideTimer = null;
     }
     const prevKey = state.capPopover.activeKey;
     if (prevKey && CAP_BTN_IDS[prevKey]) {
@@ -5735,8 +6194,20 @@
     if (pop) {
       pop.classList.remove('is-open');
       pop.classList.add('hidden');
+      pop.setAttribute?.('aria-hidden', 'true');
+      if ('inert' in pop) pop.inert = true;
       if (typeof pop.hidePopover === 'function' && typeof pop.matches === 'function' && pop.matches(':popover-open')) {
-        try { pop.hidePopover(); } catch {}
+        const delayMs = prefersReducedMotion() ? 0 : 140;
+        if (delayMs === 0) {
+          try { pop.hidePopover(); } catch {}
+        } else {
+          state.capPopover.hideTimer = setTimeout(() => {
+            state.capPopover.hideTimer = null;
+            if (!state.capPopover.open && pop.matches?.(':popover-open')) {
+              try { pop.hidePopover(); } catch {}
+            }
+          }, delayMs);
+        }
       }
     }
   }
@@ -5821,24 +6292,19 @@
           closeCapPopover();
           if (tab) switchTab(tab);
           if (scrollId) {
-            $(scrollId)?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
+            $(scrollId)?.scrollIntoView?.({
+              behavior: prefersReducedMotion() ? 'instant' : 'smooth',
+              block: 'nearest'
+            });
           }
         }
       });
     }
 
-    // Linked hover highlight between Context Spectrum Bar & Legend
+    // Linked hover highlight between Context Spectrum Bar & Legend (preserved across polling)
     const setSegHover = (catKey) => {
-      const bar = $('ctx-seg-bar');
-      const leg = $('ctx-seg-legend');
-      const active = Boolean(catKey);
-      bar?.classList?.toggle('has-hover', active);
-      leg?.classList?.toggle('has-hover', active);
-      [bar, leg].forEach((container) => {
-        container?.querySelectorAll?.('[data-cat-key]')?.forEach((node) => {
-          node.classList?.toggle('is-highlighted', active && node.dataset.catKey === catKey);
-        });
-      });
+      state.hoveredSpectrumCat = catKey || '';
+      applySpectrumHoverState(state.hoveredSpectrumCat);
     };
     ['ctx-seg-bar', 'ctx-seg-legend'].forEach((cid) => {
       const el = $(cid);
@@ -5854,6 +6320,29 @@
       });
       el.addEventListener('focusout', () => setSegHover(''));
     });
+
+    // Preserve <details> open/close state across 1.5s polling
+    $('compactions-list')?.addEventListener('toggle', (e) => {
+      const det = e?.target;
+      const hostItem = det?.closest?.('.compaction-item[data-detail-key]');
+      const key = hostItem?.dataset?.detailKey || hostItem?.getAttribute?.('data-detail-key');
+      if (!key || !(state.openDetailsKeys instanceof Set)) return;
+      if (det.open) state.openDetailsKeys.add(key);
+      else state.openDetailsKeys.delete(key);
+    }, true);
+
+    // Scroll shedding: add .is-scrolling during active scrolling, remove 120ms after idle
+    const markScrolling = () => {
+      if (typeof document === 'undefined' || !document.documentElement?.classList) return;
+      document.documentElement.classList.add('is-scrolling');
+      if (state.scrollIdleTimer) clearTimeout(state.scrollIdleTimer);
+      state.scrollIdleTimer = setTimeout(() => {
+        document.documentElement.classList.remove('is-scrolling');
+        state.scrollIdleTimer = null;
+      }, 120);
+    };
+    document.querySelector?.('.viewport')?.addEventListener?.('scroll', markScrolling, { passive: true });
+    window.addEventListener?.('scroll', markScrolling, { passive: true });
 
     // Collapsible sections
     document.querySelectorAll('.collapse-trigger').forEach((btn) => {
@@ -5933,7 +6422,14 @@
         const currentlyExpanded = toggleBtn.getAttribute('aria-expanded') === 'true';
         const prefs = { ...loadProjectCollapsePrefs(), [projName]: currentlyExpanded };
         saveProjectCollapsePrefs(prefs);
-        renderConvPopoverBody(true);
+        const groupEl = typeof toggleBtn.closest === 'function' ? toggleBtn.closest('.conv-group') : null;
+        if (groupEl && groupEl.classList && typeof toggleBtn.setAttribute === 'function') {
+          toggleBtn.setAttribute('aria-expanded', String(!currentlyExpanded));
+          groupEl.classList.toggle('is-collapsed', currentlyExpanded);
+          state.convPicker.lastBodySig = '';
+        } else {
+          renderConvPopoverBody(true);
+        }
         return;
       }
       const itemBtn = e.target.closest('[data-conv-id]');
@@ -5961,12 +6457,24 @@
           closeCapPopover();
         }
       }
+      const palDrawer = $('palette-drawer');
+      if (palDrawer && !palDrawer.classList.contains('hidden')) {
+        const palBtn = $('btn-palette');
+        const legEl = $('heat-legend');
+        const inDrawer = palDrawer.contains && palDrawer.contains(e.target);
+        const inPalBtn = palBtn && palBtn.contains && palBtn.contains(e.target);
+        const inLegend = legEl && legEl.contains && legEl.contains(e.target);
+        if (!inDrawer && !inPalBtn && !inLegend) {
+          closePaletteDrawer();
+        }
+      }
     });
 
     window.addEventListener('resize', () => {
       syncCompactMode();
       if (state.convPicker.open) positionConvPopover();
       if (state.capPopover.open) positionCapPopover();
+      syncAllSegIndicators({ animate: false });
     });
 
     $('conv-select')?.addEventListener('change', (e) => {
@@ -6011,7 +6519,9 @@
         document.querySelectorAll('#turns-view-seg .seg-btn').forEach((b) =>
           b.classList.toggle('active', b === btn)
         );
+        syncSegIndicator($('turns-view-seg'), { animate: true });
         rerenderTurns();
+        syncAllSegIndicators({ animate: false });
       });
     });
     document.querySelectorAll('#turns-filter-seg .seg-btn').forEach((btn) => {
@@ -6020,6 +6530,7 @@
         document.querySelectorAll('#turns-filter-seg .seg-btn').forEach((b) =>
           b.classList.toggle('active', b === btn)
         );
+        syncSegIndicator($('turns-filter-seg'), { animate: true });
         rerenderTurns();
       });
     });
@@ -6029,11 +6540,44 @@
         document.querySelectorAll('#prompt-filter-seg .seg-btn').forEach((b) =>
           b.classList.toggle('active', b === btn)
         );
+        syncSegIndicator($('prompt-filter-seg'), { animate: true });
         rerenderTurns();
       });
     });
 
-    // Refresh & Rescan
+    // Refresh & Rescan (Zero-FOUC, graceful full-rotation spin stop)
+    const startRefreshSpin = (icon) => {
+      if (!icon) return;
+      state.refreshSpinPendingStop = false;
+      if (state.refreshSpinFallbackTimer) {
+        clearTimeout(state.refreshSpinFallbackTimer);
+        state.refreshSpinFallbackTimer = null;
+      }
+      if (!prefersReducedMotion()) {
+        icon.classList.add('spin');
+      }
+    };
+    const stopRefreshSpin = (icon) => {
+      if (!icon) return;
+      if (prefersReducedMotion() || typeof icon.addEventListener !== 'function') {
+        icon.classList.remove('spin');
+        return;
+      }
+      if (!icon.classList.contains('spin')) return;
+      state.refreshSpinPendingStop = true;
+      const finish = () => {
+        if (state.refreshSpinFallbackTimer) {
+          clearTimeout(state.refreshSpinFallbackTimer);
+          state.refreshSpinFallbackTimer = null;
+        }
+        if (state.refreshSpinPendingStop) {
+          state.refreshSpinPendingStop = false;
+          icon.classList.remove('spin');
+        }
+      };
+      icon.addEventListener('animationiteration', finish, { once: true });
+      state.refreshSpinFallbackTimer = setTimeout(finish, 750);
+    };
     const triggerForceRefresh = async (ev) => {
       if (ev?.shiftKey) {
         if (window.__CV_FLOAT_MODE__ && !window.__CV_BROWSER_FALLBACK__) {
@@ -6043,20 +6587,19 @@
         window.location.reload();
         return;
       }
-      if (!window.__CV_FLOAT_MODE__ || window.__CV_BROWSER_FALLBACK__) {
-        const cssLink = document.querySelector('link[href^="/styles.css"]');
-        if (cssLink) cssLink.href = `/styles.css?v=${Date.now()}`;
-      }
       applyAppearanceToDom();
+      const btn = $('btn-refresh');
       const icon = $('ic-refresh');
-      icon?.classList.add('spin');
+      startRefreshSpin(icon);
+      btn?.setAttribute?.('aria-busy', 'true');
       try {
         await Promise.all([loadContext(true), loadHistory(true), refreshFloatStatus()]);
-        showToast(tr('已同步最新会话上下文与全量统计', 'Synced latest session context & stats'));
+        showToast(tr('数据已更新', 'Data refreshed'), 1800);
       } catch (err) {
-        showToast(tr(`刷新失败：${err.message}`, `Refresh failed: ${err.message}`));
+        showToast(tr(`刷新失败 · ${err.message}`, `Refresh failed · ${err.message}`));
       } finally {
-        setTimeout(() => icon?.classList.remove('spin'), 350);
+        btn?.removeAttribute?.('aria-busy');
+        stopRefreshSpin(icon);
       }
     };
     $('btn-copy-md')?.addEventListener('click', () => {
@@ -6067,6 +6610,8 @@
 
     // Detached Right-Side Floating Window (`📌`)
     $('btn-float')?.addEventListener('click', async (ev) => {
+      const floatBtn = $('btn-float');
+      if (floatBtn?.classList?.contains('is-pending')) return;
       const en = typeof state !== 'undefined' && state?.ui?.lang === 'en';
       if (window.__CV_FLOAT_MODE__) {
         if (ev.shiftKey || window.__CV_BROWSER_FALLBACK__) {
@@ -6090,6 +6635,11 @@
         return;
       }
 
+      if (floatBtn) {
+        floatBtn.disabled = true;
+        floatBtn.classList?.add('is-pending');
+        floatBtn.setAttribute?.('aria-busy', 'true');
+      }
       try {
         const res = await apiFetch('/api/float-window', {
           method: 'POST',
@@ -6110,88 +6660,123 @@
         );
       } catch (err) {
         showToast(en ? `Floating window error: ${err.message}` : `操作独立看板失败：${err.message}`);
+      } finally {
+        if (floatBtn) {
+          floatBtn.disabled = false;
+          floatBtn.classList?.remove('is-pending');
+          floatBtn.removeAttribute?.('aria-busy');
+        }
       }
     });
 
     // CLI Launcher
-    $('btn-cli')?.addEventListener('click', async () => {
-      try {
-        const res = await apiFetch('/api/launch-cli', {
-          method: 'POST',
-          body: {
-            workspaceUri: state.workspaceUri || '',
-            workspacePath: state.contextData?.workspacePath || ''
-          }
-        });
-        showToast(res.ok ? res.message : (res.error || tr('唤起终端失败', 'Failed to launch terminal')));
-      } catch (err) {
-        showToast(tr(`唤起终端失败：${err.message}`, `Terminal launch failed: ${err.message}`));
-      }
-    });
-
-    // Palette drawer & quick theme cycle
-    const drawer = $('palette-drawer');
-    $('btn-palette')?.addEventListener('click', () => {
-      if (!drawer) return;
-      const willOpen = drawer.classList.contains('hidden');
-      drawer.classList.toggle('hidden', !willOpen);
-      $('btn-palette')?.setAttribute('aria-expanded', String(willOpen));
-    });
-    $('btn-close-palette')?.addEventListener('click', () => {
-      if (state.recordingShortcut || state.recordingAuxShortcut) stopAllShortcutRecording();
-      drawer?.classList.add('hidden');
-      $('btn-palette')?.setAttribute('aria-expanded', 'false');
-    });
-
-    // Persistent Top Menu Bar (`◈` / `⚡` / `⏳`) & Right Floating Window (`📌`) switches
-    document.querySelectorAll('#menubar-entry-seg .seg-btn').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        const wantOn = btn.dataset.menubarEntry === 'on';
+    $('btn-cli')?.addEventListener('click', () => {
+      withButtonPending($('btn-cli'), async () => {
         try {
-          const res = await apiFetch('/api/entrypoints', {
+          const res = await apiFetch('/api/launch-cli', {
             method: 'POST',
-            body: { menubarEnabled: wantOn }
+            body: {
+              workspaceUri: state.workspaceUri || '',
+              workspacePath: state.contextData?.workspacePath || ''
+            }
           });
-          if (!res.ok) {
-            showToast(res.error || tr('切换顶部菜单栏常驻图标失败', 'Failed to toggle menu bar icon'));
-            return;
-          }
-          state.menubarEnabled = Boolean(res.menubarEnabled);
-          if (res.menubarMode) state.menubarMode = res.menubarMode;
-          syncFloatButtonUi();
-          showToast(
-            res.message ||
-              (state.menubarEnabled
-                ? tr('已开启顶部菜单栏常驻图标', 'Menu bar icon enabled')
-                : tr('已关闭顶部菜单栏常驻图标', 'Menu bar icon disabled'))
-          );
+          showToast(res.ok ? res.message : (res.error || tr('唤起终端失败', 'Failed to launch terminal')));
         } catch (err) {
-          showToast(tr(`切换失败：${err.message}`, `Toggle failed: ${err.message}`));
+          showToast(tr(`唤起终端失败 · ${err.message}`, `Terminal launch failed · ${err.message}`));
         }
       });
     });
 
+    // Palette drawer & quick theme cycle
+    const drawer = $('palette-drawer');
+    const openPaletteDrawer = () => {
+      if (!drawer) return;
+      drawer.classList.remove('hidden');
+      drawer.setAttribute?.('aria-hidden', 'false');
+      if ('inert' in drawer) drawer.inert = false;
+      $('btn-palette')?.setAttribute('aria-expanded', 'true');
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => syncAllSegIndicators({ animate: false }));
+      }
+    };
+    const closePaletteDrawer = ({ restoreFocus = false } = {}) => {
+      if (state.recordingShortcut || state.recordingAuxShortcut) stopAllShortcutRecording();
+      if (drawer) {
+        drawer.classList.add('hidden');
+        drawer.setAttribute?.('aria-hidden', 'true');
+        if ('inert' in drawer) drawer.inert = true;
+      }
+      const palBtn = $('btn-palette');
+      palBtn?.setAttribute('aria-expanded', 'false');
+      if (restoreFocus && palBtn) {
+        try { palBtn.focus({ preventScroll: true }); } catch {}
+      }
+    };
+    $('btn-palette')?.addEventListener('click', (ev) => {
+      ev.stopPropagation?.();
+      if (!drawer) return;
+      if (drawer.classList.contains('hidden')) openPaletteDrawer();
+      else closePaletteDrawer();
+    });
+    $('btn-close-palette')?.addEventListener('click', () => {
+      closePaletteDrawer({ restoreFocus: true });
+    });
+
+    // Persistent Top Menu Bar (`◈` / `⚡` / `⏳`) & Right Floating Window switches
+    document.querySelectorAll('#menubar-entry-seg .seg-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const wantOn = btn.dataset.menubarEntry === 'on';
+        withButtonPending(btn, async () => {
+          try {
+            const res = await apiFetch('/api/entrypoints', {
+              method: 'POST',
+              body: { menubarEnabled: wantOn }
+            });
+            if (!res.ok) {
+              showToast(res.error || tr('切换顶部菜单栏常驻图标失败', 'Failed to toggle menu bar icon'));
+              return;
+            }
+            state.menubarEnabled = Boolean(res.menubarEnabled);
+            if (res.menubarMode) state.menubarMode = res.menubarMode;
+            syncFloatButtonUi();
+            syncSegIndicator($('menubar-entry-seg'), { animate: true });
+            showToast(
+              res.message ||
+                (state.menubarEnabled
+                  ? tr('已开启顶部菜单栏常驻图标', 'Menu bar icon enabled')
+                  : tr('已关闭顶部菜单栏常驻图标', 'Menu bar icon disabled'))
+            );
+          } catch (err) {
+            showToast(tr(`切换失败 · ${err.message}`, `Toggle failed · ${err.message}`));
+          }
+        });
+      });
+    });
+
     document.querySelectorAll('#menubar-mode-seg .seg-btn').forEach((btn) => {
-      btn.addEventListener('click', async () => {
+      btn.addEventListener('click', () => {
         const nextMode = btn.dataset.menubarMode || 'context';
-        try {
-          const res = await apiFetch('/api/entrypoints', {
-            method: 'POST',
-            body: { menubarMode: nextMode }
-          });
-          if (!res.ok) {
-            showToast(res.error || tr('切换菜单栏显示内容失败', 'Failed to update menu bar mode'));
-            return;
+        withButtonPending(btn, async () => {
+          try {
+            const res = await apiFetch('/api/entrypoints', {
+              method: 'POST',
+              body: { menubarMode: nextMode }
+            });
+            if (!res.ok) {
+              showToast(res.error || tr('切换菜单栏显示内容失败', 'Failed to update menu bar mode'));
+              return;
+            }
+            state.menubarMode = res.menubarMode || nextMode;
+            if (typeof res.menubarEnabled === 'boolean') {
+              state.menubarEnabled = res.menubarEnabled;
+            }
+            syncFloatButtonUi();
+            syncSegIndicator($('menubar-mode-seg'), { animate: true });
+            showToast(res.message || tr('已更新顶部菜单栏显示内容', 'Menu bar display updated'));
+          } catch (err) {
+            showToast(tr(`切换失败 · ${err.message}`, `Toggle failed · ${err.message}`));
           }
-          state.menubarMode = res.menubarMode || nextMode;
-          if (typeof res.menubarEnabled === 'boolean') {
-            state.menubarEnabled = res.menubarEnabled;
-          }
-          syncFloatButtonUi();
-          showToast(res.message || tr('已更新顶部菜单栏显示内容', 'Menu bar display updated'));
-        } catch (err) {
-          showToast(tr(`切换失败：${err.message}`, `Toggle failed: ${err.message}`));
-        }
+        });
       });
     });
 
@@ -6211,12 +6796,12 @@
 
     $('btn-toggle-shortcut')?.addEventListener('click', () => {
       if (state.recordingShortcut || state.recordingAuxShortcut) stopAllShortcutRecording();
-      applyShortcutPatch({ enabled: !Boolean(state.shortcut?.enabled) });
+      withButtonPending($('btn-toggle-shortcut'), () => applyShortcutPatch({ enabled: !Boolean(state.shortcut?.enabled) }));
     });
 
     $('btn-reset-shortcut')?.addEventListener('click', () => {
       if (state.recordingShortcut || state.recordingAuxShortcut) stopAllShortcutRecording();
-      applyShortcutPatch({ reset: true });
+      withButtonPending($('btn-reset-shortcut'), () => applyShortcutPatch({ reset: true }));
     });
 
     $('btn-record-aux-shortcut')?.addEventListener('click', (ev) => {
@@ -6230,19 +6815,22 @@
 
     $('btn-toggle-aux-shortcut')?.addEventListener('click', () => {
       if (state.recordingShortcut || state.recordingAuxShortcut) stopAllShortcutRecording();
-      applyAuxShortcutPatch({ enabled: !Boolean(state.auxShortcut?.enabled) });
+      withButtonPending($('btn-toggle-aux-shortcut'), () => applyAuxShortcutPatch({ enabled: !Boolean(state.auxShortcut?.enabled) }));
     });
 
     $('btn-reset-aux-shortcut')?.addEventListener('click', () => {
       if (state.recordingShortcut || state.recordingAuxShortcut) stopAllShortcutRecording();
-      applyAuxShortcutPatch({ reset: true });
+      withButtonPending($('btn-reset-aux-shortcut'), () => applyAuxShortcutPatch({ reset: true }));
     });
 
     document.querySelectorAll('#shortcut-scope-seg .seg-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         if (state.recordingShortcut || state.recordingAuxShortcut) stopAllShortcutRecording();
         const nextScope = btn.dataset.shortcutScope || 'app';
-        applyShortcutPatch({ scope: nextScope });
+        withButtonPending(btn, async () => {
+          await applyShortcutPatch({ scope: nextScope });
+          syncSegIndicator($('shortcut-scope-seg'), { animate: true });
+        });
       });
     });
 
@@ -6321,7 +6909,38 @@
         return;
       }
 
+      if (state.convPicker.open && (ev.key === 'ArrowDown' || ev.key === 'ArrowUp' || ev.key === 'Enter')) {
+        const popBody = $('conv-pop-body');
+        if (popBody && typeof popBody.querySelectorAll === 'function') {
+          const items = [...popBody.querySelectorAll('.conv-auto-row, .conv-group:not(.is-collapsed) .conv-item')];
+          if (items.length > 0) {
+            const curIdx = items.findIndex((el) => el.classList?.contains('is-kb-focus'));
+            if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+              ev.preventDefault();
+              const delta = ev.key === 'ArrowDown' ? 1 : -1;
+              const nextIdx = curIdx < 0
+                ? (delta > 0 ? 0 : items.length - 1)
+                : (curIdx + delta + items.length) % items.length;
+              items.forEach((el, i) => el.classList?.toggle('is-kb-focus', i === nextIdx));
+              items[nextIdx]?.scrollIntoView?.({ block: 'nearest', behavior: 'instant' });
+              return;
+            }
+            if (ev.key === 'Enter' && curIdx >= 0) {
+              ev.preventDefault();
+              items[curIdx]?.click?.();
+              return;
+            }
+          }
+        }
+      }
+
       if (ev.repeat) return;
+      if (ev.key === 'Escape' && !ev.metaKey && !ev.ctrlKey && !ev.altKey && drawer && !drawer.classList.contains('hidden')) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        closePaletteDrawer({ restoreFocus: true });
+        return;
+      }
       if (ev.key === 'Escape' && !ev.metaKey && !ev.ctrlKey && !ev.altKey && state.capPopover.open) {
         ev.preventDefault();
         ev.stopPropagation();
@@ -6390,12 +7009,12 @@
       const order = ['auto', 'light', 'dark', 'oled'];
       const next = order[(order.indexOf(state.ui.themeMode) + 1) % order.length];
       state.ui.themeMode = next;
-      applyAppearanceToDom();
+      applyAppearanceToDom({ animate: true });
       persistUiPreferences();
       const labels = isEn()
         ? { auto: 'Follow Host', light: 'Light', dark: 'Dark', oled: 'OLED Pure Black' }
         : { auto: '跟随宿主主题', light: '浅色主题', dark: '深色主题', oled: 'OLED 纯黑主题' };
-      showToast(isEn() ? `Theme: ${labels[next]}` : `已切换为${labels[next]}`);
+      showToast(isEn() ? `Theme: ${labels[next]}` : `已切换为${labels[next]}`, 1800);
     });
 
     document.querySelectorAll('#theme-seg .seg-btn').forEach((btn) => {
@@ -6403,7 +7022,8 @@
         const mode = btn.dataset.themeMode;
         if (!['auto', 'light', 'dark', 'oled'].includes(mode)) return;
         state.ui.themeMode = mode;
-        applyAppearanceToDom();
+        applyAppearanceToDom({ animate: true });
+        syncSegIndicator($('theme-seg'), { animate: true });
         persistUiPreferences();
       });
     });
@@ -6411,7 +7031,8 @@
     document.querySelectorAll('#glass-seg .seg-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         state.ui.glass = btn.dataset.glassMode !== 'off';
-        applyAppearanceToDom();
+        applyAppearanceToDom({ animate: true });
+        syncSegIndicator($('glass-seg'), { animate: true });
         persistUiPreferences();
       });
     });
@@ -6482,9 +7103,10 @@
       const langChanged = state.ui.lang !== 'zh';
       state.ui = { themeMode: 'auto', glass: true, lang: 'zh', preset: 'violet', customLevels: null, customAccent: '' };
       if (langChanged) {
+        triggerThemeTransition();
         refreshOnLanguageChange();
       } else {
-        applyAppearanceToDom();
+        applyAppearanceToDom({ animate: true });
         syncFloatButtonUi();
         persistUiPreferences();
         if (state.contextData) {
@@ -6497,20 +7119,29 @@
 
     // Legend box click -> open palette & trigger corresponding color input
     document.querySelectorAll('#heat-legend .leg-box').forEach((box) => {
-      box.addEventListener('click', () => {
+      box.addEventListener('click', (ev) => {
+        ev.stopPropagation?.();
         const slot = box.dataset.legSlot;
-        drawer?.classList.remove('hidden');
+        openPaletteDrawer();
         $(`col-lvl${slot}`)?.click();
       });
     });
 
     // History source & chart mode switches
+    const triggerChartStageEnter = () => {
+      const st = $('chart-stage');
+      if (!st || prefersReducedMotion()) return;
+      st.classList.remove('is-chart-enter');
+      void st.offsetWidth;
+      st.classList.add('is-chart-enter');
+    };
     document.querySelectorAll('#source-seg .seg-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         state.sourceFilter = btn.dataset.source;
         document.querySelectorAll('#source-seg .seg-btn').forEach((b) =>
           b.classList.toggle('active', b === btn)
         );
+        syncSegIndicator($('source-seg'), { animate: true });
         if (state.historyData) {
           renderHistoryPanel(state.historyData);
           renderCostPanel(state.historyData);
@@ -6522,10 +7153,16 @@
     document.querySelectorAll('#chart-mode-seg .seg-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         state.chartMode = btn.dataset.chart;
+        state.chartScrollKey = '';
         document.querySelectorAll('#chart-mode-seg .seg-btn').forEach((b) =>
           b.classList.toggle('active', b === btn)
         );
-        if (state.historyData) renderHistoryPanel(state.historyData);
+        syncSegIndicator($('chart-mode-seg'), { animate: true });
+        if (state.historyData) {
+          renderHistoryPanel(state.historyData);
+          triggerChartStageEnter();
+          syncAllSegIndicators({ animate: false });
+        }
       });
     });
 
@@ -6535,7 +7172,11 @@
         document.querySelectorAll('#hourly-day-seg .seg-btn').forEach((b) =>
           b.classList.toggle('active', b === btn)
         );
-        if (state.historyData) renderHistoryPanel(state.historyData);
+        syncSegIndicator($('hourly-day-seg'), { animate: true });
+        if (state.historyData) {
+          renderHistoryPanel(state.historyData);
+          triggerChartStageEnter();
+        }
       });
     });
 
@@ -6545,16 +7186,17 @@
         document.querySelectorAll('#diag-tab-seg .seg-btn').forEach((b) =>
           b.classList.toggle('active', b === btn)
         );
+        syncSegIndicator($('diag-tab-seg'), { animate: true });
         if (state.historyData) renderDiagnosticsCard(state.historyData.diagnostics || null);
       });
     });
 
     // History CSV / JSON Ledger Export
     $('btn-export-csv')?.addEventListener('click', () => {
-      exportHistoryCsv();
+      withButtonPending($('btn-export-csv'), () => exportHistoryCsv());
     });
     $('btn-export-json')?.addEventListener('click', () => {
-      exportHistoryJson();
+      withButtonPending($('btn-export-json'), () => exportHistoryJson());
     });
 
     $('btn-heat-prev')?.addEventListener('click', () => {
@@ -6624,13 +7266,27 @@
     $('custom-start-date')?.addEventListener('change', (ev) => handleCustomDateInput('start', ev.target.value));
     $('custom-end-date')?.addEventListener('change', (ev) => handleCustomDateInput('end', ev.target.value));
 
-    // Cost scope & mode switches
+    // Cost scope, mode & project leaderboard limit switches
     document.querySelectorAll('#cost-scope-seg .seg-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         state.costScope = btn.dataset.scope;
         document.querySelectorAll('#cost-scope-seg .seg-btn').forEach((b) =>
           b.classList.toggle('active', b === btn)
         );
+        syncSegIndicator($('cost-scope-seg'), { animate: true });
+        if (state.historyData) renderCostPanel(state.historyData);
+      });
+    });
+
+    document.querySelectorAll('#proj-limit-seg .seg-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const nextLimit = Number(btn.dataset.projLimit) === 10 ? 10 : 5;
+        if (state.projectLimit === nextLimit) return;
+        state.projectLimit = nextLimit;
+        document.querySelectorAll('#proj-limit-seg .seg-btn').forEach((b) =>
+          b.classList.toggle('active', Number(b.dataset.projLimit) === nextLimit)
+        );
+        syncSegIndicator($('proj-limit-seg'), { animate: true });
         if (state.historyData) renderCostPanel(state.historyData);
       });
     });
@@ -6641,6 +7297,7 @@
         document.querySelectorAll('#cost-mode-seg .seg-btn').forEach((b) =>
           b.classList.toggle('active', b === btn)
         );
+        syncSegIndicator($('cost-mode-seg'), { animate: true });
         if (state.historyData) renderCostPanel(state.historyData);
       });
     });
@@ -6686,42 +7343,47 @@
       }
     });
 
-    planForm?.addEventListener('submit', async (ev) => {
+    planForm?.addEventListener('submit', (ev) => {
       ev.preventDefault();
-      try {
-        const customPlan = {
-          subscriptionRegion: $('f-region-preset')?.value || 'US',
-          acquisitionId: $('f-acquisition')?.value || 'normal_paid',
-          accountCountry: $('f-account-country')?.value?.trim() || '',
-          acquisitionName: $('f-acq-name')?.value?.trim() || '',
-          priceMode: $('f-price-mode')?.value || 'preset',
-          currency: $('f-currency')?.value || 'USD',
-          actualPricePaid: $('f-paid')?.value !== '' ? Number($('f-paid').value) : null,
-          billingCycle: $('f-cycle')?.value || '月付',
-          validUntil: $('f-valid-until')?.value || '',
-          zeroExtra: Boolean($('f-zero-extra')?.checked),
-          note: $('f-note')?.value?.trim() || ''
-        };
-        const saved = await apiFetch('/api/settings', { method: 'POST', body: { customPlan } });
-        state.settingsData = saved;
-        planForm.classList.add('hidden');
-        await loadHistory(true);
-        showToast(tr('已保存订阅与实付设置', 'Saved subscription & rate'));
-      } catch (err) {
-        showToast(tr(`保存失败：${err.message}`, `Save failed: ${err.message}`));
-      }
+      const submitBtn = planForm.querySelector?.('button[type="submit"]');
+      withButtonPending(submitBtn, async () => {
+        try {
+          const customPlan = {
+            subscriptionRegion: $('f-region-preset')?.value || 'US',
+            acquisitionId: $('f-acquisition')?.value || 'normal_paid',
+            accountCountry: $('f-account-country')?.value?.trim() || '',
+            acquisitionName: $('f-acq-name')?.value?.trim() || '',
+            priceMode: $('f-price-mode')?.value || 'preset',
+            currency: $('f-currency')?.value || 'USD',
+            actualPricePaid: $('f-paid')?.value !== '' ? Number($('f-paid').value) : null,
+            billingCycle: $('f-cycle')?.value || '月付',
+            validUntil: $('f-valid-until')?.value || '',
+            zeroExtra: Boolean($('f-zero-extra')?.checked),
+            note: $('f-note')?.value?.trim() || ''
+          };
+          const saved = await apiFetch('/api/settings', { method: 'POST', body: { customPlan } });
+          state.settingsData = saved;
+          planForm.classList.add('hidden');
+          await loadHistory(true);
+          showToast(tr('已保存订阅与实付设置', 'Saved subscription & rate'));
+        } catch (err) {
+          showToast(tr(`保存失败 · ${err.message}`, `Save failed · ${err.message}`));
+        }
+      });
     });
 
-    $('btn-clear-plan')?.addEventListener('click', async () => {
-      try {
-        const saved = await apiFetch('/api/settings', { method: 'POST', body: { clearPlan: true } });
-        state.settingsData = saved;
-        planForm?.classList.add('hidden');
-        await loadHistory(true);
-        showToast(tr('已恢复自动订阅识别', 'Restored automatic plan detection'));
-      } catch (err) {
-        showToast(tr(`重置失败：${err.message}`, `Reset failed: ${err.message}`));
-      }
+    $('btn-clear-plan')?.addEventListener('click', () => {
+      withButtonPending($('btn-clear-plan'), async () => {
+        try {
+          const saved = await apiFetch('/api/settings', { method: 'POST', body: { clearPlan: true } });
+          state.settingsData = saved;
+          planForm?.classList.add('hidden');
+          await loadHistory(true);
+          showToast(tr('已恢复自动订阅识别', 'Restored automatic plan detection'));
+        } catch (err) {
+          showToast(tr(`重置失败 · ${err.message}`, `Reset failed · ${err.message}`));
+        }
+      });
     });
 
     // Observe host theme inline style mutations injected by sidecar_sdk preload.js
@@ -6825,8 +7487,8 @@
       return {
         ok: false,
         error: en
-          ? 'Include ⌘ / ⌥ / ⌃ modifier (or F1-F12); Esc cancels'
-          : '快捷键需包含 ⌘ / ⌥ / ⌃ 修饰键之一（或使用 F1-F12），按 Esc 取消'
+          ? 'Include ⌘ / ⌥ / ⌃ or F1-F12'
+          : '需含 ⌘ / ⌥ / ⌃ 或 F1–F12'
       };
     }
 
@@ -7034,7 +7696,7 @@
       setText(
         kbdLbl,
         recording
-          ? tr('按下组合键…', 'Press keys…')
+          ? tr('请按键', 'Press keys')
           : (sc?.display || sc?.defaultDisplay || defaultFallback)
       );
     }
@@ -7042,8 +7704,8 @@
       setText(
         recHint,
         recording
-          ? tr('Esc 取消', 'Esc cancel')
-          : (enabled ? tr('点击修改', 'Click to edit') : tr('已停用', 'Disabled'))
+          ? tr('· Esc 取消', '· Esc')
+          : (enabled ? tr('修改', 'Edit') : tr('已停用', 'Disabled'))
       );
     }
     if (toggleScBtn) {
@@ -7580,6 +8242,7 @@
     let showTimer = null;
     let activeTarget = null;
     let showSeq = 0;
+    let lastVisibleAt = 0;
 
     const hideTooltip = () => {
       showSeq += 1;
@@ -7587,8 +8250,11 @@
         clearTimeout(showTimer);
         showTimer = null;
       }
+      if (tipEl.classList?.contains('is-visible')) {
+        lastVisibleAt = Date.now();
+      }
       activeTarget = null;
-      tipEl.classList?.remove('is-visible');
+      tipEl.classList?.remove('is-visible', 'is-hot');
       tipEl.classList?.add('hidden');
       tipEl.setAttribute?.('aria-hidden', 'true');
     };
@@ -7632,19 +8298,27 @@
       return true;
     };
 
-    const showTooltip = (target, text) => {
+    const showTooltip = (target, text, { hot = false } = {}) => {
       if (!target || !text) {
         hideTooltip();
         return;
       }
       const seq = ++showSeq;
       tipEl.textContent = text;
-      tipEl.classList?.remove('is-visible');
+      tipEl.classList?.toggle('is-hot', Boolean(hot));
+      if (!hot) {
+        tipEl.classList?.remove('is-visible');
+      }
       tipEl.classList?.remove('hidden');
       tipEl.setAttribute?.('aria-hidden', 'false');
 
       if (!positionTooltip(target)) {
         hideTooltip();
+        return;
+      }
+      lastVisibleAt = Date.now();
+      if (hot) {
+        tipEl.classList?.add('is-visible');
         return;
       }
       const reveal = () => {
@@ -7685,8 +8359,19 @@
         return;
       }
 
-      hideTooltip();
+      const isHotChannel = Boolean(
+        !tipEl.classList?.contains('hidden') ||
+        (lastVisibleAt > 0 && (Date.now() - lastVisibleAt) <= 400)
+      );
+      if (showTimer) {
+        clearTimeout(showTimer);
+        showTimer = null;
+      }
       activeTarget = target;
+      if (isHotChannel) {
+        showTooltip(target, tipText, { hot: true });
+        return;
+      }
       const isTopIcon = Boolean(target.closest?.('.top-actions') || target.classList?.contains('icon-btn'));
       const delayMs = isTopIcon ? 120 : 220;
       showTimer = setTimeout(() => {
@@ -7700,7 +8385,7 @@
           hideTooltip();
           return;
         }
-        showTooltip(target, latestTip);
+        showTooltip(target, latestTip, { hot: false });
       }, delayMs);
     });
 
@@ -7732,6 +8417,7 @@
     initCustomTooltips();
     initWorkspaceTracking();
     startAuxPaneBridgeCoordinator();
+    syncAllSegIndicators({ animate: false });
 
     const initiallyVisible = !document.hidden && !state.hostHidden && isAuxIframeVisible();
     if (initiallyVisible) {

@@ -1,20 +1,36 @@
 # agy-plugins ROADMAP
 
-更新时间：2026-11-24 23:59（Asia/Shanghai）。
+更新时间：2026-11-25 10:31（Asia/Shanghai）。
 
 ## 本次交付目标
 
-1. 参考 `DDG0808/antigravity-viewer-pulse`（严格排除其 `app.asar` / CDP / 二进制补丁等越界注入层），落地 `context-viewer` 纯合规 **P0 + P1 + P2 + Spatial Bento 毛玻璃质感** 优化：
-   - **P0 + P1**：打通 `cacheWriteTokens` 与净缓存收益（含「净增」语义）、兼容 Protobuf/ms 耗时解析与 50 ms `tok/s` 防抖、区分自动压缩与缓存断流、补齐切会话 `AbortController` 竞态与唤醒看门狗、新增 GUI CSV/JSON 账本导出与脱敏 Markdown 遥测快照复制（模型速度对决已按实机反馈移除）。
-   - **P2 + 毛玻璃质感**：配额池基于 `Δtokens / ΔremainingFraction` 的剩余 Token EMA 估算校准（含跨端偏离检测、重置保留与 7d/21d TTL）、OLED / Pitch 纯黑主题、Spatial Bento 毛玻璃质感（纯 `--cv-*` 变量、独立 `body::before` 环境微光与 `.top-bar::before` 防 WKWebView 脏绘隔离，支持「毛玻璃 / 实色」切换及 `prefers-reduced-transparency` 降级）与前端中/英双语切换。
-2. 保持全仓零外部依赖、`--cv-*` 样式隔离、零外链及隐私门禁通过。
+1. 完成 `agy-context-viewer` 四项前端展示与定位优化：按项目消耗分布默认展示前 5（支持手动切换前 10）、AI 订阅状态卡片窄屏防断行与信息层级重构、Token 活跃趋势「每天 / 每周 / 每月」（含隐藏 Tab 切入）默认定位至当前日 / 周 / 月且轮询保活、以及每天热力图方块放大至 `13px` 提升可读性。
+2. 承接前期全仓 Apple 级统一动效体系与交互升级（`agy-context-viewer` + `agy-finder`），保持零外部依赖、`--cv-*` / `--af-*` 样式隔离、零外链、`.top-bar` 零 `backdrop-filter` 及隐私门禁通过。
 
 ## 后置与挂起事项
 
-- **待 boss 确认下一步**：按需升版（如 `v1.10.0`）、同步中英文 README 并发布 GitHub Release。
+- **待 boss 按需决定**：后续是否升版并发布新版 GitHub Release。
 - **挂起：`agy-fork` / `agy-session`（`agy` CLI 无损会话分叉插件）**：调研确认底层依赖宿主 `ForkConversation` / `UpdateConversationAnnotations` RPC（需处理 `invoke_subagent` 前轮回退），但经 boss 确认当前非刚需且预计官方原生推出，暂挂起不立项。
 
 ## 当前阶段与状态
+
+- **已完成 `agy-context-viewer` 项目排行前 5 / 前 10 切换、AI 订阅卡片 UI 优化、趋势默认定位当前周期与热力图放大，并执行 `./install.sh` 本机热同步与 `main` 提交推送**：
+  - **按项目消耗分布限制与切换**（[index.html](./plugins/agy-context-viewer/sidecars/dashboard/index.html)、[styles.css](./plugins/agy-context-viewer/sidecars/dashboard/styles.css)、[app.js](./plugins/agy-context-viewer/sidecars/dashboard/app.js)）：`state.projectLimit` 默认 `5`，在 `#project-leaderboard-wrap` 标题行新增 `#proj-limit-seg`（`前 5 / 前 10`，同步补齐 `I18N_EN` `Top 5 / Top 10` 及滑块指示器），人工点击可随时切换至前 10。
+  - **AI 订阅卡片窄屏排版与视觉层级优化**（[index.html](./plugins/agy-context-viewer/sidecars/dashboard/index.html)、[styles.css](./plugins/agy-context-viewer/sidecars/dashboard/styles.css)、[app.js](./plugins/agy-context-viewer/sidecars/dashboard/app.js)）：为 `.plan-banner-main` / `.plan-price-box` 补齐弹性主列与右侧 `white-space: nowrap` 防金额及 `/ 月` 断行并精炼副文案；`.kv-k` 固定 `flex-shrink: 0; white-space: nowrap` 彻底消除字段名折字；将 `#plan-kv` 重构为统一圆角分组卡，通过 `.kv-v-stack` + `.kv-v-sub` 将主值与辅助说明分层展示（同步兼容毛玻璃模式）。
+  - **活跃趋势默认定位当前日 / 周 / 月与热力图放大**（[styles.css](./plugins/agy-context-viewer/sidecars/dashboard/styles.css)、[app.js](./plugins/agy-context-viewer/sidecars/dashboard/app.js)）：统一抽离 `scrollChartStageNow()` / `applyChartStageScroll()` / `flushPendingChartStageScroll()`，根治隐藏 Tab 首次渲染 `scrollWidth === 0` 导致的定位失效问题，在切至 `history` Tab 或切换 `每天 / 每周 / 每月 / 24 小时 / 自定义` 模式时自动定位至最新当前周期，并在 10s 轮询重绘时保活用户手动滚动位置；将每天热力图方块放大至 `13px × 13px`（`gap: 3px`，圆角 `3px`）并补充 `data-today="1"` 今日柔和描边与选中柱标签加粗，消除底部空白且兼容 R2 断言。
+  - **最近验证（2026-11-25 09:40）**：
+    - `node scripts/verify.mjs --strict-git-identity`：全仓 + 双插件（含 `agy-context-viewer` 9/9 与 `agy-finder`）**全部通过**。
+    - `node scripts/package-all.mjs`：双发布包构建通过（`agy-finder-v0.2.9.zip` 109.5 KB、`context-viewer-v1.9.0.zip` 325.6 KB）。
+    - 真实 Headless Chrome（`375×860` 窄侧栏实测 + 截图复核）：横向溢出 `0px`；切至历史页后热力图 `scrollLeft === maxScroll === 545`、方块实测 `13×13px`、今日可见；每周 `scrollLeft === maxScroll === 194` 当前周可见、每月当前月可见；订阅价格与人民币折算及全部 `#plan-kv` 标签均 `1` 行零断行；项目列表默认 `5` 条、点击「前 10」后展开至全部 `8` 条 mock 项目。
+
+- **已完成全仓 Apple 级统一动效体系与交互升级（`agy-context-viewer` + `agy-finder` 前端及 macOS Swift 原生层）、真实 Chrome 量化实测、全仓严格校验、发布打包、本机 `./install.sh` 热同步并随本轮提交推送 `main`**：
+  - **统一动效物理语言与无障碍底座**（[context-viewer/styles.css](./plugins/agy-context-viewer/sidecars/dashboard/styles.css)、[agy-finder/styles.css](./plugins/agy-finder/sidecars/tree/styles.css)）：两插件共用同一套 5 条曲线（`ease-out`/`ease-in`/`ease-std`/`ease-spring`/`ease-linear`）、5 档时长（`80ms`/`130ms`/`180ms`/`240ms`/`1400ms`，退场 0.7×）、按压缩放（`0.965`/`0.992`）与位移 Token（分别严格隔离为 `--cv-*` 与 `--af-*`）；清除全部 `transition: all`；实现 CSS + JS `prefersReducedMotion()` + Swift `accessibilityDisplayShouldReduceMotion` 三端减弱动态全覆盖。
+  - **`agy-context-viewer` 状态过渡、轮询保活与微交互**（[index.html](./plugins/agy-context-viewer/sidecars/dashboard/index.html)、[styles.css](./plugins/agy-context-viewer/sidecars/dashboard/styles.css)、[app.js](./plugins/agy-context-viewer/sidecars/dashboard/app.js)、[native_float_macos.swift](./plugins/agy-context-viewer/sidecars/dashboard/native_float_macos.swift)）：`#toast` 与 `#palette-drawer` 改 `fixed` 覆盖层实现零 CLS，`#cap-popover`/`#conv-popover`/`#cv-tooltip`/`#palette-drawer`/`#toast` 补齐双向可打断入退场（同步兼容 `.hidden` 断言）；`#cap-popover` 支持跨胶囊平滑滑移与钉住徽章，`#cv-tooltip` 接入热通道；`.main-tabs` / `.seg-group` 消除字重抖动并加入滑动胶囊指示器；主题/OLED/毛玻璃改用 `html.is-theme-switching` 200ms 齐步过渡（排除 `.top-bar` 与 `backdrop-filter`）；8 处折叠卡体与会话分组接入 CSS Grid `0fr <-> 1fr`（原地折展救活 `.conv-group-chevron`）；1.5s/10s 轮询保活列表 `scrollTop`、展开的 `<details>`、光谱条悬停、热力图 `scrollLeft`、选中桶与钉住浮层，并移除手动刷新重拉 `styles.css?v=Date.now()` FOUC；补齐视觉锚点 `180ms` rAF 数值补间、`#cum-crosshair` 十字跟手、`syncCompactMode` 迟滞窗口（`385/415px`）、全站 `:active`/`:focus-visible`、刷新旋停 `animationiteration`、复制弹簧对勾、4 态主题图标换形、录制呼吸态、中/英文案对齐及 Swift `visibilityToken`/`hudToken` 淡入淡出。
+  - **`agy-finder` 目录树增量 DOM 解耦、零 CLS 与微交互**（[index.html](./plugins/agy-finder/sidecars/tree/index.html)、[styles.css](./plugins/agy-finder/sidecars/tree/styles.css)、[app.js](./plugins/agy-finder/sidecars/tree/app.js)、[native_drawer_macos.swift](./plugins/agy-finder/sidecars/tree/native_drawer_macos.swift)）：真实 DOM 下实现按 key 复用行节点、O(1) 选中切换与长按方向键 rAF 合帧（救活 `.af-twistie` 旋转过渡并兼容 Node VM 断言），补齐 `dirExpandSeq` 过期展开打断与一次性 `revealToken` 脉冲（防 3.5s 轮询重播）；`#active-path-bar` 改固定底栏、`#shortcut-panel` 改覆盖浮层、搜索改为内联微 spinner + `<mark class="af-match">` 高亮、`.af-row-actions` 改行尾绝对叠加渐变层、`#preview-modal` 补遮罩/双态过渡/`previewReqSeq`/重试按钮，彻底消除 5 处布局跳动；全面替换界面 emoji 为 `14px` 内联 SVG，补齐 3 态主题图标、刷新旋停、复制就地对勾、`formatZh()` 中文排版、280/390/640px 响应式断点及 Swift `WKWebView` 防闪白屏与 `NSAnimationContext` 抽屉/HUD 淡入滑出。
+  - **实测与验收（2026-11-25 00:51）**：
+    - 真实 Headless Chrome + Playwright 量化实测（`errors: []`）：两插件 CLS 均为 **`0.0`**；`context-viewer` 120 轮时间线滚动与 `agy-finder` 1,500 行目录树滚动均稳在 **`60.0 FPS`**（均值 `16.66ms`、`p95 16.7ms`、`0` 掉帧 `>34ms`）；`agy-finder` 1,500 行目录节点增量复用实证通过；`context-viewer` 1.5s 轮询 `scrollTop` 与 `<details open>` 100% 保活且 `.top-bar` `backdrop-filter: none`；`280/350/390/1280px` × `light/dark/oled` × `glass: on/off` 最大横向溢出 **`0px`**；`prefers-reduced-motion: reduce` 生效验证通过。
+    - `node scripts/verify.mjs --strict-git-identity`：全仓 + 双插件（含 Swift `-typecheck`）**全部通过**。
+    - `node scripts/package-all.mjs`：双发布包生成并校验通过（`agy-finder-v0.2.9.zip` 109.5 KB、`context-viewer-v1.9.0.zip` 324.4 KB）。
 
 - **已完成 `context-viewer` 参考 `antigravity-viewer-pulse` 的 P0 + P1 + P2 + 毛玻璃质感合规优化与实机反馈修复、全仓严格校验、打包验证及本机 `./install.sh context-viewer` 热同步（同步 `main`）**：
   - **后端采集与计价升级**（[pricing.mjs](./plugins/agy-context-viewer/sidecars/dashboard/pricing.mjs)、[collector.mjs](./plugins/agy-context-viewer/sidecars/dashboard/collector.mjs)）：补全 `cacheWriteTokens` 全链路传播与 Claude `1.25x` 写入溢价扣减（保留负净收益 `cacheSavingsUSD`、`pricedCacheWriteCostUSD` 及 `byCategory.cacheWriteTokens`）；增强 `parseDurationSec()` 支持 Protobuf `{ seconds, nanos }` 与 `ms` 字符串，并为服务端 `tps`/`effectiveTps` 加入 `>= 0.05s` 防抖底限；新增 `annotateTurnsCompactionAndCacheBreak()` 与 `context.cacheStatus` 区分自动压缩与突发缓存断流（压缩不再误报冷启动）；新增 `updateQuotaCapacityCalibration()` / `buildQuotaCalibrationSnapshot()`（`quota_capacity_cal_v1.json` 持久化，EMA `0.6/0.4`、跨端偏离检测、配额重置保留已学总量、5h 7d / weekly 21d TTL，`statusline` 快速路径零额外 I/O）及 `saveSettings()` 对 `themeMode` (`oled`) / `glass` / `lang` 校验；已彻底清理 `speedDuel` 冗余聚合。
