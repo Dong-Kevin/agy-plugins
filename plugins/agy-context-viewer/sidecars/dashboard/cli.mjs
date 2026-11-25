@@ -19,7 +19,7 @@ const PROCESS_START_MS = Date.now();
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, realpathSync, statSync, watch } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, watch, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -384,12 +384,15 @@ function tryFastStatuslineSnapHit(convId, nowMs = Date.now()) {
 
   const age = Math.max(0, nowMs - Number(snap.savedAt || 0));
   const ttl = snap.metaSettled ? 15_000 : 2_000;
-  const sigMatches = (
+  const transcriptUnchanged = (
     snap.targetLogPath === targetLogPath &&
     snap.logSize === logStatSize &&
     snap.logMtimeMs === logStatMtime &&
     snap.fullSize === fullStatSize &&
-    snap.fullMtimeMs === fullStatMtime &&
+    snap.fullMtimeMs === fullStatMtime
+  );
+  const sigMatches = (
+    transcriptUnchanged &&
     snap.hostCacheMtimeMs === hostCacheMtimeMs &&
     snap.convDbSig === convDbSig &&
     snap.genCacheMtimeMs === genCacheMtimeMs &&
@@ -398,7 +401,7 @@ function tryFastStatuslineSnapHit(convId, nowMs = Date.now()) {
   );
 
   if (!sigMatches) {
-    return { hit: false, staleSnap: snap, stateDir, lsDiskHash };
+    return { hit: false, staleSnap: snap, transcriptUnchanged, logSize: logStatSize, stateDir, lsDiskHash };
   }
 
   return {
@@ -1994,9 +1997,124 @@ async function runStatuslineCommand(rawArgs) {
     : 260;
   const deadlineAt = PROCESS_START_MS + totalBudgetMs;
 
+  if (rawArgs.includes('--refresh-snap')) {
+    if (!convArg || !CONV_ID_RE.test(convArg)) {
+      if (isDirectRun) process.exit(0);
+      return;
+    }
+    const refreshDeadline = Date.now() + 2500;
+    const abortCtrl = new AbortController();
+    const timer = setTimeout(() => {
+      try { abortCtrl.abort(); } catch {}
+    }, 2500);
+    try {
+      const mod = await loadCollectorMod();
+      if (!abortCtrl.signal.aborted) {
+        const scanned = await mod.scanConversation(convArg, {
+          force: false,
+          lightweight: true,
+          background: true,
+          rpcTimeoutMs: 600,
+          sqliteTimeoutMs: 250,
+          deadlineAt: refreshDeadline,
+          signal: abortCtrl.signal,
+          allowDiskCacheWithoutLs: true,
+          skipRecentList: true,
+          noFallbackToRecent: true,
+          skipWorkspaceLookup: true
+        });
+        if (scanned?.transcriptProgressed) {
+          mod.noteCliActiveHint(convArg, Date.now());
+        }
+      }
+    } catch {} finally {
+      clearTimeout(timer);
+    }
+    if (isDirectRun) process.exit(0);
+    return;
+  }
+
+  // Fast path for empty session_id stdin payloads: avoid importing collector.mjs.
+  if (hasStdinJson && !stdinConvId) {
+    const stateDir = getPluginStateDirFast();
+    const lsAddr = process.env.ANTIGRAVITY_LS_ADDRESS || '';
+    const lsCsrf = process.env.ANTIGRAVITY_CSRF_TOKEN || '';
+    const lsDiskHash = (lsAddr && lsCsrf) ? hashLsAddrFast(lsAddr) : '';
+    const emptyCtx = {
+      ok: true,
+      conversationId: null,
+      quotas: readDiskQuotasFallbackFast(stateDir, lsDiskHash),
+      context: {},
+      speed: null,
+      turnsCount: 0,
+      turns: []
+    };
+    const line = buildStatuslineText(emptyCtx, stdinPayload, { format, terminalWidth });
+    if (isDirectRun) {
+      process.stdout.write(`${line}\n`, () => process.exit(0));
+      return;
+    }
+    process.stdout.write(`${line}\n`);
+    return;
+  }
+
   const fastCheck = tryFastStatuslineSnapHit(convArg);
   if (fastCheck.hit) {
     const line = buildStatuslineText(fastCheck.ctx, stdinPayload, { format, terminalWidth });
+    if (isDirectRun) {
+      process.stdout.write(`${line}\n`, () => process.exit(0));
+      return;
+    }
+    process.stdout.write(`${line}\n`);
+    return;
+  }
+
+  // Stale-while-revalidate: when transcript hasn't changed (only TTL/quota/db meta aged)
+  // or transcript is large (>512KB), render immediately (<100ms) and refresh in background.
+  const staleSnap = fastCheck.staleSnap;
+  const staleAgeMs = staleSnap ? Math.max(0, Date.now() - Number(staleSnap.savedAt || 0)) : Infinity;
+  const canUseSwr = Boolean(
+    staleSnap &&
+    staleAgeMs < 10 * 60_000 &&
+    !rawArgs.includes('--sync') &&
+    (fastCheck.transcriptUnchanged || Number(fastCheck.logSize || 0) > 512 * 1024)
+  );
+  if (canUseSwr) {
+    try {
+      const lockDir = fastCheck.stateDir;
+      const lockFile = join(lockDir, `.sl_refresh_${convArg}.lock`);
+      let shouldSpawn = true;
+      try {
+        if (existsSync(lockFile) && (Date.now() - statSync(lockFile).mtimeMs) < 1500) {
+          shouldSpawn = false;
+        }
+      } catch {}
+      if (shouldSpawn) {
+        try {
+          mkdirSync(lockDir, { recursive: true });
+          writeFileSync(lockFile, String(process.pid), 'utf-8');
+        } catch {}
+        const child = spawn(
+          process.execPath,
+          [fileURLToPath(import.meta.url), 'statusline', '--refresh-snap', convArg],
+          { detached: true, stdio: 'ignore', windowsHide: true }
+        );
+        child.unref();
+      }
+    } catch {}
+    const diskQuotas = readDiskQuotasFallbackFast(fastCheck.stateDir, fastCheck.lsDiskHash);
+    const swrCtx = {
+      ok: true,
+      fromStatuslineSnap: true,
+      staleWhileRevalidate: true,
+      conversationId: convArg || null,
+      quotas: (Array.isArray(staleSnap.quotas) && staleSnap.quotas.length) ? staleSnap.quotas : diskQuotas,
+      context: staleSnap.context || {},
+      speed: staleSnap.speed || null,
+      turnsCount: Number(staleSnap.turnsCount || 0),
+      turns: []
+    };
+    const line = buildStatuslineText(swrCtx, stdinPayload, { format, terminalWidth });
     if (isDirectRun) {
       process.stdout.write(`${line}\n`, () => process.exit(0));
       return;
