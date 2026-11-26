@@ -7,7 +7,7 @@
 - **克制多主题配色**：借鉴 `token-tracker` 视觉体系，内置 **6 套低饱和主题**（Catppuccin `mocha` 默认 / `latte` / `frappe` / `macchiato`、`nord`、`dracula`），采用同行语义统一着色与单色阈值进度条，TrueColor 精确渲染并自动降级 256 色。
 - **字节偏移增量引擎**：借鉴 `token-tracker` 的 `IncrementalJSONL` 游标思路，只解析新增字节，并按 `step_index` 去重防复算，毫秒级汇总 **当前会话平均缓存**、**今日使用量**、**本月使用量** 与 **API 等值参考 / 订阅回本**。
 - **原生双池额度**：直读 `agy` 回调中的 `gemini-5h`、`gemini-weekly`、`3p-5h`、`3p-weekly` 四桶并统一为 **「剩余 %」** 口径。
-- **Solo 原生联动**：输出原子只读快照 `~/.gemini/antigravity-cli/cache/agy-cli-hud/usage-hud.v1.json`，无缝供给 Solo 右侧原生第 4 页签 **「用量」(`⌘U`)**，并兼容 Solo 既有 `agy-statusline --forward-command` 桥接，绝不互覆配置。
+- **Solo 原生联动**：输出原子只读快照 `~/.gemini/antigravity-cli/cache/agy-cli-hud/usage-hud.v1.json`，无缝供给 Solo 右侧原生第 4 页签 **「用量」(`⌘U`)**；安装器默认采用**非阻塞 Solo 异步旁路**（后台异步喂给 Solo、前台直跑 `agy-hud` 仅 ~40 ms 防 `signal: killed` 超时强杀，可选 `--solo-sync` 切回同步转发），绝不互覆配置。
 - **合规 Google Colab 监控**：纯官方 Google OAuth 2.0 (PKCE) + `colaboratory.googleapis.com/v1beta` REST API，实时查看订阅等级、剩余 CU、CU/h、活跃 GPU 的 RAM/VRAM/负载/闲置倒计时，并支持续期、释放与低频排队。
 
 ## 快速安装

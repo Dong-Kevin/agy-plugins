@@ -428,6 +428,20 @@ function buildSoloSurfaceHookCommand(forward = null) {
   return `${SOLO_SURFACE_HOOK_PREFIX}; fi`;
 }
 
+/**
+ * Non-blocking Solo async bypass wrapper (matches Solo hook_configuration.py `bg_match` verbatim):
+ * feeds stdin to Solo's `agy-statusline` observer in a background subshell with redirected stdio
+ * while executing the ultra-fast `agy-hud statusline` (~40ms) directly in the foreground so slow
+ * Python cold-starts never trip agy CLI's statusLine SIGKILL timeout.
+ */
+function buildSoloAsyncBypassCommand(hudCommand) {
+  return `payload=$(cat); if [ -n "$CLI_AGENTS_SURFACE_ID" ] && [ -x "$CLI_AGENTS_HOOK_CLI" ]; then (printf "%s" "$payload" | "$CLI_AGENTS_HOOK_CLI" agent hook agy-statusline >/dev/null 2>&1 &); fi; printf "%s" "$payload" | ${hudCommand}`;
+}
+
+function buildDirectSoloAsyncBypassCommand(baseBridge, hudCommand) {
+  return `payload=$(cat); (printf "%s" "$payload" | ${baseBridge} >/dev/null 2>&1 &); printf "%s" "$payload" | ${hudCommand}`;
+}
+
 function isSoloBridgeCommand(cmd) {
   return typeof cmd === 'string' && cmd.includes('agent hook agy-statusline');
 }
@@ -438,25 +452,31 @@ function isSoloShellWrapper(cmd) {
   return (
     trimmed.includes('$CLI_AGENTS_SURFACE_ID') ||
     trimmed.includes('$CLI_AGENTS_HOOK_CLI') ||
-    /^if\s+\[/.test(trimmed) ||
-    /^payload=\$\(cat\)/.test(trimmed)
+    /^if\s+\[/.test(trimmed)
   );
 }
 
-function stripDirectForwardCommand(cmd) {
-  const idx = cmd.indexOf(' --forward-command ');
-  return idx >= 0 ? cmd.slice(0, idx).trim() : cmd.trim();
+function extractDirectSoloBridge(cmd) {
+  const trimmed = String(cmd || '').trim();
+  const asyncMatch = trimmed.match(
+    /^payload=\$\(cat\);\s*\(printf\s+"%s"\s+"\$payload"\s+\|\s+(.+?)\s*>\/dev\/null\s+2>&1\s*&\);/
+  );
+  if (asyncMatch) return asyncMatch[1].trim();
+  const idx = trimmed.indexOf(' --forward-command ');
+  return idx >= 0 ? trimmed.slice(0, idx).trim() : trimmed;
 }
 
 /**
  * Installs or removes agy-cli-hud statusLine cleanly without clobbering Solo's agy-statusline bridge.
- * Preserves Solo's canonical `if [ -n "$CLI_AGENTS_SURFACE_ID" ] ...; else /bin/sh -c ...; fi`
- * wrapper (and self-heals truncated wrappers), while also supporting legacy direct-binary bridges.
+ * Defaults to non-blocking Solo async bypass (`soloSync: false`) to prevent agy CLI statusLine
+ * SIGKILL timeouts caused by Solo's cold Python runtime, while matching Solo's `bg_match` grammar
+ * and restoring Solo's canonical `if [ -n "$CLI_AGENTS_SURFACE_ID" ] ...; fi` wrapper on uninstall.
  */
 export function configureAgyStatusLine({
   hudCommand = 'agy-hud statusline',
   uninstall = false,
   stackWithDefault = true,
+  soloSync = false,
   paths = resolveHudPaths()
 } = {}) {
   const settingsPath = paths.cliSettingsPath;
@@ -479,7 +499,7 @@ export function configureAgyStatusLine({
       if (existingCmd.includes('agy-hud')) {
         currentSl.command = isSoloShellWrapper(existingCmd)
           ? buildSoloSurfaceHookCommand(null)
-          : stripDirectForwardCommand(existingCmd);
+          : extractDirectSoloBridge(existingCmd);
         doc.statusLine = currentSl;
         writeJsonAtomic(settingsPath, doc, { mode: 0o600, pretty: true });
         return { ok: true, mode: 'solo_preserved', command: currentSl.command, settingsPath };
@@ -497,12 +517,22 @@ export function configureAgyStatusLine({
   let nextCmd = hudCommand;
   let mode = 'direct';
   if (isSoloShellWrapper(existingCmd)) {
-    nextCmd = buildSoloSurfaceHookCommand(hudCommand);
-    mode = 'solo_chained';
+    if (soloSync) {
+      nextCmd = buildSoloSurfaceHookCommand(hudCommand);
+      mode = 'solo_chained';
+    } else {
+      nextCmd = buildSoloAsyncBypassCommand(hudCommand);
+      mode = 'solo_async';
+    }
   } else if (isSoloBridgeCommand(existingCmd)) {
-    const baseBridge = stripDirectForwardCommand(existingCmd);
-    nextCmd = `${baseBridge} --forward-command ${shellQuote(hudCommand)}`;
-    mode = 'solo_chained';
+    const baseBridge = extractDirectSoloBridge(existingCmd);
+    if (soloSync) {
+      nextCmd = `${baseBridge} --forward-command ${shellQuote(hudCommand)}`;
+      mode = 'solo_chained';
+    } else {
+      nextCmd = buildDirectSoloAsyncBypassCommand(baseBridge, hudCommand);
+      mode = 'solo_async';
+    }
   }
 
   doc.statusLine = {

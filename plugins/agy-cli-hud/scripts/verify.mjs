@@ -7,15 +7,17 @@
  */
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import {
   appendFileSync,
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -453,45 +455,71 @@ function testSoloBridgeChaining() {
   const work = mkdtempSync(join(tmpdir(), 'agy-hud-solo-chain-'));
   const prevHome = process.env.AGY_HUD_HOME;
   process.env.AGY_HUD_HOME = work;
+  const soloBgMatchRe =
+    /^payload=\$\(cat\);\s*if\s+\[\s+-n\s+"\$CLI_AGENTS_SURFACE_ID"\s+\]\s+&&\s+\[\s+-x\s+"\$CLI_AGENTS_HOOK_CLI"\s+\];\s*then\s+\(printf\s+"%s"\s+"\$payload"\s+\|\s+"\$CLI_AGENTS_HOOK_CLI"\s+agent\s+hook\s+agy-statusline(?:\s+--forward-command\s+true)?\s*>\/dev\/null\s+2>&1\s*&\);\s*fi;\s*printf\s+"%s"\s+"\$payload"\s+\|\s+(.+)$/;
   try {
     const paths = resolveHudPaths();
     mkdirSync(dirname(paths.cliSettingsPath), { recursive: true });
 
-    // 1) Legacy direct binary Solo bridge command
+    // 1) Legacy direct binary Solo bridge command (default async bypass + opt-in soloSync)
     const soloDirectCmd = '"/Applications/Solo.app/Contents/Resources/CoreRuntime/bin/cli-agents-hook" agent hook agy-statusline';
     writeFileSync(
       paths.cliSettingsPath,
       JSON.stringify({ statusLine: { type: 'command', command: soloDirectCmd, enabled: true, stack_with_default: true } }, null, 2)
     );
-    const installedDirect = configureAgyStatusLine({ hudCommand: 'agy-hud statusline', paths });
-    assert.equal(installedDirect.mode, 'solo_chained');
-    assert.ok(installedDirect.command.startsWith(soloDirectCmd), 'Must preserve direct Solo agy-statusline prefix');
-    assert.ok(installedDirect.command.includes('--forward-command') && installedDirect.command.includes('agy-hud statusline'));
-    assertShellSyntaxValid(installedDirect.command);
-    const uninstalledDirect = configureAgyStatusLine({ uninstall: true, paths });
-    assert.equal(uninstalledDirect.mode, 'solo_preserved');
-    assert.equal(uninstalledDirect.command, soloDirectCmd, 'Uninstall must restore exact direct Solo bridge command');
+    const installedDirectAsync = configureAgyStatusLine({ hudCommand: 'agy-hud statusline', paths });
+    assert.equal(installedDirectAsync.mode, 'solo_async');
+    assert.ok(installedDirectAsync.command.includes(soloDirectCmd) && installedDirectAsync.command.includes('>/dev/null 2>&1 &'));
+    assert.ok(installedDirectAsync.command.endsWith('| agy-hud statusline'));
+    assertShellSyntaxValid(installedDirectAsync.command);
+    const uninstalledDirectAsync = configureAgyStatusLine({ uninstall: true, paths });
+    assert.equal(uninstalledDirectAsync.mode, 'solo_preserved');
+    assert.equal(uninstalledDirectAsync.command, soloDirectCmd, 'Uninstall from direct async must restore exact direct Solo bridge');
 
-    // 2) Canonical Solo `if ...; then ...; fi` surface wrapper (no existing forward)
+    const installedDirectSync = configureAgyStatusLine({ hudCommand: 'agy-hud statusline', soloSync: true, paths });
+    assert.equal(installedDirectSync.mode, 'solo_chained');
+    assert.ok(installedDirectSync.command.startsWith(soloDirectCmd), 'soloSync must preserve direct Solo prefix');
+    assert.ok(installedDirectSync.command.includes('--forward-command') && installedDirectSync.command.includes('agy-hud statusline'));
+    assertShellSyntaxValid(installedDirectSync.command);
+    const uninstalledDirectSync = configureAgyStatusLine({ uninstall: true, paths });
+    assert.equal(uninstalledDirectSync.mode, 'solo_preserved');
+    assert.equal(uninstalledDirectSync.command, soloDirectCmd, 'Uninstall from direct sync must restore exact direct Solo bridge');
+
+    // 2) Canonical Solo `if ...; then ...; fi` surface wrapper -> default non-blocking async bypass
     const canonicalNoForward =
       'if [ -n "$CLI_AGENTS_SURFACE_ID" ] && [ -x "$CLI_AGENTS_HOOK_CLI" ]; then "$CLI_AGENTS_HOOK_CLI" agent hook agy-statusline; fi';
-    const canonicalWithHud =
+    const canonicalSyncWithHud =
       'if [ -n "$CLI_AGENTS_SURFACE_ID" ] && [ -x "$CLI_AGENTS_HOOK_CLI" ]; then "$CLI_AGENTS_HOOK_CLI" agent hook agy-statusline --forward-command \'agy-hud statusline\'; else /bin/sh -c \'agy-hud statusline\'; fi';
+    const canonicalAsyncWithHud =
+      'payload=$(cat); if [ -n "$CLI_AGENTS_SURFACE_ID" ] && [ -x "$CLI_AGENTS_HOOK_CLI" ]; then (printf "%s" "$payload" | "$CLI_AGENTS_HOOK_CLI" agent hook agy-statusline >/dev/null 2>&1 &); fi; printf "%s" "$payload" | agy-hud statusline';
     writeFileSync(
       paths.cliSettingsPath,
       JSON.stringify({ statusLine: { type: 'command', command: canonicalNoForward, enabled: true, stack_with_default: true } }, null, 2)
     );
-    const installedCanon = configureAgyStatusLine({ hudCommand: 'agy-hud statusline', paths });
-    assert.equal(installedCanon.mode, 'solo_chained');
-    assert.equal(installedCanon.command, canonicalWithHud, 'Canonical Solo wrapper must match surface_hook_command("agy", forward)');
-    assertShellSyntaxValid(installedCanon.command);
+    const installedAsync = configureAgyStatusLine({ hudCommand: 'agy-hud statusline', paths });
+    assert.equal(installedAsync.mode, 'solo_async');
+    assert.equal(installedAsync.command, canonicalAsyncWithHud, 'Default Solo install must use non-blocking async bypass');
+    assert.ok(soloBgMatchRe.test(installedAsync.command), 'Async bypass must match Solo hook_configuration.py bg_match verbatim');
+    assertShellSyntaxValid(installedAsync.command);
 
+    // Re-running install on existing solo_async must stay idempotent
+    const reinstalledAsync = configureAgyStatusLine({ hudCommand: 'agy-hud statusline', paths });
+    assert.equal(reinstalledAsync.mode, 'solo_async');
+    assert.equal(reinstalledAsync.command, canonicalAsyncWithHud);
+
+    // Opt-in --solo-sync switches cleanly to canonical synchronous wrapper
+    const installedSync = configureAgyStatusLine({ hudCommand: 'agy-hud statusline', soloSync: true, paths });
+    assert.equal(installedSync.mode, 'solo_chained');
+    assert.equal(installedSync.command, canonicalSyncWithHud, 'soloSync must match surface_hook_command("agy", forward)');
+    assertShellSyntaxValid(installedSync.command);
+
+    // Uninstall from either async or sync restores canonical Solo wrapper
     const uninstalledCanon = configureAgyStatusLine({ uninstall: true, paths });
     assert.equal(uninstalledCanon.mode, 'solo_preserved');
     assert.equal(uninstalledCanon.command, canonicalNoForward, 'Uninstall must restore canonical Solo wrapper ending with ; fi');
     assertShellSyntaxValid(uninstalledCanon.command);
 
-    // 3) Canonical Solo wrapper with another existing --forward-command (must replace cleanly without dropping else/fi)
+    // 3) Canonical Solo wrapper with another existing --forward-command upgrades cleanly to solo_async
     const canonicalOtherForward =
       'if [ -n "$CLI_AGENTS_SURFACE_ID" ] && [ -x "$CLI_AGENTS_HOOK_CLI" ]; then "$CLI_AGENTS_HOOK_CLI" agent hook agy-statusline --forward-command \'agy-context statusline\'; else /bin/sh -c \'agy-context statusline\'; fi';
     writeFileSync(
@@ -499,8 +527,8 @@ function testSoloBridgeChaining() {
       JSON.stringify({ statusLine: { type: 'command', command: canonicalOtherForward, enabled: true, stack_with_default: true } }, null, 2)
     );
     const replacedForward = configureAgyStatusLine({ hudCommand: 'agy-hud statusline', paths });
-    assert.equal(replacedForward.mode, 'solo_chained');
-    assert.equal(replacedForward.command, canonicalWithHud);
+    assert.equal(replacedForward.mode, 'solo_async');
+    assert.equal(replacedForward.command, canonicalAsyncWithHud);
     assertShellSyntaxValid(replacedForward.command);
 
     // 4) Self-heal truncated/broken Solo wrapper missing `; else ...; fi`
@@ -511,8 +539,8 @@ function testSoloBridgeChaining() {
       JSON.stringify({ statusLine: { type: 'command', command: brokenTruncated, enabled: true, stack_with_default: true } }, null, 2)
     );
     const healedInstall = configureAgyStatusLine({ hudCommand: 'agy-hud statusline', paths });
-    assert.equal(healedInstall.mode, 'solo_chained');
-    assert.equal(healedInstall.command, canonicalWithHud, 'Install must self-heal truncated Solo wrapper');
+    assert.equal(healedInstall.mode, 'solo_async');
+    assert.equal(healedInstall.command, canonicalAsyncWithHud, 'Install must self-heal truncated Solo wrapper');
     assertShellSyntaxValid(healedInstall.command);
 
     writeFileSync(
@@ -524,19 +552,175 @@ function testSoloBridgeChaining() {
     assert.equal(healedUninstall.command, canonicalNoForward, 'Uninstall must self-heal truncated Solo wrapper');
     assertShellSyntaxValid(healedUninstall.command);
 
-    // 5) Legacy Solo background wrapper upgrades cleanly
-    const legacyBg =
-      'payload=$(cat); if [ -n "$CLI_AGENTS_SURFACE_ID" ] && [ -x "$CLI_AGENTS_HOOK_CLI" ]; then (printf "%s" "$payload" | "$CLI_AGENTS_HOOK_CLI" agent hook agy-statusline >/dev/null 2>&1 &); fi; printf "%s" "$payload" | agy-context statusline';
-    writeFileSync(
-      paths.cliSettingsPath,
-      JSON.stringify({ statusLine: { type: 'command', command: legacyBg, enabled: true, stack_with_default: true } }, null, 2)
-    );
-    const upgradedBg = configureAgyStatusLine({ hudCommand: 'agy-hud statusline', paths });
-    assert.equal(upgradedBg.mode, 'solo_chained');
-    assert.equal(upgradedBg.command, canonicalWithHud);
-    assertShellSyntaxValid(upgradedBg.command);
+    // 5) Real POSIX shell execution with a 2000ms slow Solo hook must finish non-blocking (<600ms)
+    if (process.platform !== 'win32') {
+      const slowHook = join(work, 'slow-solo-hook.sh');
+      writeFileSync(slowHook, '#!/bin/sh\ncat >/dev/null\nsleep 2\n', 'utf8');
+      chmodSync(slowHook, 0o755);
+      const liveHudCmd = `'${process.execPath.replace(/'/g, "'\"'\"'")}' '${BIN_PATH.replace(/'/g, "'\"'\"'")}' statusline --no-color`;
+      writeFileSync(
+        paths.cliSettingsPath,
+        JSON.stringify({ statusLine: { type: 'command', command: canonicalNoForward, enabled: true, stack_with_default: true } }, null, 2)
+      );
+      const liveAsync = configureAgyStatusLine({ hudCommand: liveHudCmd, paths });
+      assert.ok(soloBgMatchRe.test(liveAsync.command), 'Live async command must satisfy bg_match');
+      const t0 = Date.now();
+      const out = execFileSync('/bin/sh', ['-c', liveAsync.command], {
+        input: JSON.stringify({ conversation_id: '', terminal_width: 120, context_window: { context_window_size: 1_000_000, used_percentage: 12 } }),
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          AGY_HUD_HOME: work,
+          AGY_HUD_NO_BG_SYNC: '1',
+          CLI_AGENTS_SURFACE_ID: 'verify-surface',
+          CLI_AGENTS_HOOK_CLI: slowHook
+        },
+        timeout: 1500
+      });
+      const elapsedMs = Date.now() - t0;
+      assert.ok(out.includes('12%'), `Async bypass must render live agy-hud output: ${out}`);
+      assert.ok(elapsedMs < 800, `Async bypass must not block on 2000ms slow Solo hook (took ${elapsedMs}ms)`);
+    }
 
-    pass('Solo agy-statusline canonical/legacy/self-heal zero-conflict install & uninstall');
+    pass('Solo agy-statusline async bypass (bg_match + non-blocking 2s hook), --solo-sync & clean uninstall');
+  } finally {
+    if (prevHome === undefined) delete process.env.AGY_HUD_HOME;
+    else process.env.AGY_HUD_HOME = prevHome;
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+async function testStatuslineAntiKillHardening() {
+  const work = mkdtempSync(join(tmpdir(), 'agy-hud-harden-'));
+  const prevHome = process.env.AGY_HUD_HOME;
+  process.env.AGY_HUD_HOME = work;
+  try {
+    const paths = resolveHudPaths();
+    mkdirSync(paths.dataDir, { recursive: true });
+    writeFileSync(
+      paths.summaryPath,
+      JSON.stringify({
+        v: 1,
+        updated_at: Math.floor(Date.now() / 1000),
+        sync_interval_ms: 2500,
+        lines: 2,
+        color: false,
+        session_id: '11111111-2222-3333-4444-555555555555',
+        ctx_pct: 33,
+        ctx_used: 330_000,
+        ctx_size: 1_000_000,
+        today_tokens: 123_000,
+        today_cost: 0.45
+      }),
+      'utf8'
+    );
+
+    // 1) Hanging stdin pipe must hit bounded timeout and exit 0 cleanly with summary fallback
+    const hangStart = Date.now();
+    const hangResult = await new Promise((resolvePromise, rejectPromise) => {
+      const child = spawn(process.execPath, [BIN_PATH, 'statusline', '--no-color'], {
+        env: {
+          ...process.env,
+          AGY_HUD_HOME: work,
+          AGY_HUD_NO_BG_SYNC: '1',
+          AGY_HUD_STDIN_TIMEOUT_MS: '80'
+        },
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (d) => { stdout += d.toString('utf8'); });
+      child.stderr.on('data', (d) => { stderr += d.toString('utf8'); });
+      child.on('error', rejectPromise);
+      child.on('close', (code, signal) => resolvePromise({ code, signal, stdout, stderr }));
+      // Intentionally keep child.stdin open without ending it!
+    });
+    const hangElapsed = Date.now() - hangStart;
+    assert.equal(hangResult.code, 0, `Hanging stdin must exit 0 (got code=${hangResult.code} signal=${hangResult.signal} err=${hangResult.stderr})`);
+    assert.ok(hangResult.stdout.includes('33%'), `Hanging stdin must render cached summary fallback: ${hangResult.stdout}`);
+    assert.ok(hangElapsed < 1200, `Bounded stdin timeout must exit quickly (took ${hangElapsed}ms)`);
+
+    // 2) Live-session write deduplication: identical payload within 15s must not rewrite live_statusline.v1.json
+    const payloadStr = JSON.stringify({
+      conversation_id: '11111111-2222-3333-4444-555555555555',
+      terminal_width: 120,
+      context_window: { context_window_size: 1_000_000, used_percentage: 44 }
+    });
+    execFileSync(process.execPath, [BIN_PATH, 'statusline', '--no-color'], {
+      env: { ...process.env, AGY_HUD_HOME: work, AGY_HUD_NO_BG_SYNC: '1' },
+      input: payloadStr,
+      encoding: 'utf8'
+    });
+    const st1 = statSync(paths.liveSessionPath);
+    await new Promise((r) => setTimeout(r, 30));
+    execFileSync(process.execPath, [BIN_PATH, 'statusline', '--no-color'], {
+      env: { ...process.env, AGY_HUD_HOME: work, AGY_HUD_NO_BG_SYNC: '1' },
+      input: payloadStr,
+      encoding: 'utf8'
+    });
+    const st2 = statSync(paths.liveSessionPath);
+    assert.equal(st2.ino, st1.ino, 'Identical payload within 15s must skip redundant atomic rewrite');
+    assert.equal(st2.mtimeMs, st1.mtimeMs, 'Identical payload must keep mtime unchanged');
+
+    // Changed payload must rewrite immediately
+    execFileSync(process.execPath, [BIN_PATH, 'statusline', '--no-color'], {
+      env: { ...process.env, AGY_HUD_HOME: work, AGY_HUD_NO_BG_SYNC: '1' },
+      input: JSON.stringify({
+        conversation_id: '11111111-2222-3333-4444-555555555555',
+        terminal_width: 120,
+        context_window: { context_window_size: 1_000_000, used_percentage: 48 }
+      }),
+      encoding: 'utf8'
+    });
+    const liveAfter = JSON.parse(readFileSync(paths.liveSessionPath, 'utf8'));
+    assert.equal(liveAfter.context_used_percent, 48, 'Changed payload must persist immediately');
+
+    // 3) Single-instance sync.lock prevents background sync spawn when another live PID holds lock
+    writeFileSync(paths.syncLockPath, JSON.stringify({ pid: process.pid, ts: Date.now() }), 'utf8');
+    writeFileSync(paths.syncStampPath, '1000', 'utf8');
+    const oldDate = new Date(Date.now() - 60_000);
+    utimesSync(paths.syncStampPath, oldDate, oldDate);
+    execFileSync(process.execPath, [BIN_PATH, 'statusline', '--no-color'], {
+      env: { ...process.env, AGY_HUD_HOME: work, AGY_HUD_NO_BG_SYNC: '0' },
+      input: JSON.stringify({ conversation_id: '', terminal_width: 120 }),
+      encoding: 'utf8'
+    });
+    assert.equal(readFileSync(paths.syncStampPath, 'utf8'), '1000', 'Active sync.lock must block overlapping background sync spawn');
+    rmSync(paths.syncLockPath, { force: true });
+
+    // 4) Incremental seenSteps pruning for inactive >7d sessions keeps totals intact + summary.sync_interval_ms
+    const oldConv = '00000000-0000-4000-8000-00000000007d';
+    const txDir = join(paths.cliBrainDir, oldConv, '.system_generated', 'logs');
+    mkdirSync(txDir, { recursive: true });
+    const txFile = join(txDir, 'transcript.jsonl');
+    writeFileSync(
+      txFile,
+      `${JSON.stringify({
+        step_index: 3,
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-10T10:00:00Z',
+        model: 'gemini-4-neon-xhigh',
+        input_tokens: 10000,
+        cache_read_tokens: 40000,
+        output_tokens: 1000
+      })}\n`,
+      'utf8'
+    );
+    const tenDaysAgo = new Date(Date.now() - 10 * 86_400_000);
+    utimesSync(txFile, tenDaysAgo, tenDaysAgo);
+    const inc = runIncrementalSync({ scope: 'cli_only', paths, now: new Date() });
+    const savedState = JSON.parse(readFileSync(paths.cursorStatePath, 'utf8'));
+    assert.deepEqual(savedState.files[txFile].seenSteps, {}, 'Inactive >7d file must prune seenSteps');
+    assert.equal(savedState.files[txFile].session.turns, 1, 'Pruned file must retain session turns');
+    assert.equal(savedState.files[txFile].session.inputTokens, 10000, 'Pruned file must retain token totals');
+    const { summary: composedSum } = composeSnapshot({
+      incrementalResult: inc,
+      buildSessionFn: buildSessionMetricsFromIncremental,
+      paths
+    });
+    assert.equal(composedSum.sync_interval_ms, 2000, 'Composed summary must expose sync_interval_ms');
+
+    pass('Statusline anti-kill hardening (bounded stdin, write dedup, sync.lock & >7d seenSteps pruning)');
   } finally {
     if (prevHome === undefined) delete process.env.AGY_HUD_HOME;
     else process.env.AGY_HUD_HOME = prevHome;
@@ -706,6 +890,7 @@ async function main() {
   testThemeCliAndPrecedence();
   testCrossSessionSnapshotIsolation();
   testSoloBridgeChaining();
+  await testStatuslineAntiKillHardening();
   await testMockColabApiAndPermissions();
   testIsolatedInstallUninstall();
   console.log('[agy-cli-hud] All plugin checks passed.');

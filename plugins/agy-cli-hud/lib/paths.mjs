@@ -55,6 +55,8 @@ export function resolveHudPaths() {
     summaryPath: join(dataDir, 'statusline_summary.v1.json'),
     liveSessionPath: join(dataDir, 'live_statusline.v1.json'),
     syncStampPath: join(dataDir, 'last_sync.stamp'),
+    soloSyncStampPath: join(dataDir, 'sync.stamp'),
+    syncLockPath: join(dataDir, 'sync.lock'),
     colabDir,
     colabConfigPath: join(colabDir, 'config.json'),
     colabTokenPath: join(colabDir, 'token.json'),

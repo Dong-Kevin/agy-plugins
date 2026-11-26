@@ -31,6 +31,7 @@ import {
 const STATE_VERSION = 1;
 const CONV_ID_RE = /^[0-9a-f-]{8,64}$/i;
 const MAX_CHUNK_BYTES = 8 * 1024 * 1024;
+const DEFAULT_SEEN_STEPS_MAX_AGE_MS = 7 * 86_400_000;
 
 function emptyDayBucket() {
   return {
@@ -361,7 +362,8 @@ export function saveIncrementalState(state, paths = resolveHudPaths()) {
 export function runIncrementalSync({
   scope = 'cli_only',
   paths = resolveHudPaths(),
-  now = new Date()
+  now = new Date(),
+  seenStepsMaxAgeMs = DEFAULT_SEEN_STEPS_MAX_AGE_MS
 } = {}) {
   const state = loadIncrementalState(paths);
   const targets = [...listBrainTranscripts(paths.cliBrainDir, 'cli')];
@@ -381,10 +383,27 @@ export function runIncrementalSync({
     }
   }
 
-  // Prune deleted files from state
-  for (const existingPath of Object.keys(state.files)) {
+  // Prune deleted files and trim seenSteps on inactive historical sessions (>7d)
+  // so incremental_state.v1.json stays compact without affecting session/byDay totals.
+  const nowMs = now instanceof Date ? now.getTime() : Date.now();
+  const maxStepAge = Number.isFinite(seenStepsMaxAgeMs) && seenStepsMaxAgeMs > 0
+    ? seenStepsMaxAgeMs
+    : DEFAULT_SEEN_STEPS_MAX_AGE_MS;
+  for (const [existingPath, fState] of Object.entries(state.files)) {
     if (!activePaths.has(existingPath) && !existsSync(existingPath)) {
       delete state.files[existingPath];
+      changedAny = true;
+      continue;
+    }
+    if (
+      fState &&
+      fState.mtimeMs > 0 &&
+      (nowMs - fState.mtimeMs) > maxStepAge &&
+      fState.seenSteps &&
+      typeof fState.seenSteps === 'object' &&
+      Object.keys(fState.seenSteps).length > 0
+    ) {
+      fState.seenSteps = {};
       changedAny = true;
     }
   }

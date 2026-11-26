@@ -334,6 +334,7 @@ export function composeSnapshot({
   const summary = {
     v: 1,
     updated_at: snapshot.updated_at,
+    sync_interval_ms: Math.max(1000, Number(cfg.sync_interval_ms) || 2000),
     lines: cfg.lines,
     color: cfg.color,
     theme: cfg.theme,

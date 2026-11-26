@@ -7,20 +7,55 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { ensurePrivateDir, readJsonSafe, resolveHudPaths, writeJsonAtomic } from '../lib/paths.mjs';
 import { formatTokensCompact, formatUsdCompact, renderStatusLine } from '../lib/statusline.mjs';
 
 const SELF_PATH = fileURLToPath(import.meta.url);
+const SYNC_LOCK_STALE_MS = 30_000;
+const LIVE_DEDUP_TTL_SEC = 15;
 
-function readStdinSyncSafe() {
-  if (process.stdin.isTTY) return '';
-  try {
-    return readFileSync(0, 'utf8');
-  } catch {
-    return '';
-  }
+function readStdinBounded(defaultTimeoutMs = 120, maxBytes = 256 * 1024) {
+  if (process.stdin.isTTY) return Promise.resolve('');
+  const rawEnv = Number(process.env.AGY_HUD_STDIN_TIMEOUT_MS);
+  const timeoutMs = Number.isFinite(rawEnv) && rawEnv > 0
+    ? Math.max(20, Math.min(1000, Math.round(rawEnv)))
+    : defaultTimeoutMs;
+  return new Promise((resolvePromise) => {
+    const chunks = [];
+    let totalBytes = 0;
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      process.stdin.off('data', onData);
+      process.stdin.off('end', onEnd);
+      process.stdin.off('error', onErr);
+      try { process.stdin.pause(); } catch {}
+      resolvePromise(Buffer.concat(chunks).toString('utf8'));
+    };
+    const onData = (chunk) => {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8');
+      if (totalBytes + buf.length > maxBytes) {
+        const remain = Math.max(0, maxBytes - totalBytes);
+        if (remain > 0) chunks.push(buf.subarray(0, remain));
+        finish();
+        return;
+      }
+      chunks.push(buf);
+      totalBytes += buf.length;
+    };
+    const onEnd = () => finish();
+    const onErr = () => finish();
+    const timer = setTimeout(finish, timeoutMs);
+    timer.unref?.();
+    process.stdin.on('data', onData);
+    process.stdin.on('end', onEnd);
+    process.stdin.on('error', onErr);
+    process.stdin.resume();
+  });
 }
 
 function parseFlagValue(args, name, fallback = null) {
@@ -31,22 +66,95 @@ function parseFlagValue(args, name, fallback = null) {
   return hit ? hit.slice(prefix.length) : fallback;
 }
 
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 1) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === 'EPERM';
+  }
+}
+
+function isSyncLockHeld(lockPath, staleMs = SYNC_LOCK_STALE_MS) {
+  const lock = readJsonSafe(lockPath, null);
+  if (!lock || typeof lock !== 'object') return false;
+  const ageMs = Date.now() - Number(lock.ts || 0);
+  if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs >= staleMs) return false;
+  const pid = Number(lock.pid);
+  if (pid === process.pid) return false;
+  return isPidAlive(pid);
+}
+
+function acquireSyncLock(paths) {
+  try {
+    writeJsonAtomic(paths.syncLockPath, { pid: process.pid, ts: Date.now() }, { mode: 0o600, pretty: false });
+  } catch {}
+}
+
+function releaseSyncLock(paths) {
+  try {
+    const lock = readJsonSafe(paths.syncLockPath, null);
+    if (lock && Number(lock.pid) === process.pid && existsSync(paths.syncLockPath)) {
+      unlinkSync(paths.syncLockPath);
+    }
+  } catch {}
+}
+
+function newestStampAgeMs(paths) {
+  const now = Date.now();
+  let minAge = Infinity;
+  for (const p of [paths.syncStampPath, paths.soloSyncStampPath]) {
+    if (!p) continue;
+    try {
+      if (existsSync(p)) {
+        const age = Math.max(0, now - statSync(p).mtimeMs);
+        if (age < minAge) minAge = age;
+      }
+    } catch {}
+  }
+  return minAge;
+}
+
 function maybeSpawnBackgroundSync(paths, syncIntervalMs = 2000) {
   if (process.env.AGY_HUD_NO_BG_SYNC === '1') return;
   try {
-    if (existsSync(paths.syncStampPath)) {
-      const ageMs = Date.now() - statSync(paths.syncStampPath).mtimeMs;
-      if (ageMs < syncIntervalMs) return;
-    }
+    if (isSyncLockHeld(paths.syncLockPath)) return;
+    if (newestStampAgeMs(paths) < syncIntervalMs) return;
     ensurePrivateDir(paths.dataDir);
     writeFileSync(paths.syncStampPath, String(Date.now()), { mode: 0o600 });
     const child = spawn(process.execPath, [SELF_PATH, 'sync', '--quiet'], {
       detached: true,
       stdio: 'ignore',
+      windowsHide: true,
       env: process.env
     });
     child.unref();
   } catch {}
+}
+
+function isLivePayloadEquivalent(prev, next) {
+  if (!prev || typeof prev !== 'object') return false;
+  const scalarKeys = [
+    'conversation_id',
+    'agent_state',
+    'plan_tier',
+    'model_id',
+    'model_display',
+    'effort',
+    'context_used_tokens',
+    'context_window_size',
+    'context_used_percent',
+    'total_input_tokens',
+    'total_output_tokens',
+    'last_turn_cache_hit_percent',
+    'cold_start_alert',
+    'session_cost_usd'
+  ];
+  for (const k of scalarKeys) {
+    if (prev[k] !== next[k]) return false;
+  }
+  return JSON.stringify(prev.raw_quota ?? null) === JSON.stringify(next.raw_quota ?? null);
 }
 
 function persistLiveStdinFast(payload, paths) {
@@ -68,8 +176,9 @@ function persistLiveStdinFast(payload, paths) {
       : (usedPct === 0 ? 0 : (windowSize && usedPct !== null ? Math.round((usedPct / 100) * windowSize) : null));
     const model = payload.model && typeof payload.model === 'object' ? payload.model : {};
     const rawSessionCost = payload.cost?.total_cost_usd ?? payload.cost?.total_usd;
+    const nowSec = Math.floor(Date.now() / 1000);
     const live = {
-      observed_at: Math.floor(Date.now() / 1000),
+      observed_at: nowSec,
       has_stdin_payload: true,
       conversation_id: String(payload.conversation_id || payload.session_id || '').trim() || null,
       agent_state: typeof payload.agent_state === 'string' ? payload.agent_state : null,
@@ -87,13 +196,22 @@ function persistLiveStdinFast(payload, paths) {
       session_cost_usd: typeof rawSessionCost === 'number' && Number.isFinite(rawSessionCost) ? Number(rawSessionCost.toFixed(4)) : null,
       raw_quota: payload.quota && typeof payload.quota === 'object' ? payload.quota : null
     };
+    const prev = readJsonSafe(paths.liveSessionPath, null);
+    if (
+      prev &&
+      Number.isFinite(Number(prev.observed_at)) &&
+      (nowSec - Number(prev.observed_at)) < LIVE_DEDUP_TTL_SEC &&
+      isLivePayloadEquivalent(prev, live)
+    ) {
+      return;
+    }
     writeJsonAtomic(paths.liveSessionPath, live, { mode: 0o600, pretty: false });
   } catch {}
 }
 
-function handleStatuslineFast(args) {
+async function handleStatuslineFast(args) {
   const paths = resolveHudPaths();
-  const raw = readStdinSyncSafe().trim();
+  const raw = (await readStdinBounded()).trim();
   let stdinPayload = null;
   if (raw) {
     try { stdinPayload = JSON.parse(raw); } catch {}
@@ -119,69 +237,84 @@ function handleStatuslineFast(args) {
   const curConvId = stdinPayload && typeof stdinPayload === 'object'
     ? (String(stdinPayload.conversation_id || stdinPayload.session_id || '').trim() || null)
     : undefined;
-  const needsImmediateSync = Boolean(
+  const baseIntervalMs = Math.max(1000, Number(summary?.sync_interval_ms) || 2000);
+  const summaryAgeSec = summary?.updated_at
+    ? Math.max(0, Math.floor(Date.now() / 1000) - Number(summary.updated_at))
+    : Infinity;
+  const needsQuickBootstrap = Boolean(
     !summary ||
-    (stdinPayload && (
-      curConvId
-        ? (summary.session_id !== curConvId && !summary.sessions?.[curConvId])
-        : summary.session_id != null
-    ))
+    (stdinPayload && curConvId && summary.session_id !== curConvId && !summary.sessions?.[curConvId] && summaryAgeSec >= 2)
   );
-  maybeSpawnBackgroundSync(paths, needsImmediateSync ? 400 : (Number(summary?.sync_interval_ms) || 2000));
+  maybeSpawnBackgroundSync(paths, needsQuickBootstrap ? Math.min(1000, baseIntervalMs) : baseIntervalMs);
+
+  process.stdout.write('', () => process.exit(0));
 }
 
 async function runSync(args) {
   const paths = resolveHudPaths();
-  const [{ buildSessionMetricsFromIncremental, runIncrementalSync }, { composeSnapshot, extractLiveStatuslineFacts, loadHudConfig }, { normalizeAgyQuotaMap }] = await Promise.all([
-    import('../lib/incremental.mjs'),
-    import('../lib/snapshot.mjs'),
-    import('../lib/quota.mjs')
-  ]);
-
-  const cfg = loadHudConfig(paths);
-  const scopeArg = parseFlagValue(args, '--scope', null);
-  const sessionId = parseFlagValue(args, '--session', null);
-  const withColab = args.includes('--with-colab') || args.includes('--colab');
   const quiet = args.includes('--quiet');
-
-  const inc = runIncrementalSync({ scope: scopeArg || cfg.scope, paths });
-
-  let liveFacts = readJsonSafe(paths.liveSessionPath, null);
-  if (liveFacts && liveFacts.raw_quota && !liveFacts.quotas) {
-    liveFacts = {
-      ...liveFacts,
-      quotas: normalizeAgyQuotaMap(liveFacts.raw_quota, { source: 'agy_statusline', stale: false })
-    };
+  if (quiet && isSyncLockHeld(paths.syncLockPath)) {
+    return;
   }
-  const stdinRaw = args.includes('--from-stdin') ? readStdinSyncSafe().trim() : '';
-  if (stdinRaw) {
+  acquireSyncLock(paths);
+  try {
+    const [{ buildSessionMetricsFromIncremental, runIncrementalSync }, { composeSnapshot, extractLiveStatuslineFacts, loadHudConfig }, { normalizeAgyQuotaMap }] = await Promise.all([
+      import('../lib/incremental.mjs'),
+      import('../lib/snapshot.mjs'),
+      import('../lib/quota.mjs')
+    ]);
+
+    const cfg = loadHudConfig(paths);
+    const scopeArg = parseFlagValue(args, '--scope', null);
+    const sessionId = parseFlagValue(args, '--session', null);
+    const withColab = args.includes('--with-colab') || args.includes('--colab');
+
+    const inc = runIncrementalSync({ scope: scopeArg || cfg.scope, paths });
+
+    let liveFacts = readJsonSafe(paths.liveSessionPath, null);
+    if (liveFacts && liveFacts.raw_quota && !liveFacts.quotas) {
+      liveFacts = {
+        ...liveFacts,
+        quotas: normalizeAgyQuotaMap(liveFacts.raw_quota, { source: 'agy_statusline', stale: false })
+      };
+    }
+    const stdinRaw = args.includes('--from-stdin') ? (await readStdinBounded(500)).trim() : '';
+    if (stdinRaw) {
+      try {
+        const parsed = JSON.parse(stdinRaw);
+        liveFacts = extractLiveStatuslineFacts(parsed);
+        writeJsonAtomic(paths.liveSessionPath, liveFacts, { mode: 0o600, pretty: false });
+      } catch {}
+    }
+
+    let colabSummary = null;
+    if (withColab) {
+      try {
+        const { refreshColabStatus } = await import('../lib/colab.mjs');
+        colabSummary = await refreshColabStatus({ paths, force: args.includes('--force-colab') });
+      } catch {}
+    }
+
+    const { snapshot } = composeSnapshot({
+      incrementalResult: inc,
+      buildSessionFn: buildSessionMetricsFromIncremental,
+      liveFacts,
+      colabSummary,
+      config: cfg,
+      paths,
+      sessionId
+    });
+
     try {
-      const parsed = JSON.parse(stdinRaw);
-      liveFacts = extractLiveStatuslineFacts(parsed);
-      writeJsonAtomic(paths.liveSessionPath, liveFacts, { mode: 0o600, pretty: false });
+      ensurePrivateDir(paths.dataDir);
+      writeFileSync(paths.syncStampPath, String(Date.now()), { mode: 0o600 });
     } catch {}
-  }
 
-  let colabSummary = null;
-  if (withColab) {
-    try {
-      const { refreshColabStatus } = await import('../lib/colab.mjs');
-      colabSummary = await refreshColabStatus({ paths, force: args.includes('--force-colab') });
-    } catch {}
-  }
-
-  const { snapshot } = composeSnapshot({
-    incrementalResult: inc,
-    buildSessionFn: buildSessionMetricsFromIncremental,
-    liveFacts,
-    colabSummary,
-    config: cfg,
-    paths,
-    sessionId
-  });
-
-  if (!quiet) {
-    process.stdout.write(`${JSON.stringify(snapshot, null, 2)}\n`);
+    if (!quiet) {
+      process.stdout.write(`${JSON.stringify(snapshot, null, 2)}\n`);
+    }
+  } finally {
+    releaseSyncLock(paths);
   }
 }
 
@@ -546,6 +679,7 @@ async function runInstallStatusline(args) {
     hudCommand: hudCmd,
     uninstall,
     stackWithDefault: !args.includes('--replace-default'),
+    soloSync: args.includes('--solo-sync'),
     paths
   });
   if (!uninstall) {
@@ -564,7 +698,7 @@ function printHelp() {
   agy-hud status [--json] [--with-colab]           查看当前会话/今日/本月/双池额度/Colab 概览
   agy-hud watch [--interval 1500]                  非 Solo 终端下的轻量实时看板
   agy-hud theme [list|preview [name]|set <name>]   查看、预览或切换配色主题（mocha/latte/frappe/macchiato/nord/dracula）
-  agy-hud install-statusline [--lines 2]           安全写入 agy settings.json（自动兼容 Solo 桥接）
+  agy-hud install-statusline [--lines 2] [--solo-sync] 安全写入 agy settings.json（Solo 下默认异步旁路防强杀）
   agy-hud install-statusline --uninstall           移除 HUD 底栏并完好保留 Solo 桥接
   agy-hud config show | set <key> <value>          配置分层行数（1/2/3）、主题、统计范围、月费折算
   agy-hud colab <import-secret|login|logout|status|keepalive|release|snipe>
@@ -577,7 +711,7 @@ async function main() {
   const rest = args.slice(1);
 
   if (cmd === 'statusline') {
-    handleStatuslineFast(rest);
+    await handleStatuslineFast(rest);
     return;
   }
   if (cmd === '-h' || cmd === '--help' || cmd === 'help') {

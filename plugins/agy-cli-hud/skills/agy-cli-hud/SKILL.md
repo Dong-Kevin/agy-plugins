@@ -7,7 +7,7 @@ description: 专为 agy CLI 与 Solo 设计的轻量低延迟终端监控与 Col
 
 本技能用于面向 `agy` CLI 与 **Solo** 的轻量实时遥测体验：
 
-- **输入栏下方原生状态栏**：通过 `agy` 官方 `statusLine` 接口在输入框正下方输出 2 行（默认）或 3 行分层指标，热路径零网络请求、零全盘扫盘，且自动兼容 Solo 既有的 `agy-statusline --forward-command` 桥接。
+- **输入栏下方原生状态栏**：通过 `agy` 官方 `statusLine` 接口在输入框正下方输出 2 行（默认）或 3 行分层指标，热路径零网络请求、零全盘扫盘、带 stdin 读超时与单实例后台同步锁；在 Solo 环境下默认使用非阻塞异步旁路（兼顾 ~40 ms 极速响应防 `signal: killed` 与 Solo 桥接共存，可选 `--solo-sync`）。
 - **Solo 原生右侧抽屉联动**：输出标准化的 `usage-hud.v1.json` 只读快照供 Solo 右侧「用量」抽屉（`⌘U`）直接消费，零 WebView、零独立浮窗。
 - **合规 Google Colab 监控**：纯 OAuth 2.0 (PKCE) + 官方 REST API，支持余额、CU/h、活跃 GPU 实例硬件/闲置倒计时、续期、释放与低频排队抢算力（彻底不包含 CDP DOM 注入）。
 
