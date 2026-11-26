@@ -7,7 +7,8 @@ An open-source plugin suite for **Google Antigravity** (Desktop & `agy` CLI) -- 
 | Plugin | What It Does | Version | Docs |
 | :--- | :--- | :---: | :--- |
 | **`agy-finder`** | Right-side file tree, chat `[📂]` reveal & HTML `[🌐]` browser launch, conversation mentions, native preview & `⌘⇧E` drawer | `v0.2.9` | [EN](plugins/agy-finder/README_EN.md) · [中文](plugins/agy-finder/README.md) |
-| **`context-viewer`** | Context gauge, 10-category spectrum, session & per-model cache rates, Swarm tree, custom date trends, dual quota pools, Menu Bar & pinned float | `v1.9.0` | [EN](plugins/agy-context-viewer/README_EN.md) · [中文](plugins/agy-context-viewer/README.md) |
+| **`context-viewer`** | Context gauge, 10-category spectrum, session & per-model cache rates, Swarm tree, custom date trends, dual quota pools, Menu Bar & pinned float (Desktop App) | `v1.9.0` | [EN](plugins/agy-context-viewer/README_EN.md) · [中文](plugins/agy-context-viewer/README.md) |
+| **`agy-cli-hud`** | Zero-dependency lightweight HUD for `agy` CLI & Solo: 2/3-line layered prompt status bar, incremental JSONL daily/monthly & avg cache rollups, dual 5h/weekly quotas, compliant Google Colab telemetry | `v0.1.0` | [EN](plugins/agy-cli-hud/README_EN.md) · [中文](plugins/agy-cli-hud/README.md) |
 
 ---
 
@@ -17,9 +18,9 @@ Paste either prompt directly into Antigravity to install, verify availability, a
 
 > **Install all plugins:**
 > ```text
-> Please install all plugins from https://github.com/Dong-Kevin/agy-plugins (on macOS/Linux run `bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh)"`, on Windows PowerShell run `irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.ps1 | iex`), verify the installation status, and summarize the shortcuts for both plugins.
+> Please install all plugins from https://github.com/Dong-Kevin/agy-plugins (on macOS/Linux run `bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh)"`, on Windows PowerShell run `irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.ps1 | iex`), verify the installation status, and summarize the shortcuts for all installed plugins.
 > ```
-> **Install a single plugin** (replace `agy-finder` with `context-viewer` if needed):
+> **Install a single plugin** (replace `agy-finder` with `context-viewer` or `agy-cli-hud` if needed):
 > ```text
 > Please install only agy-finder from https://github.com/Dong-Kevin/agy-plugins (on macOS/Linux run `curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh | bash -s -- agy-finder`, on Windows PowerShell run `$env:AGY_PLUGIN="agy-finder"; irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.ps1 | iex`), verify it is active, and list its shortcuts.
 > ```
@@ -31,9 +32,10 @@ Paste either prompt directly into Antigravity to install, verify availability, a
 # macOS / Linux -- install or hot-upgrade all plugins
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh)"
 
-# Install a single plugin (agy-finder or context-viewer)
+# Install a single plugin (agy-finder, context-viewer, or agy-cli-hud)
 curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh | bash -s -- agy-finder
 curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh | bash -s -- context-viewer
+curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh | bash -s -- agy-cli-hud
 
 # Uninstall all (append plugin name to uninstall one)
 curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh | bash -s -- --uninstall
@@ -43,7 +45,7 @@ curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install
 # Windows PowerShell -- install all
 irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.ps1 | iex
 
-# Install a single plugin (agy-finder or context-viewer)
+# Install a single plugin (agy-finder, context-viewer, or agy-cli-hud)
 $env:AGY_PLUGIN="agy-finder"; irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.ps1 | iex
 ```
 
@@ -113,6 +115,7 @@ $env:AGY_PLUGIN="agy-finder"; irm https://raw.githubusercontent.com/Dong-Kevin/a
 ## Acknowledgements
 
 - `plugins/agy-context-viewer` was originally inspired by **[elviscjn-cjn/antigravity-context-viewer](https://github.com/elviscjn-cjn/antigravity-context-viewer)** -- the pioneering open-source project that first explored context breakdown, token activity heatmaps, and model quota visualization for Google Antigravity. Sincere thanks and respect to the original author!
+- `plugins/agy-cli-hud` draws inspiration from **[stormzhang/token-tracker](https://github.com/stormzhang/token-tracker)** for incremental JSONL byte-offset rollups and layered status bars, and **[cyscjl/agy-colab-panel](https://github.com/cyscjl/agy-colab-panel)** for official Google Colab OAuth/REST telemetry (implemented strictly without CDP DOM injection).
 
 ---
 

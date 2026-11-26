@@ -7,7 +7,8 @@
 | 插件 | 核心能力 | 当前版本 | 文档 |
 | :--- | :--- | :---: | :--- |
 | **`agy-finder`** | 右侧目录树、聊天路径 `[📂]` 定位 / HTML `[🌐]` 默认浏览器打开、对话提及提取、原生弹窗与 `⌘⇧E` 抽屉 | `v0.2.9` | [中文说明](plugins/agy-finder/README.md) · [EN](plugins/agy-finder/README_EN.md) |
-| **`context-viewer`** | 上下文占比 / 10 类光谱 / 会话与分模型缓存率 / Swarm 整树 / 自定义日期趋势、双池配额、异常取证、菜单栏与置顶小窗 | `v1.9.0` | [中文说明](plugins/agy-context-viewer/README.md) · [EN](plugins/agy-context-viewer/README_EN.md) |
+| **`context-viewer`** | 上下文占比 / 10 类光谱 / 会话与分模型缓存率 / Swarm 整树 / 自定义日期趋势、双池配额、异常取证、菜单栏与置顶小窗（Desktop App 专用） | `v1.9.0` | [中文说明](plugins/agy-context-viewer/README.md) · [EN](plugins/agy-context-viewer/README_EN.md) |
+| **`agy-cli-hud`** | `agy` CLI 与 Solo 专用零依赖轻量监控：输入栏下方 2/3 行分层状态栏、增量 JSONL 今日/本月与平均缓存、双池 5h/周额度、合规版 Google Colab 算力监控 | `v0.1.0` | [中文说明](plugins/agy-cli-hud/README.md) · [EN](plugins/agy-cli-hud/README_EN.md) |
 
 ---
 
@@ -19,7 +20,7 @@
 > ```text
 > 请帮我安装 https://github.com/Dong-Kevin/agy-plugins 中的全部插件（macOS / Linux 运行 `bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh)"`，Windows PowerShell 运行 `irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.ps1 | iex`），完成后检查插件可用状态并总结各自快捷键。
 > ```
-> **只装单个插件**（将 `agy-finder` 替换为 `context-viewer` 即可单独安装对应插件）：
+> **只装单个插件**（将 `agy-finder` 替换为 `context-viewer` 或 `agy-cli-hud` 即可单独安装对应插件）：
 > ```text
 > 请帮我从 https://github.com/Dong-Kevin/agy-plugins 仅安装 agy-finder（macOS / Linux 运行 `curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh | bash -s -- agy-finder`，Windows PowerShell 运行 `$env:AGY_PLUGIN="agy-finder"; irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.ps1 | iex`），完成后检查可用状态并说明快捷键。
 > ```
@@ -31,9 +32,10 @@
 # macOS / Linux -- 安装或热更新全部插件
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh)"
 
-# 仅安装单个插件（支持 agy-finder 或 context-viewer）
+# 仅安装单个插件（支持 agy-finder / context-viewer / agy-cli-hud）
 curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh | bash -s -- agy-finder
 curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh | bash -s -- context-viewer
+curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh | bash -s -- agy-cli-hud
 
 # 卸载全部（也可在末尾追加插件名单独卸载）
 curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh | bash -s -- --uninstall
@@ -43,7 +45,7 @@ curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install
 # Windows PowerShell -- 安装全部
 irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.ps1 | iex
 
-# 仅安装单个插件（可选 agy-finder / context-viewer）
+# 仅安装单个插件（可选 agy-finder / context-viewer / agy-cli-hud）
 $env:AGY_PLUGIN="agy-finder"; irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.ps1 | iex
 ```
 
@@ -113,6 +115,7 @@ $env:AGY_PLUGIN="agy-finder"; irm https://raw.githubusercontent.com/Dong-Kevin/a
 ## 致谢
 
 - `plugins/agy-context-viewer` 在构思之初深受开源项目 **[elviscjn-cjn/antigravity-context-viewer](https://github.com/elviscjn-cjn/antigravity-context-viewer)** 的启发 -- 该项目率先探索了 Google Antigravity 上下文构成透视、Token 活跃热力图与配额可视化方案，谨向原作者的开创性探索致以诚挚感谢与敬意！
+- `plugins/agy-cli-hud` 借鉴了 **[stormzhang/token-tracker](https://github.com/stormzhang/token-tracker)** 的增量 JSONL 字节游标与分层状态栏思路，以及 **[cyscjl/agy-colab-panel](https://github.com/cyscjl/agy-colab-panel)** 的官方 Google Colab OAuth/REST 指标对接实践（本插件严格移除 CDP 注入，仅使用官方 REST 通道）。
 
 ---
 
@@ -120,7 +123,7 @@ $env:AGY_PLUGIN="agy-finder"; irm https://raw.githubusercontent.com/Dong-Kevin/a
 
 ```bash
 node scripts/verify.mjs --strict-git-identity   # 清单规范、隐私脱敏与 PNG 元数据扫描
-node scripts/package-all.mjs                    # 构建两款插件独立 ZIP 发布包与 SHA-256
+node scripts/package-all.mjs                    # 构建三款插件独立 ZIP 发布包与 SHA-256
 ```
 
 - 详细运行环境与验证范围说明见各插件目录 README；开源协议为 [MIT License](LICENSE)。

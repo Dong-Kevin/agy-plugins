@@ -1,0 +1,13 @@
+{
+  "name": "agy-cli-hud",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Zero-dependency lightweight CLI HUD, incremental usage rollup, dual-pool quota & compliant Colab monitor for agy CLI and Solo",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "bin": {
+    "agy-hud": "./bin/agy-hud.mjs"
+  }
+}

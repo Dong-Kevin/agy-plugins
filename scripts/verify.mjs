@@ -285,7 +285,7 @@ function verifyRootInstaller() {
 
   try {
     const listOut = execFileSync('bash', [join(ROOT, 'install.sh'), '--list'], { cwd: ROOT, env, encoding: 'utf-8' });
-    assert.ok(listOut.includes('agy-finder') && listOut.includes('agy-context-viewer'));
+    assert.ok(listOut.includes('agy-finder') && listOut.includes('agy-context-viewer') && listOut.includes('agy-cli-hud'));
 
     execFileSync('bash', [join(ROOT, 'install.sh'), 'agy-finder'], { cwd: ROOT, env, stdio: 'pipe' });
     assert.ok(existsSync(join(tempPlugins, 'agy-finder', 'plugin.json')));
@@ -297,11 +297,18 @@ function verifyRootInstaller() {
     assert.ok(existsSync(join(tempPlugins, 'context-viewer', 'sidecars', 'dashboard', 'sidecar.json')));
     assert.ok(existsSync(join(tempBin, 'agy-context')));
 
+    execFileSync('bash', [join(ROOT, 'install.sh'), 'agy-cli-hud'], { cwd: ROOT, env, stdio: 'pipe' });
+    assert.ok(existsSync(join(tempPlugins, 'agy-cli-hud', 'plugin.json')));
+    assert.ok(existsSync(join(tempPlugins, 'agy-cli-hud', 'bin', 'agy-hud.mjs')));
+    assert.ok(existsSync(join(tempBin, 'agy-hud')));
+
     execFileSync('bash', [join(ROOT, 'install.sh'), '--uninstall'], { cwd: ROOT, env, stdio: 'pipe' });
     assert.ok(!existsSync(join(tempPlugins, 'agy-finder')));
     assert.ok(!existsSync(join(tempPlugins, 'context-viewer')));
+    assert.ok(!existsSync(join(tempPlugins, 'agy-cli-hud')));
     assert.ok(!existsSync(join(tempBin, 'agy-finder')));
     assert.ok(!existsSync(join(tempBin, 'agy-context')));
+    assert.ok(!existsSync(join(tempBin, 'agy-hud')));
 
     // U1: Coexisting outdated-peer [WARN] on single-plugin install (strictly read-only), silent when batch-upgrading or up-to-date
     const expectedFinderVer = JSON.parse(readFileSync(join(ROOT, 'plugins', 'agy-finder', 'plugin.json'), 'utf-8')).version;

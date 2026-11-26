@@ -183,11 +183,56 @@ function packageContextViewer() {
   console.log(`[package-all] 已同步发布包至根目录：${join(DIST_DIR, zipName)}`);
 }
 
+function packageAgyCliHud() {
+  const pluginDir = join(ROOT, 'plugins', 'agy-cli-hud');
+  const manifest = JSON.parse(readFileSync(join(pluginDir, 'plugin.json'), 'utf-8'));
+  const version = manifest.version;
+  const prefix = 'agy-cli-hud';
+  const relFiles = [
+    ['plugin.json', false],
+    ['package.json', false],
+    ['README.md', false],
+    ['README_EN.md', false],
+    ['LICENSE', false],
+    ['install.sh', true],
+    ['install.ps1', false],
+    ['assets/logo.svg', false],
+    ['skills/agy-cli-hud/SKILL.md', false],
+    ['bin/agy-hud.mjs', true],
+    ['lib/paths.mjs', false],
+    ['lib/pricing.mjs', false],
+    ['lib/quota.mjs', false],
+    ['lib/incremental.mjs', false],
+    ['lib/colab.mjs', false],
+    ['lib/snapshot.mjs', false],
+    ['lib/statusline.mjs', false]
+  ];
+
+  const entries = relFiles.map(([rel, executable]) => {
+    const abs = join(pluginDir, rel);
+    statSync(abs);
+    return {
+      zipPath: `${prefix}/${rel}`,
+      data: readFileSync(abs),
+      executable
+    };
+  });
+
+  const zipName = `agy-cli-hud-v${version}.zip`;
+  const zipPath = join(DIST_DIR, zipName);
+  const zipBuf = buildZipBuffer(entries);
+  writeFileSync(zipPath, zipBuf);
+  const sha256 = createHash('sha256').update(zipBuf).digest('hex');
+  writeFileSync(`${zipPath}.sha256`, `${sha256}  ${zipName}\n`, 'utf-8');
+  console.log(`[package-all] 已生成发布包：${zipPath} (${(zipBuf.length / 1024).toFixed(1)} KB, ${entries.length} 个文件)`);
+}
+
 function main() {
   rmSync(DIST_DIR, { recursive: true, force: true });
   mkdirSync(DIST_DIR, { recursive: true });
   packageAgyFinder();
   packageContextViewer();
+  packageAgyCliHud();
 }
 
 main();

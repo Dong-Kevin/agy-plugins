@@ -7,7 +7,8 @@
 - 本仓库（`https://github.com/Dong-Kevin/agy-plugins`）为各开源 Antigravity 插件的统一源码与发布入口；各插件独立存放在 `plugins/<plugin-dir>/` 下，互不耦合。
 - **插件目录**：
   - [plugins/agy-finder](./plugins/agy-finder)：目录树定位插件（`name: "agy-finder"`），安装目标目录为 `~/.gemini/config/plugins/agy-finder`。
-  - [plugins/agy-context-viewer](./plugins/agy-context-viewer)：上下文与 Token 看板插件（`name: "context-viewer"`），安装目标目录保持 `~/.gemini/config/plugins/context-viewer` 以兼容既有用户偏好设置与本地归档路径。
+  - [plugins/agy-context-viewer](./plugins/agy-context-viewer)：上下文与 Token 看板插件（`name: "context-viewer"`，Desktop App 专用），安装目标目录保持 `~/.gemini/config/plugins/context-viewer` 以兼容既有用户偏好设置与本地归档路径。
+  - [plugins/agy-cli-hud](./plugins/agy-cli-hud)：`agy` CLI 与 Solo 专用零依赖轻量遥测与 Colab 算力 CLI 插件（`name: "agy-cli-hud"`，命令 `agy-hud`），安装目标目录为 `~/.gemini/config/plugins/agy-cli-hud`。
 - **统一入口**：根目录 [install.sh](./install.sh)、[install.ps1](./install.ps1)、[scripts/verify.mjs](./scripts/verify.mjs)、[scripts/package-all.mjs](./scripts/package-all.mjs) 与 [scripts/pre-push](./scripts/pre-push)。
 
 ## 不可破坏的技术约束

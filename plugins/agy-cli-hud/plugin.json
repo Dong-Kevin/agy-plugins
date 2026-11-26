@@ -1,0 +1,19 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "agy-cli-hud",
+  "displayName": "AGY CLI HUD 轻量监控与 Colab 算力",
+  "version": "0.1.0",
+  "description": "专为 agy CLI 与 Solo 打造的零依赖轻量终端监控插件：输入栏下方 2/3 行分层实时状态栏、增量 JSONL 会话平均缓存与今日/本月 API 等值滚存、Gemini 与非 Gemini 双池 5h/周额度，以及合规版 Google Colab OAuth 算力监控（零 WebView、零 CDP）。",
+  "author": {
+    "name": "Dong-Kevin",
+    "url": "https://github.com/Dong-Kevin"
+  },
+  "homepage": "https://github.com/Dong-Kevin/agy-plugins/tree/main/plugins/agy-cli-hud",
+  "repository": "https://github.com/Dong-Kevin/agy-plugins",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "安装或调整 agy CLI 输入栏下方的 2/3 行分层状态栏",
+    "查看今日/本月 Token 用量、会话平均缓存、双池额度与 API 等值参考",
+    "连接并查看 Google Colab 算力余额、活跃 GPU 实例与保活状态"
+  ]
+}
