@@ -239,6 +239,9 @@
 }
 
 * { box-sizing: border-box; }
+html {
+  scrollbar-gutter: stable;
+}
 html, body {
   margin: 0;
   padding: 0;
@@ -2034,9 +2037,13 @@ body.is-session-switching .top-switch-bar::after {
   background: var(--cv-surface-2);
   border: 1px solid var(--cv-border);
   border-radius: var(--r-md);
-  padding: 12px 10px 10px;
+  padding: 12px 0 10px;
   overflow-x: auto;
   min-height: 164px;
+}
+.chart-stage > * {
+  padding-left: 10px;
+  padding-right: 10px;
 }
 .chart-stage.is-chart-enter > * {
   animation: cvChartFade var(--cv-dur-fast) var(--cv-ease-out);
@@ -2054,8 +2061,9 @@ body.is-session-switching .top-switch-bar::after {
   flex-direction: column;
   gap: 5px;
   width: 100%;
-  min-width: calc(53 * var(--cv-heat-cell) + 52 * var(--cv-heat-gap));
-  contain: layout paint;
+  min-width: calc(53 * var(--cv-heat-cell) + 52 * var(--cv-heat-gap) + 20px);
+  padding: 0 10px 2px;
+  contain: layout;
 }
 .heat-cols {
   display: grid;
@@ -2110,7 +2118,9 @@ body.is-session-switching .top-switch-bar::after {
   align-items: flex-end;
   gap: 5px;
   height: 132px;
-  padding-top: 14px;
+  width: max-content;
+  min-width: 100%;
+  padding: 14px 10px 0;
 }
 .bar-col {
   flex: 1;
@@ -4163,5 +4173,186 @@ html.is-scrolling .kbd-record-btn.is-recording::after {
   :root[data-glass="on"][data-force-mode="dark"] .leg-box[data-leg-slot="0"],
   :root[data-glass="on"][data-force-mode="oled"] .leg-box[data-leg-slot="0"] {
     background: var(--heat-0);
+  }
+}
+
+/* ==================== Update Button & Floating Update Banner ==================== */
+.icon-btn.update-btn {
+  position: relative;
+  overflow: visible;
+}
+.icon-btn.update-btn.has-update {
+  color: var(--cv-accent);
+  background: color-mix(in srgb, var(--cv-accent) 13%, var(--cv-surface));
+  border-color: color-mix(in srgb, var(--cv-accent) 42%, transparent);
+}
+.icon-btn.update-btn.has-update:hover {
+  background: color-mix(in srgb, var(--cv-accent) 20%, var(--cv-surface));
+  border-color: color-mix(in srgb, var(--cv-accent) 56%, transparent);
+}
+.icon-btn.update-btn.is-checking .svg-ic,
+.icon-btn.update-btn.is-updating .svg-ic {
+  animation: cvUpdatePulse 1.1s var(--cv-ease-std) infinite;
+}
+.update-dot {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--cv-accent);
+  box-shadow: 0 0 0 2px var(--cv-bg);
+  pointer-events: none;
+}
+.icon-btn.update-btn.has-update .update-dot {
+  animation: cvUpdateDotBeat 2.2s var(--cv-ease-std) infinite;
+}
+@keyframes cvUpdateDotBeat {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.22); opacity: 0.78; }
+}
+@keyframes cvUpdatePulse {
+  0%, 100% { transform: translateY(0); opacity: 1; }
+  50% { transform: translateY(1.5px); opacity: 0.55; }
+}
+
+.update-drawer-row {
+  gap: 8px;
+}
+.update-ver-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.update-banner {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  max-width: 440px;
+  margin: 0 auto;
+  z-index: 72;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 11px;
+  border-radius: var(--r-md);
+  background: var(--cv-surface);
+  border: 1px solid color-mix(in srgb, var(--cv-accent) 38%, var(--cv-border));
+  box-shadow: var(--cv-pop-shadow);
+  opacity: 0;
+  transform: translate3d(0, 10px, 0) scale(0.985);
+  pointer-events: none;
+  transition: opacity var(--cv-dur-base) var(--cv-ease-out),
+              transform var(--cv-dur-base) var(--cv-ease-spring);
+}
+.update-banner.is-visible {
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+  pointer-events: auto;
+}
+:root[data-glass="on"] .update-banner {
+  background: color-mix(in srgb, var(--cv-pop-bg) 92%, transparent);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+}
+.update-banner-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.update-banner-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  background: var(--cv-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--cv-accent) 18%, transparent);
+}
+.update-banner-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.update-banner-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--cv-fg);
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.update-banner-sub {
+  font-size: 11px;
+  color: var(--cv-muted);
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.update-banner-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+.update-now-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid color-mix(in srgb, var(--cv-accent) 60%, transparent);
+  background: var(--cv-accent);
+  color: #ffffff;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: opacity var(--cv-dur-fast) var(--cv-ease-std),
+              transform var(--cv-dur-instant) var(--cv-ease-out),
+              filter var(--cv-dur-fast) var(--cv-ease-std);
+}
+.update-now-btn:hover {
+  filter: brightness(1.06);
+}
+.update-now-btn:active {
+  transform: scale(0.965);
+}
+.update-now-btn:disabled {
+  opacity: 0.65;
+  cursor: progress;
+}
+.ghost-btn.has-update {
+  color: var(--cv-accent);
+  border-color: color-mix(in srgb, var(--cv-accent) 44%, var(--cv-border));
+  background: color-mix(in srgb, var(--cv-accent) 10%, var(--cv-surface));
+}
+@media (prefers-reduced-motion: reduce) {
+  .icon-btn.update-btn.is-checking .svg-ic,
+  .icon-btn.update-btn.is-updating .svg-ic,
+  .icon-btn.update-btn.has-update .update-dot {
+    animation: none !important;
+  }
+  .update-banner {
+    transition: opacity 0.01ms !important;
+    transform: none !important;
+  }
+}
+@media (prefers-reduced-transparency: reduce) {
+  :root[data-glass="on"] .update-banner {
+    background: var(--cv-surface);
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
   }
 }

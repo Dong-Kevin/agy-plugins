@@ -223,7 +223,7 @@ try {
 
   # 3. Validate & stage all required runtime files in system temp before touching $TargetDir
   $RequiredDashFiles = @(
-    "package.json", "pricing.mjs", "sqlite_reader.mjs", "collector.mjs", "float_window.mjs",
+    "package.json", "pricing.mjs", "sqlite_reader.mjs", "updater.mjs", "collector.mjs", "float_window.mjs",
     "native_float_macos.swift", "cli.mjs", "index.html", "styles.css",
     "app.js", "main.mjs", "sidecar.json"
   )
@@ -260,7 +260,7 @@ try {
   Copy-Item (Join-Path $SourceDir "assets") $AssetsTarget -Recurse -Force
   Copy-Item (Join-Path $SourceDir "skills") $SkillsTarget -Recurse -Force
 
-  foreach ($DashFile in @("package.json", "pricing.mjs", "sqlite_reader.mjs", "collector.mjs", "float_window.mjs", "native_float_macos.swift", "cli.mjs", "index.html", "styles.css", "app.js", "main.mjs")) {
+  foreach ($DashFile in @("package.json", "pricing.mjs", "sqlite_reader.mjs", "updater.mjs", "collector.mjs", "float_window.mjs", "native_float_macos.swift", "cli.mjs", "index.html", "styles.css", "app.js", "main.mjs")) {
     Copy-Item (Join-Path $SourceDir "sidecars\dashboard\$DashFile") (Join-Path $TargetDir "sidecars\dashboard\$DashFile") -Force
   }
   $SidecarTmp = Join-Path $TargetDir "sidecars\dashboard\.sidecar.json.tmp"

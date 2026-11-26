@@ -251,7 +251,7 @@ cp "${SCRIPT_SOURCE_DIR}/plugin.json" "${STAGE_DIR}/plugin.json"
 cp -R "${SCRIPT_SOURCE_DIR}/assets" "${STAGE_DIR}/assets"
 cp -R "${SCRIPT_SOURCE_DIR}/skills" "${STAGE_DIR}/skills"
 mkdir -p "${STAGE_DIR}/sidecars/dashboard"
-for f in sidecar.json package.json main.mjs collector.mjs pricing.mjs sqlite_reader.mjs float_window.mjs native_float_macos.swift cli.mjs index.html styles.css app.js; do
+for f in sidecar.json package.json main.mjs collector.mjs pricing.mjs sqlite_reader.mjs updater.mjs float_window.mjs native_float_macos.swift cli.mjs index.html styles.css app.js; do
   cp "${SCRIPT_SOURCE_DIR}/sidecars/dashboard/${f}" "${STAGE_DIR}/sidecars/dashboard/${f}"
 done
 chmod +x "${STAGE_DIR}/sidecars/dashboard/cli.mjs" "${STAGE_DIR}/sidecars/dashboard/float_window.mjs" "${STAGE_DIR}/skills/context-viewer/scripts/status.mjs"
@@ -270,7 +270,7 @@ rm -rf "${TARGET_DIR}/assets" && cp -R "${STAGE_DIR}/assets" "${TARGET_DIR}/asse
 rm -rf "${TARGET_DIR}/skills" && cp -R "${STAGE_DIR}/skills" "${TARGET_DIR}/skills"
 
 # Copy runtime scripts first, then atomically replace sidecar.json last so SidecarManager reloads cleanly
-for f in package.json pricing.mjs sqlite_reader.mjs collector.mjs float_window.mjs native_float_macos.swift cli.mjs index.html styles.css app.js main.mjs; do
+for f in package.json pricing.mjs sqlite_reader.mjs updater.mjs collector.mjs float_window.mjs native_float_macos.swift cli.mjs index.html styles.css app.js main.mjs; do
   cp -f "${STAGE_DIR}/sidecars/dashboard/${f}" "${TARGET_DIR}/sidecars/dashboard/${f}"
 done
 chmod +x "${TARGET_DIR}/sidecars/dashboard/cli.mjs" "${TARGET_DIR}/sidecars/dashboard/float_window.mjs" "${TARGET_DIR}/skills/context-viewer/scripts/status.mjs"

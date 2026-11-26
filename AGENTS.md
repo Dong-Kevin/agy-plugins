@@ -25,3 +25,12 @@
 node scripts/verify.mjs --strict-git-identity
 node scripts/package-all.mjs
 ```
+
+## 文档路由
+
+| 层级 | 文档 | 职责与预算 | 读取时机 |
+| --- | --- | --- | --- |
+| L0 | [AGENTS.md](./AGENTS.md) | 架构边界、技术约束、必跑命令与文档路由（红线 `12 KB`） | 进入仓库必读 |
+| L1 | [ROADMAP.md](./ROADMAP.md) | 活态交付目标、待决/挂起事项、滚动 4--5 条里程碑与最新验证（红线 `16 KB`） | 接手、交接、改计划或发版时读 |
+| L2 | [docs/log/INDEX.md](./docs/log/INDEX.md) | 历史迭代与验证倒序索引，按时间分片存于 `docs/log/YYYY-MM-pN.md`（单分片红线 `40 KB`） | 默认不读；溯源历史先查索引再按需定位 |
+| L3 | [README.md](./README.md) / [README_EN.md](./README_EN.md) | 仓库总览、安装与使用说明（单插件详见 `plugins/<dir>/README*.md`） | 面向用户文档或发版同步时按需读 |

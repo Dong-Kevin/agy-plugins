@@ -56,6 +56,10 @@
             <svg id="ic-copy-check" class="svg-ic copy-ic-check" viewBox="0 0 16 16"><path d="M3.2 8.4 6.5 11.7 12.8 4.8"/></svg>
           </span>
         </button>
+        <button id="btn-update" type="button" class="icon-btn update-btn" title="检查版本更新" data-i18n-title="btn.update.title" aria-label="检查版本更新">
+          <svg id="ic-update" class="svg-ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.2v7.6M5.2 7 8 9.8 10.8 7"/><path d="M2.8 11.4v1.2A1.4 1.4 0 0 0 4.2 14h7.6a1.4 1.4 0 0 0 1.4-1.4v-1.2"/></svg>
+          <span id="update-dot" class="update-dot hidden" aria-hidden="true"></span>
+        </button>
         <button id="btn-refresh" type="button" class="icon-btn" title="强制刷新统计数据" data-i18n-title="btn.refresh.title">
           <svg id="ic-refresh" class="svg-ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.6v3h-3"/></svg>
         </button>
@@ -181,6 +185,17 @@
           <label class="swatch-item" title="主强调色" data-i18n-title="swatch.accent"><span data-i18n="drawer.accent">强调</span><input type="color" id="col-accent"></label>
         </div>
       </div>
+
+      <div class="drawer-sep"></div>
+
+      <div id="update-drawer-row" class="palette-row update-drawer-row">
+        <div class="update-ver-group">
+          <span class="field-lbl" data-i18n="drawer.version">插件版本</span>
+          <span id="update-cur-ver" class="meta-chip num">v1.9.0</span>
+          <span id="update-status-text" class="muted xs" data-i18n="update.idle">未检查</span>
+        </div>
+        <button id="btn-drawer-update" type="button" class="ghost-btn xs" data-i18n="update.checkBtn">检查更新</button>
+      </div>
     </section>
 
     <!-- Primary Segmented Navigation + Conversation Selector -->
@@ -217,6 +232,21 @@
 
     <div id="toast" class="toast hidden" role="status" aria-live="polite" aria-hidden="true"></div>
     <div id="cv-tooltip" class="cv-tooltip hidden" role="tooltip" aria-hidden="true"></div>
+
+    <!-- Floating Update Available Banner (Fixed Overlay, Zero CLS) -->
+    <aside id="update-banner" class="update-banner hidden" role="status" aria-live="polite" aria-hidden="true">
+      <div class="update-banner-main">
+        <span class="update-banner-dot" aria-hidden="true"></span>
+        <div class="update-banner-text">
+          <div id="update-banner-title" class="update-banner-title">发现新版本</div>
+          <div id="update-banner-sub" class="update-banner-sub">点击一键安全更新并重载</div>
+        </div>
+      </div>
+      <div class="update-banner-actions">
+        <button id="btn-update-now" type="button" class="update-now-btn" data-i18n="update.nowBtn">立即更新</button>
+        <button id="btn-update-dismiss" type="button" class="icon-btn xs" title="暂不提示此版本" data-i18n-title="update.dismiss.title" aria-label="暂不提示此版本">×</button>
+      </div>
+    </aside>
 
     <!-- Main Scrollable Viewport -->
     <main class="viewport">

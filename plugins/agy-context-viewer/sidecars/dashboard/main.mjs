@@ -5,7 +5,7 @@
  * and supports `--standalone` loopback mode for local testing or browser preview.
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { readFileSync, watchFile } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -34,6 +34,7 @@ import {
   writeAuxPaneTrigger
 } from './collector.mjs';
 import { controlFloatWindow, getFloatWindowStatus } from './float_window.mjs';
+import { checkForUpdates, performSelfUpdate } from './updater.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -88,6 +89,22 @@ function createHandlers(getDefaultConvId, makeResponse, handlerOpts = {}) {
     apiLaunchCli: async (data = {}) => launchCliTerminal(data),
     apiFloatStatus: async () => getFloatWindowStatus(),
     apiFloatControl: async (data = {}) => controlFloatWindow(data),
+    apiUpdateGet: async (data = {}) => {
+      const force = data.force === '1' || data.force === 'true' || data.force === true;
+      return checkForUpdates({ force });
+    },
+    apiUpdatePost: async (data = {}) => {
+      const action = String(data.action || 'apply').toLowerCase();
+      if (action === 'check') {
+        return checkForUpdates({ force: true });
+      }
+      const force = data.force === '1' || data.force === 'true' || data.force === true;
+      const res = await performSelfUpdate({ force });
+      if (res?.ok && res?.updated && typeof handlerOpts.onSelfUpdated === 'function') {
+        handlerOpts.onSelfUpdated(res);
+      }
+      return res;
+    },
     apiAuxTriggerGet: async (data = {}) => {
       const holdMs = Math.max(0, Math.min(1500, Number(data.holdMs || 0)));
       if (holdMs > 0) {
@@ -277,7 +294,7 @@ function createHandlers(getDefaultConvId, makeResponse, handlerOpts = {}) {
 async function startOfficialSidecar() {
   if (process.env.ANTIGRAVITY_SIDECAR_HOT_RELOAD !== '0') {
     let reloadTimer = null;
-    for (const f of ['main.mjs', 'collector.mjs', 'pricing.mjs', 'float_window.mjs', 'app.js', 'styles.css', 'index.html']) {
+    for (const f of ['main.mjs', 'collector.mjs', 'pricing.mjs', 'sqlite_reader.mjs', 'updater.mjs', 'float_window.mjs', 'app.js', 'styles.css', 'index.html']) {
       watchFile(join(__dirname, f), { interval: 2500 }, (curr, prev) => {
         if (curr.mtimeMs > 0 && curr.mtimeMs !== prev.mtimeMs && !reloadTimer) {
           reloadTimer = setTimeout(() => process.exit(0), 350);
@@ -289,7 +306,24 @@ async function startOfficialSidecar() {
   const app = new SidecarApp();
   const h = createHandlers(
     () => app.config.conversationId || '',
-    (body, opts) => new Response(body, opts)
+    (body, opts) => new Response(body, opts),
+    {
+      onSelfUpdated: () => {
+        if (process.env.AGY_CV_UPDATE_TARGET_DIR || process.env.AGY_CV_UPDATE_NO_RESTART === '1') return;
+        const t = setTimeout(async () => {
+          if (process.platform === 'darwin') {
+            try {
+              const fw = getFloatWindowStatus();
+              if (fw?.daemonRunning || fw?.menubarEnabled) {
+                await controlFloatWindow({ action: 'ensure-menubar' }).catch(() => {});
+              }
+            } catch {}
+          }
+          process.exit(0);
+        }, 500);
+        t.unref?.();
+      }
+    }
   );
 
   app.page('/', h.indexHtml);
@@ -309,6 +343,8 @@ async function startOfficialSidecar() {
   app.api('/api/entrypoints', h.apiEntrypointsControl, 'POST');
   app.api('/api/aux-pane-trigger', h.apiAuxTriggerGet, 'GET');
   app.api('/api/aux-pane-trigger', h.apiAuxTriggerPost, 'POST');
+  app.api('/api/update', h.apiUpdateGet, 'GET');
+  app.api('/api/update', h.apiUpdatePost, 'POST');
 
   if (process.platform === 'darwin') {
     const t = setTimeout(() => {
@@ -324,10 +360,37 @@ async function startStandaloneServer() {
   const portIdx = process.argv.indexOf('--port');
   const port = portIdx >= 0 ? Number(process.argv[portIdx + 1] || 18970) : 18970;
   const sessionToken = createLoopbackSessionToken();
+  let serverRef = null;
   const h = createHandlers(
     () => process.env.ANTIGRAVITY_CONVERSATION_ID || '',
     (body, opts) => ({ __rawResponse: true, body, ...opts }),
-    { allowDiskCacheWithoutLs: true }
+    {
+      allowDiskCacheWithoutLs: true,
+      onSelfUpdated: () => {
+        if (process.env.AGY_CV_UPDATE_TARGET_DIR || process.env.AGY_CV_UPDATE_NO_RESTART === '1') return;
+        const boundPort = serverRef?.address()?.port || port;
+        const t = setTimeout(() => {
+          const relaunch = () => {
+            try {
+              const child = spawn(
+                process.execPath,
+                [join(__dirname, 'main.mjs'), '--standalone', '--port', String(boundPort)],
+                { detached: true, stdio: 'ignore', env: process.env }
+              );
+              child.unref();
+            } catch {}
+            process.exit(0);
+          };
+          try {
+            serverRef?.close(() => relaunch());
+            setTimeout(relaunch, 600).unref?.();
+          } catch {
+            relaunch();
+          }
+        }, 450);
+        t.unref?.();
+      }
+    }
   );
 
   const serveStandaloneHtml = async () => ({
@@ -358,7 +421,9 @@ async function startStandaloneServer() {
     ['GET:/api/entrypoints', h.apiEntrypointsStatus],
     ['POST:/api/entrypoints', h.apiEntrypointsControl],
     ['GET:/api/aux-pane-trigger', h.apiAuxTriggerGet],
-    ['POST:/api/aux-pane-trigger', h.apiAuxTriggerPost]
+    ['POST:/api/aux-pane-trigger', h.apiAuxTriggerPost],
+    ['GET:/api/update', h.apiUpdateGet],
+    ['POST:/api/update', h.apiUpdatePost]
   ]);
 
   const server = createServer(async (req, res) => {
@@ -428,6 +493,7 @@ async function startStandaloneServer() {
     }
   };
 
+  serverRef = server;
   let retriedAnyPort = false;
   server.on('error', (err) => {
     if (err.code === 'EADDRINUSE' && !retriedAnyPort) {

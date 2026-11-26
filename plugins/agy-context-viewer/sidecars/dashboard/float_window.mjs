@@ -61,11 +61,14 @@ import {
   waitForAuxPaneTrigger,
   writeAuxPaneTrigger
 } from './collector.mjs';
+import { checkForUpdates, performSelfUpdate } from './updater.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const DAEMON_VERSION = 7;
 const DAEMON_RUNTIME_FILES = [
   'pricing.mjs',
+  'sqlite_reader.mjs',
+  'updater.mjs',
   'collector.mjs',
   'float_window.mjs',
   'native_float_macos.swift',
@@ -1616,6 +1619,22 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
   if (u.pathname === '/api/launch-cli' && method === 'POST') {
     return launchCliTerminal(data);
   }
+  if (u.pathname === '/api/update' && method === 'GET') {
+    const force = data.force === '1' || data.force === 'true' || data.force === true;
+    return checkForUpdates({ force });
+  }
+  if (u.pathname === '/api/update' && method === 'POST') {
+    const action = String(data.action || 'apply').toLowerCase();
+    if (action === 'check') {
+      return checkForUpdates({ force: true });
+    }
+    const force = data.force === '1' || data.force === 'true' || data.force === true;
+    const res = await performSelfUpdate({ force });
+    if (res?.ok && res?.updated) {
+      hooks.onSelfUpdated?.(res);
+    }
+    return res;
+  }
   if (u.pathname === '/api/aux-pane-trigger' && method === 'GET') {
     const since = Number(data.since || 0);
     const waitMs = Number(data.waitMs ?? data.timeoutMs ?? 8000);
@@ -2447,7 +2466,31 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
           onSetShortcut: handleSetShortcutInDaemon,
           onSetAuxShortcut: handleSetAuxShortcutInDaemon,
           onSetRecording: (recording) => { sendToChild({ type: 'setRecording', recording: Boolean(recording) }); },
-          onRefreshMenubar: () => { refreshMenubarStatusItem(true).catch(() => {}); }
+          onRefreshMenubar: () => { refreshMenubarStatusItem(true).catch(() => {}); },
+          onSelfUpdated: () => {
+            if (process.env.AGY_CV_UPDATE_TARGET_DIR || process.env.AGY_CV_UPDATE_NO_RESTART === '1') return;
+            const t = setTimeout(() => {
+              const args = [join(__dirname, 'float_window.mjs'), '--daemon'];
+              if (!state.pinned) args.push('--unpinned');
+              if (!state.menubarEnabled) args.push('--no-menubar');
+              if (!state.windowVisible) args.push('--hidden-window');
+              if (state.menubarMode) args.push('--mode', String(state.menubarMode));
+              clearInterval(barTimer);
+              try { sendToChild({ type: 'quit' }); } catch {}
+              try { child.kill('SIGTERM'); } catch {}
+              clearFloatStateIfOwned();
+              try {
+                const nextChild = spawn(process.execPath, args, {
+                  detached: true,
+                  stdio: 'ignore',
+                  env: process.env
+                });
+                nextChild.unref();
+              } catch {}
+              setTimeout(() => process.exit(0), 180).unref?.();
+            }, 550);
+            t.unref?.();
+          }
         });
         sendToChild({ type: 'rpcReply', id: msg.id, ok: true, status: 200, payload });
       } catch (err) {

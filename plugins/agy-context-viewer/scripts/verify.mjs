@@ -456,6 +456,43 @@ async function main() {
   assert(/class="heat-cell" data-lvl="[1-4]" data-day="2026-11-12"/.test(domStage.innerHTML), 'R2 今日有记录时热力图单元格未点亮');
   assert(domText['sum-tok'] === '42000', `R2 热力图区间汇总异常：${domText['sum-tok']}`);
 
+  // Regression: right-edge pin stays aligned when chart-stage narrows (e.g., 8px scrollbar / sidebar resize),
+  // while manual left scroll is preserved across redraws.
+  domStage.scrollWidth = 865;
+  domStage.clientWidth = 550;
+  domStage.scrollLeft = 0;
+  heatCtx.state.chartScrollKey = '';
+  heatApi.renderDailyHeatmap(
+    { '2026-11-12': { total: 42000, input: 10000, cache: 30000, output: 2000, steps: 3, costUSD: 0.12, refCostUSD: 0.12 } },
+    { todayKey: '2026-11-12', firstUseDate: '2026-11-01', planStatus: { monthlyUSD: 19.99 } }
+  );
+  assert(
+    domStage.scrollLeft === 315 && heatCtx.state.chartScrollPinnedEnd === true,
+    `R2 热力图首次贴右定位异常：scrollLeft=${domStage.scrollLeft}, pinned=${heatCtx.state.chartScrollPinnedEnd}`
+  );
+  domStage.clientWidth = 542;
+  heatApi.renderDailyHeatmap(
+    { '2026-11-12': { total: 43000, input: 10000, cache: 31000, output: 2000, steps: 4, costUSD: 0.13, refCostUSD: 0.13 } },
+    { todayKey: '2026-11-12', firstUseDate: '2026-11-01', planStatus: { monthlyUSD: 19.99 } }
+  );
+  assert(
+    domStage.scrollLeft === 323,
+    `R2 视口收缩 8px 后热力图未保持贴右（今日色块将被裁切）：scrollLeft=${domStage.scrollLeft}`
+  );
+  domStage.scrollLeft = 120;
+  heatCtx.state.chartScrollPinnedEnd = false;
+  heatApi.renderDailyHeatmap(
+    { '2026-11-12': { total: 44000, input: 10000, cache: 32000, output: 2000, steps: 5, costUSD: 0.14, refCostUSD: 0.14 } },
+    { todayKey: '2026-11-12', firstUseDate: '2026-11-01', planStatus: { monthlyUSD: 19.99 } }
+  );
+  assert(
+    domStage.scrollLeft === 120,
+    `R2 用户手动左滚后轮询重绘不应强行拉回右侧：scrollLeft=${domStage.scrollLeft}`
+  );
+  const stylesCssSrc = readFileSync(join(ROOT, 'sidecars', 'dashboard', 'styles.css'), 'utf-8');
+  assert(/html\s*\{[^}]*scrollbar-gutter:\s*stable/.test(stylesCssSrc), 'styles.css 缺少 html scrollbar-gutter: stable 防横向抖动规则');
+  assert(/\.heatmap-wrap\s*\{[^}]*padding:\s*0\s+10px\s+2px/.test(stylesCssSrc), 'styles.css .heatmap-wrap 缺少右侧防裁切内边距');
+
   // Pricing, S4 generational precision, R4 & F1 quota grouping / single-model parity checks
   const {
     classifyRequestError,
@@ -3851,7 +3888,7 @@ async function main() {
     mkdirSync(unicodeDashDir, { recursive: true });
     mkdirSync(unicodeBinDir, { recursive: true });
     copyFileSync(join(ROOT, 'plugin.json'), join(unicodePluginDir, 'plugin.json'));
-    for (const f of ['sidecar.json', 'package.json', 'pricing.mjs', 'sqlite_reader.mjs', 'collector.mjs', 'float_window.mjs', 'cli.mjs']) {
+    for (const f of ['sidecar.json', 'package.json', 'pricing.mjs', 'sqlite_reader.mjs', 'updater.mjs', 'collector.mjs', 'float_window.mjs', 'cli.mjs']) {
       copyFileSync(join(ROOT, 'sidecars', 'dashboard', f), join(unicodeDashDir, f));
     }
     const unicodeCliEntry = join(unicodeDashDir, 'cli.mjs');
@@ -5355,6 +5392,7 @@ async function main() {
     await verifyCacheStatsAndCustomRange(cvHtmlSource, cvAppSource);
     await verifyCliFollowAndProjectGrouping(cvHtmlSource, cvAppSource);
     await verifyTelemetryCategoriesAndPopover(cvHtmlSource, cvAppSource);
+    await verifyAutoUpdater(cvHtmlSource, cvAppSource);
 
     // macOS Swift native host typecheck
     if (process.platform === 'darwin' && existsSync('/usr/bin/swiftc')) {
@@ -10706,6 +10744,318 @@ async function verifyTelemetryCategoriesAndPopover(cvHtmlSource, cvAppSource) {
       assert(missingI18n.length === 0, `app.js I18N_EN 缺少映射键：${missingI18n.slice(0, 10).join(', ')}`);
     }
   } finally {
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+}
+
+async function verifyAutoUpdater(cvHtmlSource, cvAppSource) {
+  const { createHash } = await import('node:crypto');
+  const { createServer } = await import('node:http');
+  const { deflateRawSync } = await import('node:zlib');
+
+  const cssSrc = readFileSync(join(ROOT, 'sidecars', 'dashboard', 'styles.css'), 'utf-8');
+  assert(
+    cvHtmlSource.includes('id="btn-update"') &&
+      cvHtmlSource.includes('id="update-dot"') &&
+      cvHtmlSource.includes('id="update-banner"') &&
+      cvHtmlSource.includes('id="btn-update-now"') &&
+      cvHtmlSource.includes('id="btn-update-dismiss"') &&
+      cvHtmlSource.includes('id="btn-drawer-update"'),
+    'index.html 缺少更新按钮或浮层更新提示条 DOM 元素'
+  );
+  assert(
+    cssSrc.includes('.icon-btn.update-btn.has-update') &&
+      cssSrc.includes('.update-banner.is-visible') &&
+      cssSrc.includes('.update-now-btn'),
+    'styles.css 缺少更新按钮或更新提示条样式规则'
+  );
+  assert(
+    cvAppSource.includes("apiFetch(`/api/update") &&
+      cvAppSource.includes("apiFetch('/api/update'") &&
+      cvAppSource.includes('applyPluginUpdate'),
+    'app.js 缺少 /api/update 前后端联调逻辑'
+  );
+
+  // Local minimal ZIP builder for isolated tests
+  const crcTbl = (() => {
+    const tbl = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+      tbl[n] = c >>> 0;
+    }
+    return tbl;
+  })();
+  const crc32Local = (buf) => {
+    let c = 0xffffffff;
+    for (let i = 0; i < buf.length; i++) c = crcTbl[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const makeZip = (entries) => {
+    const localParts = [];
+    const centralParts = [];
+    let offset = 0;
+    for (const e of entries) {
+      const nameBuf = Buffer.from(e.zipPath, 'utf-8');
+      const raw = Buffer.isBuffer(e.data) ? e.data : Buffer.from(String(e.data), 'utf-8');
+      const crc = e.badCrc ? (crc32Local(raw) ^ 1) >>> 0 : crc32Local(raw);
+      const comp = e.store ? raw : deflateRawSync(raw);
+      const method = e.store ? 0 : 8;
+      const lfh = Buffer.alloc(30);
+      lfh.writeUInt32LE(0x04034b50, 0);
+      lfh.writeUInt16LE(20, 4);
+      lfh.writeUInt16LE(0x0800, 6);
+      lfh.writeUInt16LE(method, 8);
+      lfh.writeUInt32LE(crc, 14);
+      lfh.writeUInt32LE(comp.length, 18);
+      lfh.writeUInt32LE(raw.length, 22);
+      lfh.writeUInt16LE(nameBuf.length, 26);
+      localParts.push(lfh, nameBuf, comp);
+
+      const cdh = Buffer.alloc(46);
+      cdh.writeUInt32LE(0x02014b50, 0);
+      cdh.writeUInt16LE((3 << 8) | 20, 4);
+      cdh.writeUInt16LE(20, 6);
+      cdh.writeUInt16LE(0x0800, 8);
+      cdh.writeUInt16LE(method, 10);
+      cdh.writeUInt32LE(crc, 16);
+      cdh.writeUInt32LE(comp.length, 20);
+      cdh.writeUInt32LE(raw.length, 24);
+      cdh.writeUInt16LE(nameBuf.length, 28);
+      const unixMode = e.symlink ? 0o120777 : (e.executable ? 0o100755 : 0o100644);
+      cdh.writeUInt32LE((unixMode << 16) >>> 0, 38);
+      cdh.writeUInt32LE(offset, 42);
+      centralParts.push(cdh, nameBuf);
+      offset += lfh.length + nameBuf.length + comp.length;
+    }
+    const centralBuf = Buffer.concat(centralParts);
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0);
+    eocd.writeUInt16LE(entries.length, 8);
+    eocd.writeUInt16LE(entries.length, 10);
+    eocd.writeUInt32LE(centralBuf.length, 12);
+    eocd.writeUInt32LE(offset, 16);
+    return Buffer.concat([...localParts, centralBuf, eocd]);
+  };
+
+  const tmpRoot = mkdtempSync(join(tmpdir(), 'cv-verify-updater-'));
+  const targetInstallDir = join(tmpRoot, 'installed-context-viewer');
+  const stateDataDir = join(tmpRoot, 'state-data');
+  mkdirSync(join(targetInstallDir, 'sidecars', 'dashboard'), { recursive: true });
+  mkdirSync(stateDataDir, { recursive: true });
+
+  writeFileSync(
+    join(targetInstallDir, 'plugin.json'),
+    JSON.stringify({ name: 'context-viewer', version: '1.9.0', repository: 'https://github.com/Dong-Kevin/agy-plugins' }, null, 2),
+    'utf-8'
+  );
+  writeFileSync(join(targetInstallDir, 'sidecars', 'dashboard', 'main.mjs'), '// old-v1.9.0\n', 'utf-8');
+  writeFileSync(join(targetInstallDir, 'sidecars', 'dashboard', 'sidecar.json'), '{"name":"dashboard"}\n', 'utf-8');
+
+  const releaseZipBuf = makeZip([
+    {
+      zipPath: 'context-viewer/plugin.json',
+      data: JSON.stringify({ name: 'context-viewer', version: '9.9.9', repository: 'https://github.com/Dong-Kevin/agy-plugins' }, null, 2)
+    },
+    {
+      zipPath: 'context-viewer/sidecars/dashboard/main.mjs',
+      data: '// upgraded-v9.9.9\n'
+    },
+    {
+      zipPath: 'context-viewer/sidecars/dashboard/sidecar.json',
+      data: '{"name":"dashboard","version":"9.9.9"}\n',
+      store: true
+    },
+    {
+      zipPath: 'context-viewer/sidecars/dashboard/new_feature.mjs',
+      data: 'export const ok = true;\n'
+    }
+  ]);
+  const validSha256 = createHash('sha256').update(releaseZipBuf).digest('hex');
+  let serveBadSha = false;
+  let serveUntrustedRedirect = false;
+  let releaseHits = 0;
+
+  const mockServer = createServer((req, res) => {
+    const u = new URL(req.url || '/', 'http://127.0.0.1');
+    const base = `http://127.0.0.1:${mockServer.address().port}`;
+    if (u.pathname === '/releases/latest') {
+      releaseHits += 1;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          tag_name: 'v2026.12.01',
+          name: 'Release v2026.12.01',
+          html_url: 'https://github.com/Dong-Kevin/agy-plugins/releases/tag/v2026.12.01',
+          published_at: '2026-12-01T00:00:00Z',
+          body: 'Auto-update test release',
+          assets: [
+            {
+              name: 'context-viewer-v9.9.9.zip',
+              size: releaseZipBuf.length,
+              browser_download_url: `${base}/assets/context-viewer-v9.9.9.zip`
+            },
+            {
+              name: 'context-viewer-v9.9.9.zip.sha256',
+              size: 90,
+              browser_download_url: `${base}/assets/context-viewer-v9.9.9.zip.sha256`
+            }
+          ]
+        })
+      );
+      return;
+    }
+    if (u.pathname === '/assets/context-viewer-v9.9.9.zip') {
+      if (serveUntrustedRedirect) {
+        res.writeHead(302, { Location: 'https://evil.invalid/payload.zip' });
+        res.end();
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/zip' });
+      res.end(releaseZipBuf);
+      return;
+    }
+    if (u.pathname === '/assets/context-viewer-v9.9.9.zip.sha256') {
+      const digest = serveBadSha ? '0'.repeat(64) : validSha256;
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end(`${digest}  context-viewer-v9.9.9.zip\n`);
+      return;
+    }
+    res.writeHead(404);
+    res.end('not found');
+  });
+
+  await new Promise((r) => mockServer.listen(0, '127.0.0.1', r));
+  const mockPort = mockServer.address().port;
+
+  const savedEnv = {
+    ANTIGRAVITY_EXECUTABLE_DATA_DIR: process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR,
+    AGY_CV_UPDATE_API_URL: process.env.AGY_CV_UPDATE_API_URL,
+    AGY_CV_UPDATE_ALLOWED_HOSTS: process.env.AGY_CV_UPDATE_ALLOWED_HOSTS,
+    AGY_CV_UPDATE_TARGET_DIR: process.env.AGY_CV_UPDATE_TARGET_DIR,
+    AGY_CV_UPDATE_NO_RESTART: process.env.AGY_CV_UPDATE_NO_RESTART
+  };
+
+  try {
+    process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR = stateDataDir;
+    process.env.AGY_CV_UPDATE_API_URL = `http://127.0.0.1:${mockPort}/releases/latest`;
+    process.env.AGY_CV_UPDATE_ALLOWED_HOSTS = '127.0.0.1';
+    process.env.AGY_CV_UPDATE_TARGET_DIR = targetInstallDir;
+    process.env.AGY_CV_UPDATE_NO_RESTART = '1';
+
+    const updaterUrl = `${pathToFileURL(join(ROOT, 'sidecars', 'dashboard', 'updater.mjs')).href}?upd=${Date.now()}`;
+    const {
+      compareSemver,
+      extractZipBuffer,
+      checkForUpdates,
+      performSelfUpdate
+    } = await import(updaterUrl);
+
+    // 1. Semver comparison checks
+    assert(compareSemver('1.9.1', '1.9.0') === 1, 'compareSemver patch 升级比较异常');
+    assert(compareSemver('1.10.0', '1.9.9') === 1, 'compareSemver minor 进位比较异常');
+    assert(compareSemver('1.9.1', '1.9.1-rc.1') === 1, 'compareSemver 正式版应高于预发布版');
+    assert(compareSemver('1.9.0', '1.9.0') === 0, 'compareSemver 同版本比较异常');
+
+    // 2. ZIP security checks (Zip-Slip, symlink, CRC-32 mismatch)
+    let zipSlipRejected = false;
+    try {
+      extractZipBuffer(makeZip([{ zipPath: '../escape.txt', data: 'x' }]));
+    } catch {
+      zipSlipRejected = true;
+    }
+    assert(zipSlipRejected, 'extractZipBuffer 必须拒绝 ../ 路径穿越条目');
+
+    let symlinkRejected = false;
+    try {
+      extractZipBuffer(makeZip([{ zipPath: 'context-viewer/link', data: '/etc/passwd', symlink: true }]));
+    } catch {
+      symlinkRejected = true;
+    }
+    assert(symlinkRejected, 'extractZipBuffer 必须拒绝符号链接条目');
+
+    let badCrcRejected = false;
+    try {
+      extractZipBuffer(makeZip([{ zipPath: 'context-viewer/a.txt', data: 'hello', badCrc: true }]));
+    } catch {
+      badCrcRejected = true;
+    }
+    assert(badCrcRejected, 'extractZipBuffer 必须拒绝 CRC-32 损坏条目');
+
+    // 3. Release check & 6h disk cache hit
+    const firstCheck = await checkForUpdates({ force: true });
+    assert(
+      firstCheck.ok === true &&
+        firstCheck.hasUpdate === true &&
+        firstCheck.currentVersion === '1.9.0' &&
+        firstCheck.latestVersion === '9.9.9' &&
+        firstCheck.fromCache === false,
+      `checkForUpdates 首次检查结果异常：${JSON.stringify(firstCheck)}`
+    );
+    const hitsAfterFirst = releaseHits;
+    const cachedCheck = await checkForUpdates({ force: false });
+    assert(
+      cachedCheck.ok === true &&
+        cachedCheck.hasUpdate === true &&
+        cachedCheck.fromCache === true &&
+        releaseHits === hitsAfterFirst,
+      `checkForUpdates 应命中磁盘缓存且不重复请求：${JSON.stringify(cachedCheck)}`
+    );
+
+    // 4. Reject untrusted redirect host
+    serveUntrustedRedirect = true;
+    const redirFail = await performSelfUpdate();
+    assert(
+      redirFail.ok === false && /不受信任/.test(redirFail.error || ''),
+      `重定向至非白名单域名应被拦截：${JSON.stringify(redirFail)}`
+    );
+    serveUntrustedRedirect = false;
+
+    // 5. Reject tampered SHA-256 without modifying installed files
+    serveBadSha = true;
+    const badShaRes = await performSelfUpdate();
+    assert(
+      badShaRes.ok === false && /SHA-256/.test(badShaRes.error || ''),
+      `篡改 SHA-256 应中止安装：${JSON.stringify(badShaRes)}`
+    );
+    assert(
+      readFileSync(join(targetInstallDir, 'sidecars', 'dashboard', 'main.mjs'), 'utf-8').includes('old-v1.9.0'),
+      'SHA-256 校验失败后绝不能修改原有已安装文件'
+    );
+    serveBadSha = false;
+
+    // 6. Full valid self-update & atomic replacement
+    const updRes = await performSelfUpdate();
+    assert(
+      updRes.ok === true &&
+        updRes.updated === true &&
+        updRes.previousVersion === '1.9.0' &&
+        updRes.currentVersion === '9.9.9' &&
+        updRes.sha256 === validSha256,
+      `performSelfUpdate 正常升级失败：${JSON.stringify(updRes)}`
+    );
+    assert(
+      JSON.parse(readFileSync(join(targetInstallDir, 'plugin.json'), 'utf-8')).version === '9.9.9' &&
+        readFileSync(join(targetInstallDir, 'sidecars', 'dashboard', 'main.mjs'), 'utf-8').includes('upgraded-v9.9.9') &&
+        existsSync(join(targetInstallDir, 'sidecars', 'dashboard', 'new_feature.mjs')),
+      '自更新后目标目录未正确写入新版 plugin.json、main.mjs 与新增文件'
+    );
+
+    // 7. Subsequent check reports up-to-date
+    const afterCheck = await checkForUpdates({ force: false });
+    assert(
+      afterCheck.ok === true &&
+        afterCheck.hasUpdate === false &&
+        afterCheck.state === 'up-to-date' &&
+        afterCheck.currentVersion === '9.9.9',
+      `升级后再次检查应为 up-to-date：${JSON.stringify(afterCheck)}`
+    );
+  } finally {
+    await new Promise((r) => mockServer.close(() => r()));
     for (const [k, v] of Object.entries(savedEnv)) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;

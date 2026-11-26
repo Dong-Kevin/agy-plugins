@@ -135,6 +135,7 @@ function main() {
     ['sidecars/dashboard/collector.mjs', false],
     ['sidecars/dashboard/pricing.mjs', false],
     ['sidecars/dashboard/sqlite_reader.mjs', false],
+    ['sidecars/dashboard/updater.mjs', false],
     ['sidecars/dashboard/float_window.mjs', true],
     ['sidecars/dashboard/native_float_macos.swift', false],
     ['sidecars/dashboard/cli.mjs', true],

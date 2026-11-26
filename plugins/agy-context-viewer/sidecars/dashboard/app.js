@@ -79,6 +79,13 @@
     contextData: null,
     historyData: null,
     settingsData: null,
+    update: {
+      status: null,
+      checking: false,
+      applying: false,
+      dismissedVersion: '',
+      bannerHideTimer: null
+    },
 
     // History view controls
     sourceFilter: 'all',
@@ -89,6 +96,7 @@
     chartScrollKey: '',
     chartScrollPending: '',
     chartScrollMode: 'latest',
+    chartScrollPinnedEnd: false,
     selectedBucketKey: '',
     customRange: {
       start: '',
@@ -643,7 +651,13 @@
     'cost.projBoard': 'Per-Project / Workspace Usage',
     'cost.projTop5': 'Top 5',
     'cost.projTop10': 'Top 10',
-    'cost.finePrint': 'Note: API equivalent is estimated from public Google / Anthropic list prices (cache reads discounted; output includes thinking tokens) to gauge usage intensity. Flat-rate subscriptions differ from pay-as-you-go retail billing.'
+    'cost.finePrint': 'Note: API equivalent is estimated from public Google / Anthropic list prices (cache reads discounted; output includes thinking tokens) to gauge usage intensity. Flat-rate subscriptions differ from pay-as-you-go retail billing.',
+    'btn.update.title': 'Check for updates',
+    'drawer.version': 'Plugin Version',
+    'update.idle': 'Not checked',
+    'update.checkBtn': 'Check Update',
+    'update.nowBtn': 'Update Now',
+    'update.dismiss.title': 'Dismiss this version'
   };
 
   function applyLanguageToDom() {
@@ -682,6 +696,9 @@
       el.placeholder = next;
       el.setAttribute?.('placeholder', next);
     });
+    if (typeof syncUpdateUi === 'function') {
+      syncUpdateUi();
+    }
   }
 
   let reducedMotionMql = null;
@@ -3851,11 +3868,14 @@
       const sel = stage.querySelector('.bar-col.selected, .heat-cell.selected');
       if (sel && typeof sel.offsetLeft === 'number') {
         const target = Math.max(0, sel.offsetLeft + (sel.offsetWidth || 0) - stage.clientWidth + 24);
-        stage.scrollLeft = Math.min(maxScroll, target);
+        const nextLeft = Math.min(maxScroll, target);
+        stage.scrollLeft = nextLeft;
+        state.chartScrollPinnedEnd = (maxScroll - nextLeft) <= 4;
         return true;
       }
     }
     stage.scrollLeft = maxScroll;
+    state.chartScrollPinnedEnd = mode === 'latest';
     return true;
   }
 
@@ -3867,6 +3887,7 @@
     state.chartScrollMode = mode;
 
     if (isNewScope || wasPending) {
+      if (mode === 'latest') state.chartScrollPinnedEnd = true;
       state.chartScrollPending = scopeKey;
       const run = () => {
         if (state.chartScrollKey !== scopeKey) return;
@@ -3879,6 +3900,8 @@
       } else {
         run();
       }
+    } else if (mode === 'latest' && state.chartScrollPinnedEnd) {
+      scrollChartStageNow(stage, 'latest');
     } else if (prevScrollLeft > 0) {
       stage.scrollLeft = prevScrollLeft;
     }
@@ -4249,6 +4272,7 @@
     const yearActive = Object.entries(dailyMap).filter(([k, v]) => k.startsWith(year) && v.total > 0).length;
     state.chartScrollKey = `yearly|${year}`;
     state.chartScrollPending = '';
+    state.chartScrollPinnedEnd = false;
     stage.scrollLeft = 0;
     updateSummaryRibbon(
       { totalTokens: yearTok, costUSD: yearCost, calendarDays: 365, activeDays: yearActive },
@@ -4262,6 +4286,7 @@
     if (!stage) return;
     state.chartScrollKey = `cumulative|${state.sourceFilter || 'all'}`;
     state.chartScrollPending = '';
+    state.chartScrollPinnedEnd = false;
     stage.scrollLeft = 0;
     const en = isEn();
     const start = parseLocalDate(hist.firstUseDate || hist.todayKey);
@@ -6475,6 +6500,11 @@
       if (state.convPicker.open) positionConvPopover();
       if (state.capPopover.open) positionCapPopover();
       syncAllSegIndicators({ animate: false });
+      if (state.chartScrollPending) {
+        flushPendingChartStageScroll();
+      } else if (state.chartScrollMode === 'latest' && state.chartScrollPinnedEnd) {
+        scrollChartStageNow($('chart-stage'), 'latest');
+      }
     });
 
     $('conv-select')?.addEventListener('change', (e) => {
@@ -6604,6 +6634,18 @@
     };
     $('btn-copy-md')?.addEventListener('click', () => {
       copyTelemetryMarkdown().catch(() => {});
+    });
+    $('btn-update')?.addEventListener('click', () => {
+      handleUpdateButtonClick().catch(() => {});
+    });
+    $('btn-drawer-update')?.addEventListener('click', () => {
+      handleUpdateButtonClick().catch(() => {});
+    });
+    $('btn-update-now')?.addEventListener('click', () => {
+      applyPluginUpdate().catch(() => {});
+    });
+    $('btn-update-dismiss')?.addEventListener('click', () => {
+      dismissUpdateBanner();
     });
     $('btn-refresh')?.addEventListener('click', triggerForceRefresh);
     $('btn-rescan-files')?.addEventListener('click', triggerForceRefresh);
@@ -7225,6 +7267,27 @@
         const el = ev.target?.closest?.('.heat-cell:not(.future), .bar-col, .month-bubble-card');
         if (el) chartStage.__cvStageInspect?.(el, true);
       });
+      chartStage.addEventListener('scroll', () => {
+        if (state.chartScrollPending || state.chartScrollMode !== 'latest') return;
+        if (typeof chartStage.clientWidth !== 'number' || chartStage.clientWidth <= 0) return;
+        const maxScroll = Math.max(0, (chartStage.scrollWidth || 0) - chartStage.clientWidth);
+        if (maxScroll <= 0) return;
+        state.chartScrollPinnedEnd = (maxScroll - (chartStage.scrollLeft || 0)) <= 4;
+      }, { passive: true });
+      if (typeof ResizeObserver === 'function') {
+        let lastStageW = chartStage.clientWidth || 0;
+        const stageRo = new ResizeObserver(() => {
+          const curW = chartStage.clientWidth || 0;
+          if (curW <= 0) return;
+          if (state.chartScrollPending) {
+            flushPendingChartStageScroll();
+          } else if (curW !== lastStageW && state.chartScrollMode === 'latest' && state.chartScrollPinnedEnd) {
+            scrollChartStageNow(chartStage, 'latest');
+          }
+          lastStageW = curW;
+        });
+        stageRo.observe(chartStage);
+      }
     }
 
     // Custom date range presets, granularity & date pickers
@@ -8408,11 +8471,341 @@
     window.addEventListener?.('resize', hideTooltip);
   }
 
+  // -------------------------------------------------------------------------
+  // Release Update Checker & One-Click Auto-Updater
+  // -------------------------------------------------------------------------
+
+  const UPDATE_DISMISS_STORAGE_KEY = 'cv_dismissed_update_v1';
+  const UPDATE_RECHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+  function readDismissedUpdateVersion() {
+    try {
+      return String(window.localStorage?.getItem(UPDATE_DISMISS_STORAGE_KEY) || '').trim();
+    } catch {
+      return '';
+    }
+  }
+
+  function writeDismissedUpdateVersion(ver) {
+    state.update.dismissedVersion = String(ver || '').trim();
+    try {
+      if (state.update.dismissedVersion) {
+        window.localStorage?.setItem(UPDATE_DISMISS_STORAGE_KEY, state.update.dismissedVersion);
+      } else {
+        window.localStorage?.removeItem(UPDATE_DISMISS_STORAGE_KEY);
+      }
+    } catch {}
+  }
+
+  function showUpdateBannerEl() {
+    const el = $('update-banner');
+    if (!el) return;
+    if (state.update.bannerHideTimer) {
+      clearTimeout(state.update.bannerHideTimer);
+      state.update.bannerHideTimer = null;
+    }
+    const wasHidden = el.classList?.contains('hidden');
+    el.classList?.remove('hidden');
+    el.setAttribute?.('aria-hidden', 'false');
+    if (wasHidden && typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => el.classList?.add('is-visible'));
+    } else {
+      el.classList?.add('is-visible');
+    }
+  }
+
+  function hideUpdateBannerEl() {
+    const el = $('update-banner');
+    if (!el) return;
+    el.classList?.remove('is-visible');
+    el.setAttribute?.('aria-hidden', 'true');
+    if (state.update.bannerHideTimer) clearTimeout(state.update.bannerHideTimer);
+    if (typeof setTimeout === 'function' && !prefersReducedMotion()) {
+      state.update.bannerHideTimer = setTimeout(() => {
+        state.update.bannerHideTimer = null;
+        if (!el.classList?.contains('is-visible')) {
+          el.classList?.add('hidden');
+        }
+      }, 220);
+    } else {
+      el.classList?.add('hidden');
+    }
+  }
+
+  function dismissUpdateBanner() {
+    const latest = state.update.status?.latestVersion || '';
+    if (latest) writeDismissedUpdateVersion(latest);
+    hideUpdateBannerEl();
+  }
+
+  function syncUpdateUi() {
+    const info = state.update.status;
+    const checking = Boolean(state.update.checking);
+    const applying = Boolean(state.update.applying);
+    const hasUpdate = Boolean(info?.ok && info?.hasUpdate && info?.latestVersion);
+    const curVer = info?.currentVersion || '';
+    const latestVer = info?.latestVersion || '';
+
+    const btn = $('btn-update');
+    const dot = $('update-dot');
+    const verChip = $('update-cur-ver');
+    const statusText = $('update-status-text');
+    const drawerBtn = $('btn-drawer-update');
+    const bannerTitle = $('update-banner-title');
+    const bannerSub = $('update-banner-sub');
+    const nowBtn = $('btn-update-now');
+    const dismissBtn = $('btn-update-dismiss');
+
+    if (verChip && curVer) {
+      verChip.textContent = `v${curVer}`;
+    }
+
+    if (btn) {
+      btn.classList?.toggle('has-update', hasUpdate);
+      btn.classList?.toggle('is-checking', checking);
+      btn.classList?.toggle('is-updating', applying);
+      btn.disabled = checking || applying;
+      const tip = applying
+        ? tr('正在下载校验并自动更新…', 'Downloading, verifying & updating…')
+        : checking
+          ? tr('正在检查新版本…', 'Checking for updates…')
+          : hasUpdate
+            ? tr(`发现新版本 v${latestVer}（当前 v${curVer}），点击一键自动更新`, `New version v${latestVer} available (current v${curVer}) — click to auto-update`)
+            : curVer
+              ? tr(`检查版本更新（当前 v${curVer}）`, `Check for updates (current v${curVer})`)
+              : tr('检查版本更新', 'Check for updates');
+      btn.setAttribute?.('title', tip);
+      btn.setAttribute?.('data-cv-tip', tip);
+      btn.setAttribute?.('aria-label', tip);
+    }
+
+    if (dot) {
+      dot.classList?.toggle('hidden', !hasUpdate || applying);
+    }
+
+    if (statusText) {
+      if (applying) {
+        statusText.textContent = tr('正在下载并校验…', 'Downloading & verifying…');
+      } else if (checking) {
+        statusText.textContent = tr('正在检查…', 'Checking…');
+      } else if (hasUpdate) {
+        statusText.textContent = tr(`有新版本 v${latestVer}`, `v${latestVer} available`);
+      } else if (info?.ok) {
+        statusText.textContent = tr('已是最新', 'Up to date');
+      } else if (info?.error) {
+        statusText.textContent = tr('检查失败', 'Check failed');
+      } else {
+        statusText.textContent = tr('未检查', 'Not checked');
+      }
+    }
+
+    if (drawerBtn) {
+      drawerBtn.disabled = checking || applying;
+      drawerBtn.classList?.toggle('has-update', hasUpdate && !applying);
+      drawerBtn.textContent = applying
+        ? tr('更新中…', 'Updating…')
+        : checking
+          ? tr('检查中…', 'Checking…')
+          : hasUpdate
+            ? tr(`立即更新 v${latestVer}`, `Update to v${latestVer}`)
+            : tr('检查更新', 'Check Update');
+    }
+
+    if (bannerTitle && bannerSub && nowBtn) {
+      if (applying) {
+        bannerTitle.textContent = tr(`正在更新至 v${latestVer || curVer}…`, `Updating to v${latestVer || curVer}…`);
+        bannerSub.textContent = tr('正在下载发布包并校验 SHA-256，完成后自动重载', 'Downloading release ZIP & verifying SHA-256…');
+        nowBtn.textContent = tr('更新中…', 'Updating…');
+        nowBtn.disabled = true;
+        if (dismissBtn) dismissBtn.disabled = true;
+      } else if (hasUpdate) {
+        bannerTitle.textContent = tr(`发现新版本 v${latestVer}`, `New Version v${latestVer} Available`);
+        bannerSub.textContent = info?.isDevRepo
+          ? tr(`当前 v${curVer}（源码仓库模式，请用 git pull 更新）`, `Current v${curVer} (dev repo — update via git pull)`)
+          : tr(`当前 v${curVer} · 点击即可自动安全更新`, `Current v${curVer} · Click to verify & auto-update`);
+        nowBtn.textContent = tr('立即更新', 'Update Now');
+        nowBtn.disabled = false;
+        if (dismissBtn) dismissBtn.disabled = false;
+      }
+    }
+
+    const shouldShowBanner = Boolean(
+      applying ||
+      (hasUpdate && latestVer !== state.update.dismissedVersion)
+    );
+    if (shouldShowBanner) {
+      showUpdateBannerEl();
+    } else {
+      hideUpdateBannerEl();
+    }
+  }
+
+  async function waitBackendAndReload(expectedVersion) {
+    if (window.__CV_FLOAT_MODE__ && !window.__CV_BROWSER_FALLBACK__) {
+      // macOS native float daemon restarts & reopens the fresh WKWebView itself.
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 900));
+    for (let i = 0; i < 12; i++) {
+      try {
+        const res = await apiFetch('/api/update');
+        if (res && (!expectedVersion || res.currentVersion === expectedVersion || res.ok)) {
+          break;
+        }
+      } catch {}
+      await new Promise((r) => setTimeout(r, 650));
+    }
+    try {
+      window.location?.reload?.();
+    } catch {}
+  }
+
+  async function checkPluginUpdate(force = false, opts = {}) {
+    const silent = Boolean(opts.silent);
+    if (state.update.checking || state.update.applying) return state.update.status;
+    state.update.checking = true;
+    syncUpdateUi();
+    try {
+      const qs = force ? '?force=1' : '';
+      const res = await apiFetch(`/api/update${qs}`);
+      state.update.status = res;
+      if (force && res?.ok && res?.hasUpdate && res?.latestVersion) {
+        // Explicit user check re-surfaces banner even if previously dismissed
+        writeDismissedUpdateVersion('');
+      }
+      if (!silent) {
+        if (res?.ok && res?.hasUpdate) {
+          showToast(
+            tr(
+              `发现新版本 v${res.latestVersion}（当前 v${res.currentVersion}），点击更新按钮即可自动更新`,
+              `Update v${res.latestVersion} available (current v${res.currentVersion}) — click Update to install`
+            ),
+            3600
+          );
+        } else if (res?.ok) {
+          showToast(
+            tr(`当前已是最新版本 v${res.currentVersion}`, `Already on the latest version v${res.currentVersion}`),
+            2200
+          );
+        } else {
+          showToast(
+            tr(`检查更新失败 · ${res?.error || '网络不可用'}`, `Update check failed · ${res?.error || 'Network unavailable'}`),
+            3200
+          );
+        }
+      }
+      return res;
+    } catch (err) {
+      const failRes = {
+        ok: false,
+        state: 'error',
+        currentVersion: state.update.status?.currentVersion || '',
+        error: err?.message || '检查更新失败'
+      };
+      state.update.status = failRes;
+      if (!silent) {
+        showToast(
+          tr(`检查更新失败 · ${failRes.error}`, `Update check failed · ${failRes.error}`),
+          3200
+        );
+      }
+      return failRes;
+    } finally {
+      state.update.checking = false;
+      syncUpdateUi();
+    }
+  }
+
+  async function applyPluginUpdate() {
+    if (state.update.applying) return;
+    state.update.applying = true;
+    syncUpdateUi();
+    try {
+      const res = await apiFetch('/api/update', {
+        method: 'POST',
+        body: { action: 'apply' }
+      });
+      if (res?.ok && res?.updated) {
+        state.update.status = {
+          ...(state.update.status || {}),
+          ok: true,
+          state: 'updated',
+          hasUpdate: false,
+          currentVersion: res.currentVersion,
+          latestVersion: res.currentVersion
+        };
+        writeDismissedUpdateVersion('');
+        const bannerTitle = $('update-banner-title');
+        const bannerSub = $('update-banner-sub');
+        const nowBtn = $('btn-update-now');
+        if (bannerTitle) {
+          bannerTitle.textContent = tr(`已更新至 v${res.currentVersion}`, `Updated to v${res.currentVersion}`);
+        }
+        if (bannerSub) {
+          bannerSub.textContent = tr('SHA-256 校验通过，正在自动重载新版看板…', 'SHA-256 verified, reloading dashboard…');
+        }
+        if (nowBtn) {
+          nowBtn.textContent = tr('重载中…', 'Reloading…');
+          nowBtn.disabled = true;
+        }
+        showToast(
+          tr(`已安全更新至 v${res.currentVersion}，正在重载看板…`, `Updated to v${res.currentVersion}, reloading…`),
+          5000
+        );
+        waitBackendAndReload(res.currentVersion).catch(() => {});
+        return res;
+      }
+      if (res?.ok && res?.updated === false) {
+        state.update.status = {
+          ...(state.update.status || {}),
+          ok: true,
+          state: 'up-to-date',
+          hasUpdate: false,
+          currentVersion: res.currentVersion || state.update.status?.currentVersion || '',
+          latestVersion: res.latestVersion || res.currentVersion || ''
+        };
+        state.update.applying = false;
+        syncUpdateUi();
+        showToast(
+          tr(`当前已是最新版本 v${res.currentVersion}`, `Already up to date (v${res.currentVersion})`),
+          2400
+        );
+        return res;
+      }
+      state.update.applying = false;
+      syncUpdateUi();
+      showToast(
+        tr(`自动更新失败 · ${res?.error || '请稍后重试'}`, `Auto-update failed · ${res?.error || 'Please try again'}`),
+        4500
+      );
+      return res;
+    } catch (err) {
+      state.update.applying = false;
+      syncUpdateUi();
+      showToast(
+        tr(`自动更新失败 · ${err?.message || '请稍后重试'}`, `Auto-update failed · ${err?.message || 'Please try again'}`),
+        4500
+      );
+      return null;
+    }
+  }
+
+  async function handleUpdateButtonClick() {
+    if (state.update.applying || state.update.checking) return;
+    if (state.update.status?.ok && state.update.status?.hasUpdate) {
+      await applyPluginUpdate();
+      return;
+    }
+    await checkPluginUpdate(true, { silent: false });
+  }
+
   async function boot() {
+    state.update.dismissedVersion = readDismissedUpdateVersion();
     normalizeStaticDomTypography();
     syncCompactMode();
     applyAppearanceToDom();
     syncFloatButtonUi();
+    syncUpdateUi();
     wireEvents();
     initCustomTooltips();
     initWorkspaceTracking();
@@ -8429,6 +8822,15 @@
       initiallyVisible ? loadContext(false) : Promise.resolve(),
       refreshFloatStatus()
     ]);
+
+    // Low-frequency silent release check (6h cached server-side, never blocks first paint)
+    setTimeout(() => {
+      checkPluginUpdate(false, { silent: true }).catch(() => {});
+    }, 1200);
+    setInterval(() => {
+      if (document.hidden || state.hostHidden) return;
+      checkPluginUpdate(false, { silent: true }).catch(() => {});
+    }, UPDATE_RECHECK_INTERVAL_MS);
 
     // Snappy ETag-backed background polling while panel is visible
     setInterval(() => {
