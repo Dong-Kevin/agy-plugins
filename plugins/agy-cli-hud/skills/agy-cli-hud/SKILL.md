@@ -24,10 +24,15 @@ agy-hud install-statusline --lines 3
 # 卸载 HUD 状态栏（完好保留 Solo 桥接）
 agy-hud install-statusline --uninstall
 
-# 调整配置（分层行数 1/2/3、统计口径 cli_only/all、月费折算）
+# 调整配置（分层行数 1/2/3、主题、统计口径 cli_only/all、月费折算）
 agy-hud config set lines 3
 agy-hud config set scope cli_only
 agy-hud config set monthly_paid_usd 19.99
+
+# 查看、预览或切换配色主题（mocha/latte/frappe/macchiato/nord/dracula）
+agy-hud theme list
+agy-hud theme preview
+agy-hud theme set nord
 
 # 非 Solo 终端下的轻量实时看板
 agy-hud watch

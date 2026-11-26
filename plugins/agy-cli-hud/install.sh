@@ -90,7 +90,7 @@ cp "$SCRIPT_DIR/package.json" "$STAGE_DIR/package.json"
 cp "$SCRIPT_DIR/assets/logo.svg" "$STAGE_DIR/assets/logo.svg"
 cp "$SCRIPT_DIR/skills/agy-cli-hud/SKILL.md" "$STAGE_DIR/skills/agy-cli-hud/SKILL.md"
 cp "$SCRIPT_DIR/bin/agy-hud.mjs" "$STAGE_DIR/bin/agy-hud.mjs"
-for f in paths.mjs pricing.mjs quota.mjs incremental.mjs colab.mjs snapshot.mjs statusline.mjs; do
+for f in paths.mjs pricing.mjs quota.mjs incremental.mjs colab.mjs snapshot.mjs themes.mjs statusline.mjs; do
   cp "$SCRIPT_DIR/lib/$f" "$STAGE_DIR/lib/$f"
 done
 
@@ -102,7 +102,7 @@ cp -f "$STAGE_DIR/package.json" "$TARGET_DIR/package.json"
 cp -f "$STAGE_DIR/assets/logo.svg" "$TARGET_DIR/assets/logo.svg"
 cp -f "$STAGE_DIR/skills/agy-cli-hud/SKILL.md" "$TARGET_DIR/skills/agy-cli-hud/SKILL.md"
 cp -f "$STAGE_DIR/bin/agy-hud.mjs" "$TARGET_DIR/bin/agy-hud.mjs"
-for f in paths.mjs pricing.mjs quota.mjs incremental.mjs colab.mjs snapshot.mjs statusline.mjs; do
+for f in paths.mjs pricing.mjs quota.mjs incremental.mjs colab.mjs snapshot.mjs themes.mjs statusline.mjs; do
   cp -f "$STAGE_DIR/lib/$f" "$TARGET_DIR/lib/$f"
 done
 chmod +x "$TARGET_DIR/bin/agy-hud.mjs"

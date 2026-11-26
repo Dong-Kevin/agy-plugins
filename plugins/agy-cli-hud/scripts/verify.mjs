@@ -37,6 +37,7 @@ import { resolveHudPaths } from '../lib/paths.mjs';
 import { normalizeAgyQuotaMap } from '../lib/quota.mjs';
 import { composeSnapshot } from '../lib/snapshot.mjs';
 import { configureAgyStatusLine, renderStatusLine } from '../lib/statusline.mjs';
+import { hexToAnsi256, hexToAnsiFg, THEME_NAMES, THEMES } from '../lib/themes.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = resolve(__dirname, '..');
@@ -59,6 +60,7 @@ function testZeroCdpCompliance() {
     'lib/incremental.mjs',
     'lib/colab.mjs',
     'lib/snapshot.mjs',
+    'lib/themes.mjs',
     'lib/statusline.mjs'
   ]) {
     const src = readFileSync(join(PLUGIN_ROOT, rel), 'utf8');
@@ -224,16 +226,33 @@ function testDualPoolQuotaAndLayeredStatusline() {
   assert.equal(outNarrow.split('\n').length, 2);
   assert.ok(outNarrow.split('\n')[0].length < 68, `Narrow L1 should stay concise: ${outNarrow}`);
 
-  // Rainbow TrueColor & 256-color rendering checks (must emit distinct prism hues, zero raw escapes in --no-color)
-  const outTrue = renderStatusLine(stdinPayload, summary, { lines: 2, color: true, colorDepth: 'truecolor', nowSec });
-  const trueMatches = new Set(outTrue.match(/\x1b\[38;2;\d+;\d+;\d+m/g) || []);
-  assert.ok(trueMatches.size >= 8, `TrueColor rainbow mode must emit >= 8 distinct RGB stops, got ${trueMatches.size}`);
-  assert.equal(stripAnsi(outTrue), out2, 'TrueColor stripped output must match plain output exactly');
+  // Restrained Catppuccin/Nord/Dracula semantic theme checks (zero per-character rainbow, single-hue bar, 256 fallback & --no-color)
+  const outMocha = renderStatusLine(stdinPayload, summary, { lines: 2, color: true, colorDepth: 'truecolor', theme: 'mocha', nowSec });
+  const mochaMatches = new Set(outMocha.match(/\x1b\[38;2;\d+;\d+;\d+m/g) || []);
+  assert.ok(mochaMatches.size >= 4 && mochaMatches.size <= 8, `Restrained mocha theme must emit 4..8 distinct RGB colors, got ${mochaMatches.size}`);
+  assert.ok(outMocha.includes(`${hexToAnsiFg(THEMES.mocha.base.pink, 'truecolor')}Ctx\x1b[0m`), 'Ctx label must be a single flat color (no per-character gradient)');
+  assert.ok(outMocha.includes(`${hexToAnsiFg(THEMES.mocha.base.blue, 'truecolor')}Gemini\x1b[0m`), 'Gemini header must be a single flat color (no per-character gradient)');
+  assert.ok(outMocha.includes(`${hexToAnsiFg(THEMES.mocha.base.green, 'truecolor')}███░░░░░\x1b[0m`), 'Healthy 42% bar must render filled and empty cells in single barOk hue');
+  assert.equal(stripAnsi(outMocha), out2, 'TrueColor stripped output must match plain output exactly');
 
-  const out256 = renderStatusLine(stdinPayload, summary, { lines: 2, color: true, colorDepth: '256', nowSec });
-  const c256Matches = new Set(out256.match(/\x1b\[38;5;\d+m/g) || []);
-  assert.ok(c256Matches.size >= 6, `256-color rainbow mode must emit >= 6 distinct palette indices, got ${c256Matches.size}`);
-  assert.equal(stripAnsi(out256), out2, '256-color stripped output must match plain output exactly');
+  // Threshold bar colors: 0% muted, 65% warn (yellow), 88% danger (red)
+  const outZero = renderStatusLine({ ...stdinPayload, context_window: { context_window_size: 1_000_000, used_percentage: 0 } }, summary, { lines: 2, color: true, colorDepth: 'truecolor', theme: 'mocha', nowSec });
+  assert.ok(outZero.includes(`${hexToAnsiFg(THEMES.mocha.base.overlay0, 'truecolor')}░░░░░░░░\x1b[0m`), '0% bar must use muted overlay0');
+  const outWarn = renderStatusLine({ ...stdinPayload, context_window: { context_window_size: 1_000_000, used_percentage: 65 } }, summary, { lines: 2, color: true, colorDepth: 'truecolor', theme: 'mocha', nowSec });
+  assert.ok(outWarn.includes(`${hexToAnsiFg(THEMES.mocha.base.yellow, 'truecolor')}█████░░░\x1b[0m`), '65% bar must use single barWarn yellow');
+  const outCrit = renderStatusLine({ ...stdinPayload, context_window: { context_window_size: 1_000_000, used_percentage: 88 } }, summary, { lines: 2, color: true, colorDepth: 'truecolor', theme: 'mocha', nowSec });
+  assert.ok(outCrit.includes(`${hexToAnsiFg(THEMES.mocha.base.red, 'truecolor')}███████░\x1b[0m`), '88% bar must use single barDanger red');
+
+  // All 6 curated themes render exact theme colors in TrueColor & 256-color fallback
+  for (const name of THEME_NAMES) {
+    const tTrue = renderStatusLine(stdinPayload, summary, { lines: 2, color: true, colorDepth: 'truecolor', theme: name, nowSec });
+    assert.ok(tTrue.includes(hexToAnsiFg(THEMES[name].base.pink, 'truecolor')), `Theme ${name} must emit its exact label truecolor`);
+    assert.equal(stripAnsi(tTrue), out2, `Theme ${name} stripped truecolor output must match plain output`);
+
+    const t256 = renderStatusLine(stdinPayload, summary, { lines: 2, color: true, colorDepth: '256', theme: name, nowSec });
+    assert.ok(t256.includes(`\x1b[38;5;${hexToAnsi256(THEMES[name].base.pink)}m`), `Theme ${name} must emit 256-color fallback`);
+    assert.equal(stripAnsi(t256), out2, `Theme ${name} stripped 256 output must match plain output`);
+  }
   assert.ok(!/\x1b\[/.test(renderStatusLine(stdinPayload, summary, { lines: 2, color: false, nowSec })), 'color=false must emit zero ANSI escapes');
 
   // Fresh startup session isolation: blank conversation_id MUST NOT inherit prior session cache/tps/cost
@@ -257,7 +276,74 @@ function testDualPoolQuotaAndLayeredStatusline() {
   const outNewConv = stripAnsi(renderStatusLine(brandNewConvPayload, summary, { lines: 2, color: false, nowSec }));
   assert.ok(!outNewConv.includes('缓存均值') && !outNewConv.includes('58.2') && !outNewConv.includes('$1.24'), `Brand-new convId must not leak prior session stats: ${outNewConv}`);
 
-  pass('Dual-pool quota normalization, rainbow palette & fresh-session isolation statusLine renderer');
+  pass('Dual-pool quota normalization, 6-theme restrained palette & fresh-session isolation statusLine renderer');
+}
+
+function testThemeCliAndPrecedence() {
+  const work = mkdtempSync(join(tmpdir(), 'agy-hud-theme-'));
+  const baseEnv = {
+    ...process.env,
+    AGY_HUD_HOME: work,
+    AGY_HUD_NO_BG_SYNC: '1',
+    COLORTERM: 'truecolor'
+  };
+  delete baseEnv.AGY_HUD_THEME;
+  delete baseEnv.NO_COLOR;
+  try {
+    const listJson = JSON.parse(execFileSync(process.execPath, [BIN_PATH, 'theme', 'list', '--json'], {
+      env: baseEnv,
+      encoding: 'utf8'
+    }));
+    assert.equal(listJson.active, 'mocha');
+    assert.deepEqual(listJson.themes.map((t) => t.name), [...THEME_NAMES]);
+
+    const setRes = JSON.parse(execFileSync(process.execPath, [BIN_PATH, 'theme', 'set', 'nord', '--json'], {
+      env: baseEnv,
+      encoding: 'utf8'
+    }));
+    assert.equal(setRes.ok, true);
+    assert.equal(setRes.theme, 'nord');
+
+    const previewOut = execFileSync(process.execPath, [BIN_PATH, 'theme', 'preview', 'nord'], {
+      env: baseEnv,
+      encoding: 'utf8'
+    });
+    assert.ok(previewOut.includes('[nord]') && previewOut.includes(hexToAnsiFg(THEMES.nord.base.blue, 'truecolor')));
+
+    const samplePayload = JSON.stringify({
+      conversation_id: '11111111-2222-3333-4444-555555555555',
+      terminal_width: 120,
+      context_window: { context_window_size: 1_000_000, used_percentage: 35 }
+    });
+
+    // Persisted config theme (nord) applies automatically via summary
+    const nordSl = execFileSync(process.execPath, [BIN_PATH, 'statusline'], {
+      env: baseEnv,
+      input: samplePayload,
+      encoding: 'utf8'
+    });
+    assert.ok(nordSl.includes(hexToAnsiFg(THEMES.nord.base.pink, 'truecolor')), 'Persisted nord theme must flow through summary to statusline');
+
+    // AGY_HUD_THEME overrides config
+    const latteSl = execFileSync(process.execPath, [BIN_PATH, 'statusline'], {
+      env: { ...baseEnv, AGY_HUD_THEME: 'latte' },
+      input: samplePayload,
+      encoding: 'utf8'
+    });
+    assert.ok(latteSl.includes(hexToAnsiFg(THEMES.latte.base.pink, 'truecolor')), 'AGY_HUD_THEME must override config theme');
+
+    // Explicit --theme flag overrides AGY_HUD_THEME
+    const draculaSl = execFileSync(process.execPath, [BIN_PATH, 'statusline', '--theme', 'dracula'], {
+      env: { ...baseEnv, AGY_HUD_THEME: 'latte' },
+      input: samplePayload,
+      encoding: 'utf8'
+    });
+    assert.ok(draculaSl.includes(hexToAnsiFg(THEMES.dracula.base.pink, 'truecolor')), '--theme flag must override AGY_HUD_THEME');
+
+    pass('CLI theme list/preview/set persistence & precedence (--theme > AGY_HUD_THEME > config > mocha)');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
 }
 
 function testCrossSessionSnapshotIsolation() {
@@ -617,6 +703,7 @@ async function main() {
   testZeroCdpCompliance();
   testIncrementalJsonlAndRollup();
   testDualPoolQuotaAndLayeredStatusline();
+  testThemeCliAndPrecedence();
   testCrossSessionSnapshotIsolation();
   testSoloBridgeChaining();
   await testMockColabApiAndPermissions();

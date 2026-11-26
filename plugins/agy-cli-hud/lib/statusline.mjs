@@ -1,138 +1,21 @@
 /**
  * Ultra-fast multi-line layered statusLine renderer & Solo-compatible installer for agy-cli-hud.
  * Hot path avoids importing heavy modules (http/crypto/colab/incremental).
+ * Uses restrained Catppuccin/Nord/Dracula semantic themes inspired by stormzhang/token-tracker.
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { resolveHudPaths, writeJsonAtomic } from './paths.mjs';
 import { formatResetCountdown, normalizeAgyQuotaMap } from './quota.mjs';
+import { detectColorDepth, resolveStatuslineColors, resolveThemeName } from './themes.mjs';
 
 const RESET = '\x1b[0m';
-const BOLD = '\x1b[1m';
 const DIM = '\x1b[2m';
 
-// Antigravity Prism Rainbow Palette: [r, g, b, ansi256]
-const PALETTE = {
-  coral:    [255, 107, 122, 210],
-  crimson:  [255,  83, 112, 203],
-  orange:   [255, 158, 100, 215],
-  amber:    [255, 198,  92, 221],
-  gold:     [255, 217, 102, 221],
-  lime:     [163, 230,  92, 150],
-  mint:     [ 77, 232, 176,  79],
-  cyan:     [ 77, 217, 255,  81],
-  sky:      [115, 188, 255, 111],
-  blue:     [122, 162, 247, 111],
-  indigo:   [157, 140, 248, 141],
-  violet:   [192, 132, 252, 177],
-  pink:     [244, 114, 182, 212],
-  rose:     [255, 138, 178, 211],
-  peach:    [253, 186, 116, 216],
-  aquaSoft: [125, 211, 252, 117],
-  lavSoft:  [165, 180, 252, 147],
-  slate:    [134, 143, 170, 103],
-  muted:    [ 92,  99, 122, 242]
-};
-
-const BAR_PRISM_FILLED = [
-  PALETTE.coral,
-  PALETTE.orange,
-  PALETTE.gold,
-  [136, 232, 122, 114],
-  PALETTE.mint,
-  PALETTE.cyan,
-  PALETTE.blue,
-  PALETTE.violet,
-  PALETTE.pink
-];
-
-const BAR_PRISM_TRACK = [
-  [116,  64,  74,  95],
-  [118,  84,  62,  95],
-  [116, 102,  62, 101],
-  [ 68, 108,  72,  65],
-  [ 58, 106,  90,  66],
-  [ 56,  98, 116,  67],
-  [ 68,  82, 118,  61],
-  [ 92,  70, 118,  97],
-  [114,  66,  94,  96]
-];
-
-const BAR_WARN_STOPS = [PALETTE.gold, PALETTE.amber, PALETTE.orange, PALETTE.coral];
-const BAR_CRIT_STOPS = [PALETTE.orange, PALETTE.coral, PALETTE.crimson];
-
-const CTX_GRADIENT = [PALETTE.coral, PALETTE.orange, PALETTE.gold];
-const GEMINI_GRADIENT = [PALETTE.cyan, PALETTE.blue, PALETTE.indigo, PALETTE.violet, PALETTE.pink];
-const NON_GEMINI_GRADIENT = [PALETTE.coral, PALETTE.orange, PALETTE.gold, PALETTE.rose];
-const COLAB_GRADIENT = [PALETTE.gold, PALETTE.orange, PALETTE.coral, PALETTE.pink, PALETTE.violet];
-
-function detectColorDepth(useColor, explicitDepth) {
-  if (!useColor) return 'none';
-  if (explicitDepth === 'truecolor' || explicitDepth === '256' || explicitDepth === 'none') {
-    return explicitDepth;
-  }
-  const termProgram = String(process.env.TERM_PROGRAM || '');
-  if (termProgram === 'Apple_Terminal') return '256';
-  const colorTerm = String(process.env.COLORTERM || '');
-  if (
-    /(truecolor|24bit)/i.test(colorTerm) ||
-    /(ghostty|iterm|wezterm|kitty|alacritty|warp|vscode|hyper|rio|tabby)/i.test(termProgram) ||
-    Boolean(process.env.WT_SESSION) ||
-    Boolean(process.env.CLI_AGENTS_SURFACE_ID)
-  ) {
-    return 'truecolor';
-  }
-  return '256';
-}
-
-function fgCode(rgb, depth, bold = false) {
-  if (depth === 'none' || !rgb) return '';
-  const prefix = bold ? BOLD : '';
-  if (depth === 'truecolor') {
-    return `${prefix}\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m`;
-  }
-  return `${prefix}\x1b[38;5;${rgb[3]}m`;
-}
-
-function paintRgb(text, rgb, depth, { bold = false } = {}) {
+function paint(text, ansiFg, { dim = false } = {}) {
   if (!text) return '';
-  if (depth === 'none' || !rgb) return text;
-  return `${fgCode(rgb, depth, bold)}${text}${RESET}`;
-}
-
-function sampleStops(stops, t) {
-  if (stops.length === 1) return stops[0];
-  const clamped = Math.max(0, Math.min(1, t));
-  const scaled = clamped * (stops.length - 1);
-  const idx = Math.min(stops.length - 2, Math.floor(scaled));
-  const frac = scaled - idx;
-  const a = stops[idx];
-  const b = stops[idx + 1];
-  return [
-    Math.round(a[0] + (b[0] - a[0]) * frac),
-    Math.round(a[1] + (b[1] - a[1]) * frac),
-    Math.round(a[2] + (b[2] - a[2]) * frac),
-    frac < 0.5 ? a[3] : b[3]
-  ];
-}
-
-function paintGradient(text, stops, depth, { bold = false } = {}) {
-  if (!text) return '';
-  if (depth === 'none') return text;
-  const chars = Array.from(text);
-  if (chars.length <= 1) return paintRgb(text, stops[0], depth, { bold });
-  let out = '';
-  for (let i = 0; i < chars.length; i += 1) {
-    const ch = chars[i];
-    if (ch === ' ') {
-      out += ch;
-      continue;
-    }
-    const rgb = sampleStops(stops, i / (chars.length - 1));
-    out += `${fgCode(rgb, depth, bold)}${ch}`;
-  }
-  return `${out}${RESET}`;
+  if (!ansiFg) return text;
+  return `${dim ? DIM : ''}${ansiFg}${text}${RESET}`;
 }
 
 export function formatTokensCompact(n) {
@@ -153,50 +36,32 @@ export function formatUsdCompact(usd) {
   return `$${num.toFixed(2)}`;
 }
 
-function buildBar(percent, width, depth, { invertSeverity = false } = {}) {
+function usageBarColor(pct, C) {
+  if (pct >= 80) return C.barDanger;
+  if (pct >= 50) return C.barWarn;
+  return C.barOk;
+}
+
+function remainingColor(pct, C) {
+  if (pct == null) return C.muted;
+  if (pct <= 15) return C.barDanger;
+  if (pct <= 40) return C.barWarn;
+  return C.barOk;
+}
+
+/**
+ * Single-hue semantic progress bar (matching token-tracker):
+ * - Filled █ and empty ░ share the same threshold color (░ glyph naturally reads dimmer)
+ * - When pct === 0, empty ░ stays muted neutral
+ */
+function buildBar(percent, width, C) {
   const clamped = Math.max(0, Math.min(100, Number(percent) || 0));
   const filled = clamped > 0 ? Math.max(1, Math.min(width, Math.round((clamped / 100) * width))) : 0;
   const empty = Math.max(0, width - filled);
-  if (depth === 'none') return '█'.repeat(filled) + '░'.repeat(empty);
-
-  const filledStops = invertSeverity
-    ? (clamped <= 15 ? BAR_CRIT_STOPS : clamped <= 40 ? BAR_WARN_STOPS : BAR_PRISM_FILLED)
-    : (clamped >= 90 ? BAR_CRIT_STOPS : clamped >= 75 ? BAR_WARN_STOPS : BAR_PRISM_FILLED);
-
-  let out = '';
-  const denom = Math.max(1, width - 1);
-  for (let i = 0; i < width; i += 1) {
-    const t = i / denom;
-    if (i < filled) {
-      out += `${fgCode(sampleStops(filledStops, t), depth)}█`;
-    } else {
-      out += `${fgCode(sampleStops(BAR_PRISM_TRACK, t), depth)}░`;
-    }
-  }
-  return `${out}${RESET}`;
-}
-
-function remainingRgb(pct) {
-  if (pct == null) return PALETTE.slate;
-  if (pct <= 15) return PALETTE.crimson;
-  if (pct <= 40) return PALETTE.amber;
-  if (pct <= 70) return PALETTE.lime;
-  if (pct <= 89) return PALETTE.mint;
-  return PALETTE.cyan;
-}
-
-function contextRgb(pct) {
-  if (pct == null) return PALETTE.slate;
-  if (pct >= 90) return PALETTE.crimson;
-  if (pct >= 75) return PALETTE.amber;
-  return PALETTE.orange;
-}
-
-function cacheRgb(pct) {
-  if (pct == null) return PALETTE.slate;
-  if (pct >= 70) return PALETTE.mint;
-  if (pct >= 40) return PALETTE.amber;
-  return PALETTE.coral;
+  const raw = '█'.repeat(filled) + '░'.repeat(empty);
+  if (!C.barOk) return raw;
+  if (clamped <= 0) return paint(raw, C.muted);
+  return paint(raw, usageBarColor(clamped, C));
 }
 
 function lookupSummarySession(summary, convId, hasPayload) {
@@ -297,7 +162,7 @@ function resolveLiveView(stdinPayload, summary) {
   };
 }
 
-function formatPoolSegment(pool, { compact = false, depth = 'truecolor', nowSec = Math.floor(Date.now() / 1000) } = {}) {
+function formatPoolSegment(pool, { compact = false, C, nowSec = Math.floor(Date.now() / 1000) } = {}) {
   if (!pool) return '';
   const isGemini = pool.id === 'gemini';
   const tagText = isGemini
@@ -307,127 +172,111 @@ function formatPoolSegment(pool, { compact = false, depth = 'truecolor', nowSec 
   const fw = pool.weekly_remaining_percent;
   if (f5 == null && fw == null) return '';
 
-  const tagStyled = compact
-    ? paintRgb(tagText, isGemini ? PALETTE.sky : PALETTE.orange, depth, { bold: true })
-    : paintGradient(tagText, isGemini ? GEMINI_GRADIENT : NON_GEMINI_GRADIENT, depth, { bold: true });
-
+  const tagStyled = paint(tagText, C.quota);
   if (compact) {
-    const p5 = f5 != null ? paintRgb(`${Math.round(f5)}%`, remainingRgb(f5), depth, { bold: true }) : paintRgb('--', PALETTE.slate, depth);
-    const pw = fw != null ? paintRgb(`${Math.round(fw)}%`, remainingRgb(fw), depth, { bold: true }) : paintRgb('--', PALETTE.slate, depth);
-    const slash = paintRgb('/', PALETTE.muted, depth);
+    const p5 = f5 != null ? paint(`${Math.round(f5)}%`, remainingColor(f5, C)) : paint('--', C.muted);
+    const pw = fw != null ? paint(`${Math.round(fw)}%`, remainingColor(fw, C)) : paint('--', C.muted);
+    const slash = paint('/', C.muted);
     return `${tagStyled} ${p5}${slash}${pw}`;
   }
 
-  const label5h = paintRgb('5h', isGemini ? PALETTE.aquaSoft : PALETTE.peach, depth);
-  const labelW = paintRgb('周', isGemini ? PALETTE.lavSoft : PALETTE.rose, depth);
-  const dot = paintRgb(' · ', PALETTE.muted, depth);
-
+  const dot = paint(' · ', C.muted);
   const parts = [];
   if (f5 != null) {
     const cd = formatResetCountdown(pool.five_hour_resets_at, nowSec);
-    const cdStr = cd ? paintRgb(` (${cd})`, PALETTE.slate, depth) : '';
-    parts.push(`${label5h} ${paintRgb(`余${Math.round(f5)}%`, remainingRgb(f5), depth, { bold: true })}${cdStr}`);
+    const cdStr = cd ? ` ${paint(`(${cd})`, C.quota, { dim: true })}` : '';
+    parts.push(`${paint('5h', C.quota)} ${paint(`余${Math.round(f5)}%`, remainingColor(f5, C))}${cdStr}`);
   }
   if (fw != null) {
-    parts.push(`${labelW} ${paintRgb(`余${Math.round(fw)}%`, remainingRgb(fw), depth, { bold: true })}`);
+    parts.push(`${paint('周', C.quota)} ${paint(`余${Math.round(fw)}%`, remainingColor(fw, C))}`);
   }
   return `${tagStyled} ${parts.join(dot)}`;
 }
 
-function formatColabCompact(colab, { tierMode = 'wide', depth = 'truecolor' } = {}) {
+function formatColabCompact(colab, { tierMode = 'wide', C } = {}) {
   if (!colab) return '';
   const cu = colab.cu != null ? `${Number(colab.cu).toFixed(1)}` : null;
   const gpu = colab.rt?.gpu && colab.rt.gpu !== 'NONE' ? colab.rt.gpu : null;
   if (cu === null && !gpu) return '';
 
   if (tierMode === 'narrow') {
-    return cu !== null ? paintRgb(`CU ${cu}`, PALETTE.gold, depth, { bold: true }) : '';
+    return cu !== null ? paint(`CU ${cu}`, C.colab) : '';
   }
   if (tierMode === 'mid') {
     if (cu !== null && gpu) {
-      return `${paintRgb(`CU ${cu}`, PALETTE.gold, depth, { bold: true })} ${paintRgb(`(${gpu})`, PALETTE.violet, depth)}`;
+      return `${paint(`CU ${cu}`, C.colab)} ${paint(`(${gpu})`, C.colab, { dim: true })}`;
     }
-    if (cu !== null) return paintRgb(`CU ${cu}`, PALETTE.gold, depth, { bold: true });
-    return `${paintGradient('Colab', COLAB_GRADIENT, depth, { bold: true })} ${paintRgb(gpu, PALETTE.violet, depth, { bold: true })}`;
+    if (cu !== null) return paint(`CU ${cu}`, C.colab);
+    return paint(`Colab ${gpu}`, C.colab);
   }
   const bits = [];
-  if (gpu) bits.push(paintRgb(gpu, PALETTE.violet, depth, { bold: true }));
-  if (cu !== null) bits.push(paintRgb(`${cu} CU`, PALETTE.gold, depth, { bold: true }));
-  const dot = paintRgb(' · ', PALETTE.muted, depth);
-  return `${paintGradient('Colab', COLAB_GRADIENT, depth, { bold: true })} ${bits.join(dot)}`;
+  if (gpu) bits.push(paint(gpu, C.colab));
+  if (cu !== null) bits.push(paint(`${cu} CU`, C.colab));
+  return `${paint('Colab', C.colab)} ${bits.join(paint(' · ', C.muted))}`;
 }
 
-function formatColabDetailLine(colab, depth) {
+function formatColabDetailLine(colab, C) {
   if (!colab) return '';
   const parts = [];
   const tier = colab.tier ? `[${colab.tier}]` : '';
-  const cuPart = colab.cu != null ? paintRgb(`${Number(colab.cu).toFixed(1)} CU`, PALETTE.gold, depth, { bold: true }) : '';
+  const cuPart = colab.cu != null ? `${Number(colab.cu).toFixed(1)} CU` : '';
+  const headText = ['Colab', tier, cuPart].filter(Boolean).join(' ');
   const ratePart = colab.rate != null && colab.rate > 0
-    ? paintRgb(`(-${Number(colab.rate).toFixed(1)}/h${colab.hrs != null ? ` ≈${Number(colab.hrs).toFixed(1)}h` : ''})`, PALETTE.slate, depth)
+    ? ` ${paint(`(-${Number(colab.rate).toFixed(1)}/h${colab.hrs != null ? ` ≈${Number(colab.hrs).toFixed(1)}h` : ''})`, C.colab, { dim: true })}`
     : '';
-  const head = [
-    paintGradient('Colab', COLAB_GRADIENT, depth, { bold: true }),
-    tier ? paintRgb(tier, PALETTE.cyan, depth, { bold: true }) : '',
-    cuPart,
-    ratePart
-  ]
-    .filter(Boolean)
-    .join(' ');
-  if (head) parts.push(head);
+  if (headText) parts.push(`${paint(headText, C.colab)}${ratePart}`);
 
   if (colab.rt) {
-    if (colab.rt.gpu) parts.push(paintRgb(colab.rt.gpu, PALETTE.violet, depth, { bold: true }));
+    if (colab.rt.gpu) parts.push(paint(colab.rt.gpu, C.colab));
     if (colab.rt.ram_u != null && colab.rt.ram_t != null) {
-      parts.push(`${paintRgb('RAM', PALETTE.sky, depth)} ${paintRgb(`${Math.round(colab.rt.ram_u)}/${Math.round(colab.rt.ram_t)}G`, PALETTE.aquaSoft, depth)}`);
+      parts.push(paint(`RAM ${Math.round(colab.rt.ram_u)}/${Math.round(colab.rt.ram_t)}G`, C.total));
     }
     if (colab.rt.vram_u != null && colab.rt.vram_t != null) {
-      parts.push(`${paintRgb('VRAM', PALETTE.mint, depth)} ${paintRgb(`${Math.round(colab.rt.vram_u)}/${Math.round(colab.rt.vram_t)}G`, PALETTE.lime, depth)}`);
+      parts.push(paint(`VRAM ${Math.round(colab.rt.vram_u)}/${Math.round(colab.rt.vram_t)}G`, C.total));
     }
     if (colab.rt.idle_m != null) {
-      const idleRgb = colab.rt.idle_m <= 15 ? PALETTE.crimson : colab.rt.idle_m <= 30 ? PALETTE.amber : PALETTE.slate;
-      parts.push(paintRgb(`闲置 ${Math.round(colab.rt.idle_m)}m`, idleRgb, depth, { bold: colab.rt.idle_m <= 30 }));
+      const m = Math.round(colab.rt.idle_m);
+      const idleColor = m <= 15 ? C.barDanger : (m <= 30 ? C.barWarn : C.total);
+      parts.push(paint(`闲置 ${m}m`, idleColor, { dim: m > 30 }));
     }
   }
-  return parts.join(paintRgb(' · ', PALETTE.muted, depth));
+  return parts.join(paint(' · ', C.muted));
 }
 
-function formatTodaySeg(tokens, cost, depth, { showCost = true } = {}) {
-  const lbl = paintRgb('今日', PALETTE.indigo, depth);
-  const tok = paintRgb(formatTokensCompact(tokens), PALETTE.violet, depth, { bold: true });
-  if (!showCost) return `${lbl} ${tok}`;
-  const usd = `${paintRgb('(', PALETTE.slate, depth)}${paintRgb(formatUsdCompact(cost), PALETTE.pink, depth, { bold: true })}${paintRgb(')', PALETTE.slate, depth)}`;
-  return `${lbl} ${tok} ${usd}`;
+function formatTodaySeg(tokens, cost, C, { showCost = true } = {}) {
+  const text = showCost
+    ? `今日 ${formatTokensCompact(tokens)} (${formatUsdCompact(cost)})`
+    : `今日 ${formatTokensCompact(tokens)}`;
+  return paint(text, C.total);
 }
 
-function formatMonthSeg(tokens, cost, depth) {
-  const lbl = paintRgb('本月', PALETTE.pink, depth);
-  const tok = paintRgb(formatTokensCompact(tokens), PALETTE.rose, depth, { bold: true });
-  const usd = `${paintRgb('(', PALETTE.slate, depth)}${paintRgb(formatUsdCompact(cost), PALETTE.peach, depth, { bold: true })}${paintRgb(')', PALETTE.slate, depth)}`;
-  return `${lbl} ${tok} ${usd}`;
+function formatMonthSeg(tokens, cost, C) {
+  return paint(`本月 ${formatTokensCompact(tokens)} (${formatUsdCompact(cost)})`, C.total);
 }
 
-function formatSessionCostSeg(sessCost, depth, { labeled = true, saved = 0 } = {}) {
-  const head = labeled
-    ? `${paintRgb('本会话', PALETTE.sky, depth)} ${paintRgb(formatUsdCompact(sessCost), PALETTE.blue, depth, { bold: true })}`
-    : paintRgb(formatUsdCompact(sessCost), PALETTE.blue, depth, { bold: true });
+function formatSessionCostSeg(sessCost, C, { labeled = true, saved = 0 } = {}) {
+  const head = paint(labeled ? `本会话 ${formatUsdCompact(sessCost)}` : formatUsdCompact(sessCost), C.tokens);
   if (saved > 0.01) {
-    return `${head} ${paintRgb('(', PALETTE.slate, depth)}${paintRgb(`省 ${formatUsdCompact(saved)}`, PALETTE.mint, depth)}${paintRgb(')', PALETTE.slate, depth)}`;
+    return `${head} ${paint(`(省 ${formatUsdCompact(saved)})`, C.tokens, { dim: true })}`;
   }
   return head;
 }
 
-function formatCacheSeg(avgCache, lastCache, coldStart, depth, { compact = false } = {}) {
-  const lbl = paintRgb(compact ? 'C̄' : '缓存均值', PALETTE.gold, depth);
-  const avgStr = paintRgb(`${Math.round(avgCache)}%`, cacheRgb(avgCache), depth, { bold: true });
+function formatCacheSeg(avgCache, lastCache, coldStart, C, { compact = false } = {}) {
+  const lbl = compact ? 'C̄' : '缓存均值';
+  const rounded = Math.round(avgCache);
+  const head = rounded < 40
+    ? `${paint(lbl, C.tokens)} ${paint(`${rounded}%`, C.barDanger)}`
+    : paint(`${lbl} ${rounded}%`, C.tokens);
   const turnTail = !compact && lastCache != null
-    ? ` ${paintRgb('(本轮 ', PALETTE.slate, depth)}${paintRgb(`${Math.round(lastCache)}%`, cacheRgb(lastCache), depth)}${paintRgb(')', PALETTE.slate, depth)}`
+    ? ` ${paint(`(本轮 ${Math.round(lastCache)}%)`, C.tokens, { dim: true })}`
     : '';
-  const coldTag = coldStart ? paintRgb(' ❄', PALETTE.cyan, depth, { bold: true }) : '';
-  return `${lbl} ${avgStr}${turnTail}${coldTag}`;
+  const coldTag = coldStart ? paint(' ❄', C.barDanger) : '';
+  return `${head}${turnTail}${coldTag}`;
 }
 
-function formatTpsSeg(tps, depth) {
-  return `${paintRgb(String(tps), PALETTE.cyan, depth, { bold: true })} ${paintRgb('t/s', PALETTE.aquaSoft, depth)}`;
+function formatTpsSeg(tps, C) {
+  return paint(`${tps} t/s`, C.tokens);
 }
 
 export function renderStatusLine(stdinPayload, summary, options = {}) {
@@ -439,41 +288,46 @@ export function renderStatusLine(stdinPayload, summary, options = {}) {
     ? Boolean(options.color)
     : (summary?.color !== undefined ? Boolean(summary.color) : true);
   const depth = detectColorDepth(useColor, options.colorDepth);
+  const themeName = resolveThemeName({
+    explicitTheme: options.theme,
+    summaryTheme: summary?.theme
+  });
+  const C = resolveStatuslineColors(themeName, depth);
   const nowSec = options.nowSec || Math.floor(Date.now() / 1000);
 
-  const sep = paintRgb(' · ', PALETTE.muted, depth);
-  const pipe = paintRgb(' │ ', PALETTE.muted, depth);
+  const sep = paint(' · ', C.muted);
+  const pipe = paint(' │ ', C.muted);
   const tierMode = view.width >= 105 ? 'wide' : (view.width >= 75 ? 'mid' : 'narrow');
 
   const gPool = view.pools.find((p) => p.id === 'gemini');
   const ngPool = view.pools.find((p) => p.id === 'non_gemini');
 
-  const ctxLabel = paintGradient('Ctx', CTX_GRADIENT, depth, { bold: true });
+  const ctxLabel = paint('Ctx', C.label);
   const pctStr = view.usedPct != null
-    ? paintRgb(`${Math.round(view.usedPct)}%`, contextRgb(view.usedPct), depth, { bold: true })
-    : paintRgb('--', PALETTE.slate, depth);
+    ? paint(`${Math.round(view.usedPct)}%`, view.usedPct >= 80 ? C.barDanger : C.label)
+    : paint('--', C.muted);
   const tokPair = view.usedTokens > 0
-    ? paintRgb(`(${formatTokensCompact(view.usedTokens)}/${formatTokensCompact(view.windowSize)})`, PALETTE.slate, depth)
+    ? paint(`(${formatTokensCompact(view.usedTokens)}/${formatTokensCompact(view.windowSize)})`, C.label, { dim: true })
     : '';
 
   // 1-line compact mode
   if (linesMode === 1) {
     const segs = [];
     if (tierMode === 'wide') {
-      segs.push(`${ctxLabel} ${buildBar(view.usedPct ?? 0, 8, depth)} ${pctStr}${tokPair ? ` ${tokPair}` : ''}`);
-      if (view.avgCache != null) segs.push(formatCacheSeg(view.avgCache, null, view.coldStart, depth, { compact: false }));
-      if (view.todayTokens > 0 || view.todayCost > 0) segs.push(formatTodaySeg(view.todayTokens, view.todayCost, depth));
-      const gp = formatPoolSegment(gPool, { compact: true, depth, nowSec });
-      const ngp = formatPoolSegment(ngPool, { compact: true, depth, nowSec });
+      segs.push(`${ctxLabel} ${buildBar(view.usedPct ?? 0, 8, C)} ${pctStr}${tokPair ? ` ${tokPair}` : ''}`);
+      if (view.avgCache != null) segs.push(formatCacheSeg(view.avgCache, null, view.coldStart, C, { compact: false }));
+      if (view.todayTokens > 0 || view.todayCost > 0) segs.push(formatTodaySeg(view.todayTokens, view.todayCost, C));
+      const gp = formatPoolSegment(gPool, { compact: true, C, nowSec });
+      const ngp = formatPoolSegment(ngPool, { compact: true, C, nowSec });
       if (gp) segs.push(gp);
       if (ngp) segs.push(ngp);
-      const cb = formatColabCompact(view.colab, { tierMode: 'narrow', depth });
+      const cb = formatColabCompact(view.colab, { tierMode: 'narrow', C });
       if (cb) segs.push(cb);
     } else {
       segs.push(`${ctxLabel} ${pctStr}`);
-      if (view.avgCache != null) segs.push(formatCacheSeg(view.avgCache, null, view.coldStart, depth, { compact: true }));
-      if (view.todayTokens > 0) segs.push(formatTodaySeg(view.todayTokens, view.todayCost, depth, { showCost: false }));
-      const gp = formatPoolSegment(gPool, { compact: true, depth, nowSec });
+      if (view.avgCache != null) segs.push(formatCacheSeg(view.avgCache, null, view.coldStart, C, { compact: true }));
+      if (view.todayTokens > 0) segs.push(formatTodaySeg(view.todayTokens, view.todayCost, C, { showCost: false }));
+      const gp = formatPoolSegment(gPool, { compact: true, C, nowSec });
       if (gp) segs.push(gp);
     }
     return segs.join(sep);
@@ -484,15 +338,15 @@ export function renderStatusLine(stdinPayload, summary, options = {}) {
     const l1 = [];
     const barW = tierMode === 'wide' ? 10 : (tierMode === 'mid' ? 6 : 0);
     l1.push(barW > 0
-      ? `${ctxLabel} ${buildBar(view.usedPct ?? 0, barW, depth)} ${pctStr}${tokPair ? ` ${tokPair}` : ''}`
+      ? `${ctxLabel} ${buildBar(view.usedPct ?? 0, barW, C)} ${pctStr}${tokPair ? ` ${tokPair}` : ''}`
       : `${ctxLabel} ${pctStr}`
     );
     if (view.avgCache != null) {
-      l1.push(formatCacheSeg(view.avgCache, tierMode === 'wide' ? view.lastCache : null, view.coldStart, depth, { compact: tierMode !== 'wide' }));
+      l1.push(formatCacheSeg(view.avgCache, tierMode === 'wide' ? view.lastCache : null, view.coldStart, C, { compact: tierMode !== 'wide' }));
     }
-    if (tierMode !== 'narrow' && view.tps) l1.push(formatTpsSeg(view.tps, depth));
+    if (tierMode !== 'narrow' && view.tps) l1.push(formatTpsSeg(view.tps, C));
     if (view.sessCost > 0) {
-      l1.push(formatSessionCostSeg(view.sessCost, depth, {
+      l1.push(formatSessionCostSeg(view.sessCost, C, {
         labeled: tierMode === 'wide',
         saved: tierMode === 'wide' ? view.sessSaved : 0
       }));
@@ -501,21 +355,21 @@ export function renderStatusLine(stdinPayload, summary, options = {}) {
     const l2Blocks = [];
     const usageBits = [];
     if (view.todayTokens > 0 || view.todayCost > 0) {
-      usageBits.push(formatTodaySeg(view.todayTokens, view.todayCost, depth));
+      usageBits.push(formatTodaySeg(view.todayTokens, view.todayCost, C));
     }
     if (tierMode === 'wide' && (view.monthTokens > 0 || view.monthCost > 0)) {
-      usageBits.push(formatMonthSeg(view.monthTokens, view.monthCost, depth));
+      usageBits.push(formatMonthSeg(view.monthTokens, view.monthCost, C));
     }
     if (usageBits.length) l2Blocks.push(usageBits.join(sep));
-    const gp = formatPoolSegment(gPool, { compact: tierMode !== 'wide', depth, nowSec });
-    const ngp = formatPoolSegment(ngPool, { compact: tierMode !== 'wide', depth, nowSec });
+    const gp = formatPoolSegment(gPool, { compact: tierMode !== 'wide', C, nowSec });
+    const ngp = formatPoolSegment(ngPool, { compact: tierMode !== 'wide', C, nowSec });
     if (gp) l2Blocks.push(gp);
     if (ngp) l2Blocks.push(ngp);
 
     const out = [l1.join(sep)];
     if (l2Blocks.length) out.push(l2Blocks.join(pipe));
     if (view.colab) {
-      const l3 = formatColabDetailLine(view.colab, depth);
+      const l3 = formatColabDetailLine(view.colab, C);
       if (l3) out.push(l3);
     }
     return out.join('\n');
@@ -524,32 +378,32 @@ export function renderStatusLine(stdinPayload, summary, options = {}) {
   // Default 2-line layered mode
   const l1 = [];
   if (tierMode === 'wide') {
-    l1.push(`${ctxLabel} ${buildBar(view.usedPct ?? 0, 8, depth)} ${pctStr}${tokPair ? ` ${tokPair}` : ''}`);
+    l1.push(`${ctxLabel} ${buildBar(view.usedPct ?? 0, 8, C)} ${pctStr}${tokPair ? ` ${tokPair}` : ''}`);
     if (view.avgCache != null) {
-      l1.push(formatCacheSeg(view.avgCache, view.lastCache, view.coldStart, depth, { compact: false }));
+      l1.push(formatCacheSeg(view.avgCache, view.lastCache, view.coldStart, C, { compact: false }));
     }
-    if (view.tps) l1.push(formatTpsSeg(view.tps, depth));
-    if (view.sessCost > 0) l1.push(formatSessionCostSeg(view.sessCost, depth, { labeled: true }));
+    if (view.tps) l1.push(formatTpsSeg(view.tps, C));
+    if (view.sessCost > 0) l1.push(formatSessionCostSeg(view.sessCost, C, { labeled: true }));
     if (view.todayTokens > 0 || view.todayCost > 0) {
-      l1.push(formatTodaySeg(view.todayTokens, view.todayCost, depth));
+      l1.push(formatTodaySeg(view.todayTokens, view.todayCost, C));
     }
   } else if (tierMode === 'mid') {
-    l1.push(`${ctxLabel} ${buildBar(view.usedPct ?? 0, 6, depth)} ${pctStr}${tokPair ? ` ${tokPair}` : ''}`);
-    if (view.avgCache != null) l1.push(formatCacheSeg(view.avgCache, null, view.coldStart, depth, { compact: true }));
-    if (view.sessCost > 0) l1.push(formatSessionCostSeg(view.sessCost, depth, { labeled: false }));
-    if (view.todayTokens > 0) l1.push(formatTodaySeg(view.todayTokens, view.todayCost, depth, { showCost: false }));
+    l1.push(`${ctxLabel} ${buildBar(view.usedPct ?? 0, 6, C)} ${pctStr}${tokPair ? ` ${tokPair}` : ''}`);
+    if (view.avgCache != null) l1.push(formatCacheSeg(view.avgCache, null, view.coldStart, C, { compact: true }));
+    if (view.sessCost > 0) l1.push(formatSessionCostSeg(view.sessCost, C, { labeled: false }));
+    if (view.todayTokens > 0) l1.push(formatTodaySeg(view.todayTokens, view.todayCost, C, { showCost: false }));
   } else {
     l1.push(`${ctxLabel} ${pctStr}`);
-    if (view.avgCache != null) l1.push(formatCacheSeg(view.avgCache, null, view.coldStart, depth, { compact: true }));
-    if (view.todayTokens > 0) l1.push(formatTodaySeg(view.todayTokens, view.todayCost, depth, { showCost: false }));
+    if (view.avgCache != null) l1.push(formatCacheSeg(view.avgCache, null, view.coldStart, C, { compact: true }));
+    if (view.todayTokens > 0) l1.push(formatTodaySeg(view.todayTokens, view.todayCost, C, { showCost: false }));
   }
 
   const l2Blocks = [];
-  const gp = formatPoolSegment(gPool, { compact: tierMode !== 'wide', depth, nowSec });
-  const ngp = formatPoolSegment(ngPool, { compact: tierMode !== 'wide', depth, nowSec });
+  const gp = formatPoolSegment(gPool, { compact: tierMode !== 'wide', C, nowSec });
+  const ngp = formatPoolSegment(ngPool, { compact: tierMode !== 'wide', C, nowSec });
   if (gp) l2Blocks.push(gp);
   if (ngp) l2Blocks.push(ngp);
-  const cb = formatColabCompact(view.colab, { tierMode, depth });
+  const cb = formatColabCompact(view.colab, { tierMode, C });
   if (cb) l2Blocks.push(cb);
 
   if (l2Blocks.length === 0) return l1.join(sep);

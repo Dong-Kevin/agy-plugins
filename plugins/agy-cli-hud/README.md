@@ -4,6 +4,7 @@
 
 - **定位分工清晰**：`agy-context-viewer` 专注 Antigravity Desktop App / IDE 的重度 WebView 分析；本插件专注 **CLI 与 Solo 原生体验**，零 WebView、零独立浮窗、零 CDP 注入。
 - **输入栏下方分层实时状态栏**：利用 `agy` CLI 官方 `statusLine` 契约，默认 **2 行分层**（可选 3 行或 1 行），按终端宽度自适应防折行，热路径零网络请求、零全盘扫描。
+- **克制多主题配色**：借鉴 `token-tracker` 视觉体系，内置 **6 套低饱和主题**（Catppuccin `mocha` 默认 / `latte` / `frappe` / `macchiato`、`nord`、`dracula`），采用同行语义统一着色与单色阈值进度条，TrueColor 精确渲染并自动降级 256 色。
 - **字节偏移增量引擎**：借鉴 `token-tracker` 的 `IncrementalJSONL` 游标思路，只解析新增字节，并按 `step_index` 去重防复算，毫秒级汇总 **当前会话平均缓存**、**今日使用量**、**本月使用量** 与 **API 等值参考 / 订阅回本**。
 - **原生双池额度**：直读 `agy` 回调中的 `gemini-5h`、`gemini-weekly`、`3p-5h`、`3p-weekly` 四桶并统一为 **「剩余 %」** 口径。
 - **Solo 原生联动**：输出原子只读快照 `~/.gemini/antigravity-cli/cache/agy-cli-hud/usage-hud.v1.json`，无缝供给 Solo 右侧原生第 4 页签 **「用量」(`⌘U`)**，并兼容 Solo 既有 `agy-statusline --forward-command` 桥接，绝不互覆配置。
@@ -33,10 +34,15 @@ agy-hud status
 # 3. 切换为 3 行分层（第 3 行展示 Colab 实时硬件与闲置倒计时）
 agy-hud config set lines 3
 
-# 4. 在非 Solo 终端下使用轻量实时看板
+# 4. 查看、预览或切换配色主题（支持 mocha/latte/frappe/macchiato/nord/dracula）
+agy-hud theme list
+agy-hud theme preview nord
+agy-hud theme set nord
+
+# 5. 在非 Solo 终端下使用轻量实时看板
 agy-hud watch
 
-# 5. 连接 Google Colab（使用你自己的 Google Cloud OAuth 桌面凭据）
+# 6. 连接 Google Colab（使用你自己的 Google Cloud OAuth 桌面凭据）
 agy-hud colab import-secret ./client_secret.json
 agy-hud colab login
 agy-hud colab status

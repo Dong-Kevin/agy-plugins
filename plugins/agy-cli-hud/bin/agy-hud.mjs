@@ -101,9 +101,11 @@ function handleStatuslineFast(args) {
 
   const summary = readJsonSafe(paths.summaryPath, null);
   const linesArg = parseFlagValue(args, '--lines', null);
+  const themeArg = parseFlagValue(args, '--theme', null);
   const noColor = args.includes('--no-color') || process.env.NO_COLOR !== undefined;
   const output = renderStatusLine(stdinPayload, summary, {
     lines: linesArg ? Number(linesArg) : undefined,
+    theme: themeArg || undefined,
     color: noColor ? false : undefined
   });
 
@@ -367,7 +369,10 @@ async function runColabCommand(args) {
 
 async function runConfigCommand(args) {
   const paths = resolveHudPaths();
-  const { loadHudConfig, saveHudConfig } = await import('../lib/snapshot.mjs');
+  const [{ loadHudConfig, saveHudConfig }, { isValidTheme, normalizeThemeName, THEME_NAMES }] = await Promise.all([
+    import('../lib/snapshot.mjs'),
+    import('../lib/themes.mjs')
+  ]);
   const sub = args[0] || 'show';
   if (sub === 'show') {
     console.log(JSON.stringify(loadHudConfig(paths), null, 2));
@@ -376,10 +381,18 @@ async function runConfigCommand(args) {
   if (sub === 'set') {
     const key = args[1];
     const val = args[2];
-    if (!key || val === undefined) throw new Error('用法：agy-hud config set <lines|scope|color|plan_tier|monthly_paid_usd> <value>');
+    if (!key || val === undefined) {
+      throw new Error('用法：agy-hud config set <lines|scope|color|theme|plan_tier|monthly_paid_usd> <value>');
+    }
     const patch = {};
     if (key === 'lines') patch.lines = Number(val);
     else if (key === 'color') patch.color = val === 'true' || val === '1';
+    else if (key === 'theme') {
+      if (!isValidTheme(val)) {
+        throw new Error(`未知主题：${val}（可选：${THEME_NAMES.join(', ')}）`);
+      }
+      patch.theme = normalizeThemeName(val);
+    }
     else if (key === 'monthly_paid_usd') patch.monthly_paid_usd = val === 'null' || val === 'auto' ? null : Number(val);
     else patch[key] = val;
     const saved = saveHudConfig(patch, paths);
@@ -388,6 +401,135 @@ async function runConfigCommand(args) {
     return;
   }
   throw new Error(`未知 config 子命令：${sub}`);
+}
+
+function buildThemeSample(themeName, { color = true, colorDepth = null, lines = 2 } = {}) {
+  const nowSec = 1764150000;
+  const samplePayload = {
+    conversation_id: 'sample',
+    terminal_width: 120,
+    context_window: {
+      context_window_size: 1_000_000,
+      used_percentage: 42,
+      current_usage: { input_tokens: 25200, cache_read_input_tokens: 394800, cache_creation_input_tokens: 0 }
+    },
+    cost: { total_usd: 1.24 },
+    quota: {
+      'gemini-5h': { remaining_fraction: 0.78, resets_at: nowSec + 8040 },
+      'gemini-weekly': { remaining_fraction: 0.64, resets_at: nowSec + 280000 },
+      '3p-5h': { remaining_fraction: 0.92, resets_at: nowSec + 17460 },
+      '3p-weekly': { remaining_fraction: 0.88, resets_at: nowSec + 471600 }
+    }
+  };
+  const sampleSummary = {
+    lines,
+    color,
+    theme: themeName,
+    session_id: 'sample',
+    avg_cache: 86,
+    last_cache: 94,
+    tps: 58,
+    sess_cost: 1.24,
+    sess_saved: 4.8,
+    today_tokens: 2_420_000,
+    today_cost: 6.8,
+    month_tokens: 68_500_000,
+    month_cost: 192.4,
+    colab: { tier: 'PRO+', cu: 84.2, rate: 13.1, hrs: 6.4, rt: { gpu: 'A100', ram_u: 14, ram_t: 83, vram_u: 22, vram_t: 40, idle_m: 72 } }
+  };
+  return renderStatusLine(samplePayload, sampleSummary, {
+    lines,
+    color,
+    colorDepth: colorDepth || undefined,
+    theme: themeName,
+    nowSec
+  });
+}
+
+async function runThemeCommand(args) {
+  const paths = resolveHudPaths();
+  const [{ loadHudConfig, saveHudConfig }, themes] = await Promise.all([
+    import('../lib/snapshot.mjs'),
+    import('../lib/themes.mjs')
+  ]);
+  const sub = args[0] && !args[0].startsWith('--') ? args[0] : 'show';
+  const asJson = args.includes('--json');
+  const noColor = args.includes('--no-color') || process.env.NO_COLOR !== undefined;
+  const depth = themes.detectColorDepth(!noColor);
+  const cfg = loadHudConfig(paths);
+  const envTheme = themes.isValidTheme(process.env.AGY_HUD_THEME) ? themes.normalizeThemeName(process.env.AGY_HUD_THEME) : null;
+  const active = envTheme || cfg.theme || themes.DEFAULT_THEME;
+  const source = envTheme ? 'AGY_HUD_THEME' : (existsSync(paths.configPath) ? 'config' : 'default');
+
+  if (sub === 'show') {
+    if (asJson) {
+      console.log(JSON.stringify({ theme: active, source, available: themes.THEME_NAMES }, null, 2));
+      return;
+    }
+    const spec = themes.getThemeSpec(active);
+    console.log(`当前主题: ${active} (${spec.note}) [来源: ${source}]`);
+    console.log(`色板:     ${themes.formatThemeSwatches(active, depth)}`);
+    console.log('');
+    console.log(buildThemeSample(active, { color: !noColor, lines: cfg.lines }));
+    return;
+  }
+
+  if (sub === 'list') {
+    if (asJson) {
+      console.log(JSON.stringify({
+        active,
+        source,
+        themes: themes.THEME_NAMES.map((name) => ({
+          name,
+          is_light: themes.THEMES[name].isLight,
+          note: themes.THEMES[name].note,
+          base: themes.THEMES[name].base
+        }))
+      }, null, 2));
+      return;
+    }
+    for (const name of themes.THEME_NAMES) {
+      const mark = name === active ? '›' : ' ';
+      const pad = name.padEnd(10, ' ');
+      const swatches = themes.formatThemeSwatches(name, depth);
+      console.log(`${mark} ${pad} ${swatches}  ${themes.THEMES[name].note}`);
+    }
+    return;
+  }
+
+  if (sub === 'preview') {
+    const target = args[1] && !args[1].startsWith('--') ? args[1] : null;
+    if (target && !themes.isValidTheme(target)) {
+      throw new Error(`未知主题：${target}（可选：${themes.THEME_NAMES.join(', ')}）`);
+    }
+    const list = target ? [themes.normalizeThemeName(target)] : themes.THEME_NAMES;
+    for (let i = 0; i < list.length; i += 1) {
+      const name = list[i];
+      if (i > 0) console.log('');
+      console.log(`[${name}] ${themes.THEMES[name].note}  ${themes.formatThemeSwatches(name, depth)}`);
+      console.log(buildThemeSample(name, { color: !noColor, lines: cfg.lines }));
+    }
+    return;
+  }
+
+  if (sub === 'set') {
+    const target = args[1];
+    if (!target || !themes.isValidTheme(target)) {
+      throw new Error(`用法：agy-hud theme set <${themes.THEME_NAMES.join('|')}>`);
+    }
+    const normalized = themes.normalizeThemeName(target);
+    const saved = saveHudConfig({ theme: normalized }, paths);
+    await runSync(['--quiet']);
+    if (asJson) {
+      console.log(JSON.stringify({ ok: true, theme: saved.theme }, null, 2));
+      return;
+    }
+    console.log(`[agy-hud] 已切换主题为 ${saved.theme}（${themes.THEMES[saved.theme].note}）。`);
+    console.log(buildThemeSample(saved.theme, { color: !noColor, lines: saved.lines }));
+    return;
+  }
+
+  throw new Error(`未知 theme 子命令：${sub}（支持：show | list | preview [name] | set <name>）`);
 }
 
 async function runInstallStatusline(args) {
@@ -416,14 +558,15 @@ function printHelp() {
   console.log(`agy-hud — 轻量低延迟 agy CLI & Solo 监控命令行
 
 用法:
-  agy-hud statusline [--lines 1|2|3] [--no-color]  读取 agy stdin 输出分层状态栏（热路径）
+  agy-hud statusline [--lines 1|2|3] [--theme <name>] [--no-color]  读取 agy stdin 输出分层状态栏（热路径）
   agy-hud sync [--quiet] [--with-colab]            执行 IncrementalJSONL 增量聚合与快照刷新
   agy-hud snapshot [--refresh] [--with-colab]      输出 usage-hud.v1.json 机读快照
   agy-hud status [--json] [--with-colab]           查看当前会话/今日/本月/双池额度/Colab 概览
   agy-hud watch [--interval 1500]                  非 Solo 终端下的轻量实时看板
+  agy-hud theme [list|preview [name]|set <name>]   查看、预览或切换配色主题（mocha/latte/frappe/macchiato/nord/dracula）
   agy-hud install-statusline [--lines 2]           安全写入 agy settings.json（自动兼容 Solo 桥接）
   agy-hud install-statusline --uninstall           移除 HUD 底栏并完好保留 Solo 桥接
-  agy-hud config show | set <key> <value>          配置分层行数（1/2/3）、统计范围、月费折算
+  agy-hud config show | set <key> <value>          配置分层行数（1/2/3）、主题、统计范围、月费折算
   agy-hud colab <import-secret|login|logout|status|keepalive|release|snipe>
 `);
 }
@@ -471,6 +614,10 @@ async function main() {
   }
   if (cmd === 'install-statusline') {
     await runInstallStatusline(rest);
+    return;
+  }
+  if (cmd === 'theme') {
+    await runThemeCommand(rest);
     return;
   }
   if (cmd === 'config') {

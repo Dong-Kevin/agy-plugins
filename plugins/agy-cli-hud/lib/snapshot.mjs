@@ -7,11 +7,13 @@ import { existsSync } from 'node:fs';
 import { readJsonSafe, resolveHudPaths, writeJsonAtomic } from './paths.mjs';
 import { extractEffortFromModel, formatModelDisplay, normalizeModelId, resolvePlanMonthlyUsd } from './pricing.mjs';
 import { normalizeAgyQuotaMap, normalizeHostCacheQuotas } from './quota.mjs';
+import { DEFAULT_THEME, normalizeThemeName } from './themes.mjs';
 
 export const DEFAULT_CONFIG = {
   lines: 2, // 1 | 2 | 3
   scope: 'cli_only', // cli_only | all
   color: true,
+  theme: DEFAULT_THEME, // mocha | latte | frappe | macchiato | nord | dracula
   plan_tier: 'auto', // auto | free | plus | pro | ultra
   monthly_paid_usd: null,
   sync_interval_ms: 2000,
@@ -25,6 +27,7 @@ export function loadHudConfig(paths = resolveHudPaths()) {
   if (![1, 2, 3].includes(Number(cfg.lines))) cfg.lines = 2;
   else cfg.lines = Number(cfg.lines);
   if (!['cli_only', 'all'].includes(cfg.scope)) cfg.scope = 'cli_only';
+  cfg.theme = normalizeThemeName(cfg.theme, DEFAULT_THEME);
   return cfg;
 }
 
@@ -34,6 +37,7 @@ export function saveHudConfig(partial, paths = resolveHudPaths()) {
   if (![1, 2, 3].includes(Number(next.lines))) next.lines = 2;
   else next.lines = Number(next.lines);
   if (!['cli_only', 'all'].includes(next.scope)) next.scope = 'cli_only';
+  next.theme = normalizeThemeName(next.theme, DEFAULT_THEME);
   writeJsonAtomic(paths.configPath, next, { mode: 0o600, pretty: true });
   return next;
 }
@@ -332,6 +336,7 @@ export function composeSnapshot({
     updated_at: snapshot.updated_at,
     lines: cfg.lines,
     color: cfg.color,
+    theme: cfg.theme,
     session_id: activeSession.conversation_id,
     ctx_pct: activeSession.context_used_percent,
     ctx_used: activeSession.context_used_tokens,

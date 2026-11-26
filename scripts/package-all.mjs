@@ -205,6 +205,7 @@ function packageAgyCliHud() {
     ['lib/incremental.mjs', false],
     ['lib/colab.mjs', false],
     ['lib/snapshot.mjs', false],
+    ['lib/themes.mjs', false],
     ['lib/statusline.mjs', false]
   ];
 
