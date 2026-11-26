@@ -56,26 +56,35 @@ function persistLiveStdinFast(payload, paths) {
     const cw = payload.context_window && typeof payload.context_window === 'object' ? payload.context_window : null;
     const cu = cw?.current_usage && typeof cw.current_usage === 'object' ? cw.current_usage : null;
     const curIn = Math.max(0, Number(cu?.input_tokens || 0) || 0);
-    const curCache = Math.max(0, Number(cu?.cache_read_input_tokens || 0) || 0);
-    const curCacheW = Math.max(0, Number(cu?.cache_creation_input_tokens || 0) || 0);
+    const curCache = Math.max(0, Number(cu?.cache_read_input_tokens ?? cu?.cache_read_tokens ?? 0) || 0);
+    const curCacheW = Math.max(0, Number(cu?.cache_creation_input_tokens ?? cu?.cache_write_tokens ?? 0) || 0);
     const curPrompt = curIn + curCache + curCacheW;
+    const windowSize = Number(cw?.context_window_size) > 0 ? Number(cw.context_window_size) : null;
+    const usedPct = typeof cw?.used_percentage === 'number' && Number.isFinite(cw.used_percentage)
+      ? Number(Math.max(0, Math.min(100, cw.used_percentage)).toFixed(1))
+      : (windowSize && curPrompt > 0 ? Number(Math.min(100, (curPrompt / windowSize) * 100).toFixed(1)) : null);
+    const contextUsedTokens = curPrompt > 0
+      ? curPrompt
+      : (usedPct === 0 ? 0 : (windowSize && usedPct !== null ? Math.round((usedPct / 100) * windowSize) : null));
     const model = payload.model && typeof payload.model === 'object' ? payload.model : {};
+    const rawSessionCost = payload.cost?.total_cost_usd ?? payload.cost?.total_usd;
     const live = {
       observed_at: Math.floor(Date.now() / 1000),
+      has_stdin_payload: true,
       conversation_id: String(payload.conversation_id || payload.session_id || '').trim() || null,
       agent_state: typeof payload.agent_state === 'string' ? payload.agent_state : null,
       plan_tier: typeof payload.plan_tier === 'string' ? payload.plan_tier : null,
       model_id: String(model.id || '').trim() || null,
       model_display: String(model.display_name || '').trim() || null,
       effort: String(model.effort || '').trim() || null,
-      context_used_tokens: curPrompt > 0 ? curPrompt : null,
-      context_window_size: Number(cw?.context_window_size) > 0 ? Number(cw.context_window_size) : null,
-      context_used_percent: typeof cw?.used_percentage === 'number' ? Number(cw.used_percentage.toFixed(1)) : null,
-      total_input_tokens: Number.isFinite(Number(cw?.total_input_tokens)) ? Number(cw.total_input_tokens) : null,
-      total_output_tokens: Number.isFinite(Number(cw?.total_output_tokens)) ? Number(cw.total_output_tokens) : null,
+      context_used_tokens: contextUsedTokens,
+      context_window_size: windowSize,
+      context_used_percent: usedPct,
+      total_input_tokens: cw?.total_input_tokens != null && Number.isFinite(Number(cw.total_input_tokens)) ? Number(cw.total_input_tokens) : null,
+      total_output_tokens: cw?.total_output_tokens != null && Number.isFinite(Number(cw.total_output_tokens)) ? Number(cw.total_output_tokens) : null,
       last_turn_cache_hit_percent: curPrompt > 0 ? Number(((curCache / curPrompt) * 100).toFixed(1)) : null,
       cold_start_alert: Boolean(curPrompt >= 8000 && (curCache / curPrompt) * 100 < 25),
-      session_cost_usd: typeof payload.cost?.total_usd === 'number' ? Number(payload.cost.total_usd.toFixed(4)) : null,
+      session_cost_usd: typeof rawSessionCost === 'number' && Number.isFinite(rawSessionCost) ? Number(rawSessionCost.toFixed(4)) : null,
       raw_quota: payload.quota && typeof payload.quota === 'object' ? payload.quota : null
     };
     writeJsonAtomic(paths.liveSessionPath, live, { mode: 0o600, pretty: false });
@@ -105,7 +114,18 @@ function handleStatuslineFast(args) {
   if (stdinPayload) {
     persistLiveStdinFast(stdinPayload, paths);
   }
-  maybeSpawnBackgroundSync(paths, Number(summary?.sync_interval_ms) || 2000);
+  const curConvId = stdinPayload && typeof stdinPayload === 'object'
+    ? (String(stdinPayload.conversation_id || stdinPayload.session_id || '').trim() || null)
+    : undefined;
+  const needsImmediateSync = Boolean(
+    !summary ||
+    (stdinPayload && (
+      curConvId
+        ? (summary.session_id !== curConvId && !summary.sessions?.[curConvId])
+        : summary.session_id != null
+    ))
+  );
+  maybeSpawnBackgroundSync(paths, needsImmediateSync ? 400 : (Number(summary?.sync_interval_ms) || 2000));
 }
 
 async function runSync(args) {
@@ -119,7 +139,7 @@ async function runSync(args) {
   const cfg = loadHudConfig(paths);
   const scopeArg = parseFlagValue(args, '--scope', null);
   const sessionId = parseFlagValue(args, '--session', null);
-  const withColab = args.includes('--with-colab');
+  const withColab = args.includes('--with-colab') || args.includes('--colab');
   const quiet = args.includes('--quiet');
 
   const inc = runIncrementalSync({ scope: scopeArg || cfg.scope, paths });
@@ -249,7 +269,7 @@ async function runColabCommand(args) {
     return;
   }
   if (sub === 'status') {
-    const status = await colab.refreshColabStatus({ paths, force: args.includes('--force') });
+    const status = await colab.refreshColabStatus({ paths, force: args.includes('--force') || args.includes('--refresh') });
     console.log(JSON.stringify(status, null, 2));
     return;
   }
@@ -428,7 +448,7 @@ async function main() {
   if (cmd === 'snapshot') {
     const paths = resolveHudPaths();
     if (rest.includes('--refresh') || !existsSync(paths.snapshotPath)) {
-      await runSync(['--quiet', ...(rest.includes('--with-colab') ? ['--with-colab'] : [])]);
+      await runSync(['--quiet', ...(rest.includes('--with-colab') || rest.includes('--colab') ? ['--with-colab'] : [])]);
     }
     const snap = readJsonSafe(paths.snapshotPath, null);
     process.stdout.write(`${JSON.stringify(snap || {}, null, 2)}\n`);
@@ -436,7 +456,7 @@ async function main() {
   }
   if (cmd === 'status') {
     const paths = resolveHudPaths();
-    await runSync(['--quiet', ...(rest.includes('--with-colab') ? ['--with-colab'] : [])]);
+    await runSync(['--quiet', ...(rest.includes('--with-colab') || rest.includes('--colab') ? ['--with-colab'] : [])]);
     const snap = readJsonSafe(paths.snapshotPath, null);
     if (rest.includes('--json')) {
       console.log(JSON.stringify(snap || {}, null, 2));

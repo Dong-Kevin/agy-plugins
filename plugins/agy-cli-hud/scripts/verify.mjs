@@ -224,7 +224,143 @@ function testDualPoolQuotaAndLayeredStatusline() {
   assert.equal(outNarrow.split('\n').length, 2);
   assert.ok(outNarrow.split('\n')[0].length < 68, `Narrow L1 should stay concise: ${outNarrow}`);
 
-  pass('Dual-pool quota normalization & 1/2/3-line width-adaptive statusLine renderer');
+  // Rainbow TrueColor & 256-color rendering checks (must emit distinct prism hues, zero raw escapes in --no-color)
+  const outTrue = renderStatusLine(stdinPayload, summary, { lines: 2, color: true, colorDepth: 'truecolor', nowSec });
+  const trueMatches = new Set(outTrue.match(/\x1b\[38;2;\d+;\d+;\d+m/g) || []);
+  assert.ok(trueMatches.size >= 8, `TrueColor rainbow mode must emit >= 8 distinct RGB stops, got ${trueMatches.size}`);
+  assert.equal(stripAnsi(outTrue), out2, 'TrueColor stripped output must match plain output exactly');
+
+  const out256 = renderStatusLine(stdinPayload, summary, { lines: 2, color: true, colorDepth: '256', nowSec });
+  const c256Matches = new Set(out256.match(/\x1b\[38;5;\d+m/g) || []);
+  assert.ok(c256Matches.size >= 6, `256-color rainbow mode must emit >= 6 distinct palette indices, got ${c256Matches.size}`);
+  assert.equal(stripAnsi(out256), out2, '256-color stripped output must match plain output exactly');
+  assert.ok(!/\x1b\[/.test(renderStatusLine(stdinPayload, summary, { lines: 2, color: false, nowSec })), 'color=false must emit zero ANSI escapes');
+
+  // Fresh startup session isolation: blank conversation_id MUST NOT inherit prior session cache/tps/cost
+  const freshStartupPayload = {
+    conversation_id: '',
+    session_id: '',
+    terminal_width: 120,
+    context_window: { context_window_size: 1_000_000, used_percentage: 0, current_usage: null },
+    cost: { total_cost_usd: 0 },
+    quota: rawQuota
+  };
+  const outFresh = stripAnsi(renderStatusLine(freshStartupPayload, summary, { lines: 2, color: false, nowSec }));
+  const freshRows = outFresh.split('\n');
+  assert.equal(freshRows.length, 2);
+  assert.ok(freshRows[0].includes('0%') && freshRows[0].includes('今日 2.42M'), `Fresh startup must keep 0% Ctx & global today rollup: ${freshRows[0]}`);
+  assert.ok(!freshRows[0].includes('缓存均值') && !freshRows[0].includes('t/s') && !freshRows[0].includes('本会话'), `Fresh startup must NEVER leak prior session cache/tps/cost: ${freshRows[0]}`);
+  assert.ok(freshRows[1].includes('Gemini 5h 余78%') && freshRows[1].includes('非Gemini 5h 余92%'), `Fresh startup must keep live dual-pool quotas: ${freshRows[1]}`);
+
+  // Brand-new conversation_id not present in summary MUST NOT inherit prior session metrics
+  const brandNewConvPayload = { ...freshStartupPayload, conversation_id: '00000000-0000-4000-8000-000000000099', session_id: '00000000-0000-4000-8000-000000000099' };
+  const outNewConv = stripAnsi(renderStatusLine(brandNewConvPayload, summary, { lines: 2, color: false, nowSec }));
+  assert.ok(!outNewConv.includes('缓存均值') && !outNewConv.includes('58.2') && !outNewConv.includes('$1.24'), `Brand-new convId must not leak prior session stats: ${outNewConv}`);
+
+  pass('Dual-pool quota normalization, rainbow palette & fresh-session isolation statusLine renderer');
+}
+
+function testCrossSessionSnapshotIsolation() {
+  const work = mkdtempSync(join(tmpdir(), 'agy-hud-iso-'));
+  const prevHome = process.env.AGY_HUD_HOME;
+  process.env.AGY_HUD_HOME = work;
+  try {
+    const paths = resolveHudPaths();
+    const convA = '00000000-0000-4000-8000-00000000000a';
+    const convB = '00000000-0000-4000-8000-00000000000b';
+    const convNew = '00000000-0000-4000-8000-00000000000c';
+
+    const dirA = join(paths.cliBrainDir, convA, '.system_generated', 'logs');
+    const dirB = join(paths.cliBrainDir, convB, '.system_generated', 'logs');
+    mkdirSync(dirA, { recursive: true });
+    mkdirSync(dirB, { recursive: true });
+
+    writeFileSync(
+      join(dirA, 'transcript.jsonl'),
+      [
+        JSON.stringify({ step_index: 1, type: 'USER_INPUT', created_at: '2026-11-26T10:00:00Z' }),
+        JSON.stringify({ step_index: 2, type: 'PLANNER_RESPONSE', created_at: '2026-11-26T10:00:10Z', model: 'gemini-4-neon-xhigh', input_tokens: 60000, cache_read_tokens: 40000, output_tokens: 1428 })
+      ].join('\n') + '\n',
+      'utf8'
+    );
+    writeFileSync(
+      join(dirB, 'transcript.jsonl'),
+      [
+        JSON.stringify({ step_index: 1, type: 'USER_INPUT', created_at: '2026-11-26T10:05:00Z' }),
+        JSON.stringify({ step_index: 2, type: 'PLANNER_RESPONSE', created_at: '2026-11-26T10:05:20Z', model: 'gemini-4-neon-xhigh', input_tokens: 10000, cache_read_tokens: 90000, output_tokens: 1000 })
+      ].join('\n') + '\n',
+      'utf8'
+    );
+
+    const now = new Date('2026-11-26T10:06:00Z');
+    const inc = runIncrementalSync({ scope: 'cli_only', paths, now });
+    const nowSec = Math.floor(Date.now() / 1000);
+
+    // 1) Fresh uninitialized CLI session (blank conversation_id) must NOT pull convA/convB into active_session
+    const { snapshot: snapBlank, summary: sumBlank } = composeSnapshot({
+      incrementalResult: inc,
+      buildSessionFn: buildSessionMetricsFromIncremental,
+      liveFacts: {
+        observed_at: nowSec,
+        has_stdin_payload: true,
+        conversation_id: null,
+        context_used_tokens: 0,
+        context_window_size: 1_000_000,
+        context_used_percent: 0,
+        last_turn_cache_hit_percent: null,
+        session_cost_usd: 0
+      },
+      paths
+    });
+    assert.equal(snapBlank.active_session.conversation_id, null);
+    assert.equal(snapBlank.active_session.session_avg_cache_hit_percent, null);
+    assert.equal(snapBlank.active_session.output_tps, null);
+    assert.equal(snapBlank.active_session.session_cost_usd, 0);
+    assert.equal(sumBlank.avg_cache, null);
+    assert.equal(sumBlank.tps, null);
+    assert.equal(sumBlank.sess_cost, 0);
+    assert.ok(statSync(paths.summaryPath).size < 4096, 'summary with multi-session map must stay < 4KB');
+
+    // 2) Brand-new conversation_id before first transcript turn must NOT fall back to latestSessionState
+    const { snapshot: snapNew, summary: sumNew } = composeSnapshot({
+      incrementalResult: inc,
+      buildSessionFn: buildSessionMetricsFromIncremental,
+      liveFacts: {
+        observed_at: nowSec,
+        has_stdin_payload: true,
+        conversation_id: convNew,
+        context_used_tokens: 0,
+        context_window_size: 1_000_000,
+        context_used_percent: 0,
+        last_turn_cache_hit_percent: null,
+        session_cost_usd: 0
+      },
+      paths
+    });
+    assert.equal(snapNew.active_session.conversation_id, convNew);
+    assert.equal(snapNew.active_session.session_avg_cache_hit_percent, null);
+    assert.equal(snapNew.active_session.output_tps, null);
+    assert.equal(snapNew.active_session.session_cost_usd, 0);
+
+    // 3) Concurrent multi-session lookup: both convA and convB resolve their OWN stats from sumNew.sessions
+    const outA = stripAnsi(renderStatusLine({ conversation_id: convA, terminal_width: 120, context_window: { context_window_size: 1_000_000, used_percentage: 10 } }, sumNew, { lines: 2, color: false }));
+    const outB = stripAnsi(renderStatusLine({ conversation_id: convB, terminal_width: 120, context_window: { context_window_size: 1_000_000, used_percentage: 10 } }, sumNew, { lines: 2, color: false }));
+    const outC = stripAnsi(renderStatusLine({ conversation_id: convNew, terminal_width: 120, context_window: { context_window_size: 1_000_000, used_percentage: 0 } }, sumNew, { lines: 2, color: false }));
+    assert.ok(outA.includes('缓存均值 40%') && outA.includes('142.8 t/s'), `convA must resolve its own 40% cache & 142.8 t/s: ${outA}`);
+    assert.ok(outB.includes('缓存均值 90%') && outB.includes('50 t/s'), `convB must resolve its own 90% cache & 50 t/s: ${outB}`);
+    assert.ok(!outC.includes('缓存均值') && !outC.includes('t/s') && !outC.includes('本会话'), `convNew must stay clean before first turn: ${outC}`);
+
+    pass('Cross-session snapshot isolation (blank convId, brand-new convId & concurrent multi-tab lookup)');
+  } finally {
+    if (prevHome === undefined) delete process.env.AGY_HUD_HOME;
+    else process.env.AGY_HUD_HOME = prevHome;
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+function assertShellSyntaxValid(command) {
+  if (process.platform === 'win32') return;
+  execFileSync('/bin/sh', ['-n', '-c', command], { stdio: 'pipe' });
 }
 
 function testSoloBridgeChaining() {
@@ -234,22 +370,87 @@ function testSoloBridgeChaining() {
   try {
     const paths = resolveHudPaths();
     mkdirSync(dirname(paths.cliSettingsPath), { recursive: true });
-    const soloCmd = '"/Applications/Solo.app/Contents/Resources/CoreRuntime/bin/cli-agents-hook" agent hook agy-statusline';
+
+    // 1) Legacy direct binary Solo bridge command
+    const soloDirectCmd = '"/Applications/Solo.app/Contents/Resources/CoreRuntime/bin/cli-agents-hook" agent hook agy-statusline';
     writeFileSync(
       paths.cliSettingsPath,
-      JSON.stringify({ statusLine: { type: 'command', command: soloCmd, enabled: true, stack_with_default: true } }, null, 2)
+      JSON.stringify({ statusLine: { type: 'command', command: soloDirectCmd, enabled: true, stack_with_default: true } }, null, 2)
     );
+    const installedDirect = configureAgyStatusLine({ hudCommand: 'agy-hud statusline', paths });
+    assert.equal(installedDirect.mode, 'solo_chained');
+    assert.ok(installedDirect.command.startsWith(soloDirectCmd), 'Must preserve direct Solo agy-statusline prefix');
+    assert.ok(installedDirect.command.includes('--forward-command') && installedDirect.command.includes('agy-hud statusline'));
+    assertShellSyntaxValid(installedDirect.command);
+    const uninstalledDirect = configureAgyStatusLine({ uninstall: true, paths });
+    assert.equal(uninstalledDirect.mode, 'solo_preserved');
+    assert.equal(uninstalledDirect.command, soloDirectCmd, 'Uninstall must restore exact direct Solo bridge command');
 
-    const installed = configureAgyStatusLine({ hudCommand: 'agy-hud statusline', paths });
-    assert.equal(installed.mode, 'solo_chained');
-    assert.ok(installed.command.startsWith(soloCmd), 'Must preserve Solo agy-statusline prefix');
-    assert.ok(installed.command.includes('--forward-command') && installed.command.includes('agy-hud statusline'));
+    // 2) Canonical Solo `if ...; then ...; fi` surface wrapper (no existing forward)
+    const canonicalNoForward =
+      'if [ -n "$CLI_AGENTS_SURFACE_ID" ] && [ -x "$CLI_AGENTS_HOOK_CLI" ]; then "$CLI_AGENTS_HOOK_CLI" agent hook agy-statusline; fi';
+    const canonicalWithHud =
+      'if [ -n "$CLI_AGENTS_SURFACE_ID" ] && [ -x "$CLI_AGENTS_HOOK_CLI" ]; then "$CLI_AGENTS_HOOK_CLI" agent hook agy-statusline --forward-command \'agy-hud statusline\'; else /bin/sh -c \'agy-hud statusline\'; fi';
+    writeFileSync(
+      paths.cliSettingsPath,
+      JSON.stringify({ statusLine: { type: 'command', command: canonicalNoForward, enabled: true, stack_with_default: true } }, null, 2)
+    );
+    const installedCanon = configureAgyStatusLine({ hudCommand: 'agy-hud statusline', paths });
+    assert.equal(installedCanon.mode, 'solo_chained');
+    assert.equal(installedCanon.command, canonicalWithHud, 'Canonical Solo wrapper must match surface_hook_command("agy", forward)');
+    assertShellSyntaxValid(installedCanon.command);
 
-    const uninstalled = configureAgyStatusLine({ uninstall: true, paths });
-    assert.equal(uninstalled.mode, 'solo_preserved');
-    assert.equal(uninstalled.command, soloCmd, 'Uninstall must restore exact Solo bridge command');
+    const uninstalledCanon = configureAgyStatusLine({ uninstall: true, paths });
+    assert.equal(uninstalledCanon.mode, 'solo_preserved');
+    assert.equal(uninstalledCanon.command, canonicalNoForward, 'Uninstall must restore canonical Solo wrapper ending with ; fi');
+    assertShellSyntaxValid(uninstalledCanon.command);
 
-    pass('Solo agy-statusline --forward-command zero-conflict install & uninstall');
+    // 3) Canonical Solo wrapper with another existing --forward-command (must replace cleanly without dropping else/fi)
+    const canonicalOtherForward =
+      'if [ -n "$CLI_AGENTS_SURFACE_ID" ] && [ -x "$CLI_AGENTS_HOOK_CLI" ]; then "$CLI_AGENTS_HOOK_CLI" agent hook agy-statusline --forward-command \'agy-context statusline\'; else /bin/sh -c \'agy-context statusline\'; fi';
+    writeFileSync(
+      paths.cliSettingsPath,
+      JSON.stringify({ statusLine: { type: 'command', command: canonicalOtherForward, enabled: true, stack_with_default: true } }, null, 2)
+    );
+    const replacedForward = configureAgyStatusLine({ hudCommand: 'agy-hud statusline', paths });
+    assert.equal(replacedForward.mode, 'solo_chained');
+    assert.equal(replacedForward.command, canonicalWithHud);
+    assertShellSyntaxValid(replacedForward.command);
+
+    // 4) Self-heal truncated/broken Solo wrapper missing `; else ...; fi`
+    const brokenTruncated =
+      'if [ -n "$CLI_AGENTS_SURFACE_ID" ] && [ -x "$CLI_AGENTS_HOOK_CLI" ]; then "$CLI_AGENTS_HOOK_CLI" agent hook agy-statusline --forward-command \'agy-hud statusline\'';
+    writeFileSync(
+      paths.cliSettingsPath,
+      JSON.stringify({ statusLine: { type: 'command', command: brokenTruncated, enabled: true, stack_with_default: true } }, null, 2)
+    );
+    const healedInstall = configureAgyStatusLine({ hudCommand: 'agy-hud statusline', paths });
+    assert.equal(healedInstall.mode, 'solo_chained');
+    assert.equal(healedInstall.command, canonicalWithHud, 'Install must self-heal truncated Solo wrapper');
+    assertShellSyntaxValid(healedInstall.command);
+
+    writeFileSync(
+      paths.cliSettingsPath,
+      JSON.stringify({ statusLine: { type: 'command', command: brokenTruncated, enabled: true, stack_with_default: true } }, null, 2)
+    );
+    const healedUninstall = configureAgyStatusLine({ uninstall: true, paths });
+    assert.equal(healedUninstall.mode, 'solo_preserved');
+    assert.equal(healedUninstall.command, canonicalNoForward, 'Uninstall must self-heal truncated Solo wrapper');
+    assertShellSyntaxValid(healedUninstall.command);
+
+    // 5) Legacy Solo background wrapper upgrades cleanly
+    const legacyBg =
+      'payload=$(cat); if [ -n "$CLI_AGENTS_SURFACE_ID" ] && [ -x "$CLI_AGENTS_HOOK_CLI" ]; then (printf "%s" "$payload" | "$CLI_AGENTS_HOOK_CLI" agent hook agy-statusline >/dev/null 2>&1 &); fi; printf "%s" "$payload" | agy-context statusline';
+    writeFileSync(
+      paths.cliSettingsPath,
+      JSON.stringify({ statusLine: { type: 'command', command: legacyBg, enabled: true, stack_with_default: true } }, null, 2)
+    );
+    const upgradedBg = configureAgyStatusLine({ hudCommand: 'agy-hud statusline', paths });
+    assert.equal(upgradedBg.mode, 'solo_chained');
+    assert.equal(upgradedBg.command, canonicalWithHud);
+    assertShellSyntaxValid(upgradedBg.command);
+
+    pass('Solo agy-statusline canonical/legacy/self-heal zero-conflict install & uninstall');
   } finally {
     if (prevHome === undefined) delete process.env.AGY_HUD_HOME;
     else process.env.AGY_HUD_HOME = prevHome;
@@ -345,11 +546,21 @@ async function testMockColabApiAndPermissions() {
     const afterRelease = await releaseColabRuntime('rt-mock-1', { paths, fetchImpl: mockFetch });
     assert.equal(afterRelease.runtimes.length, 0);
 
-    // Compose full snapshot & verify CLI hot path
+    // Compose full snapshot & verify CLI hot path + Solo usage_hud.py contract fields
     const inc = runIncrementalSync({ scope: 'cli_only', paths });
-    composeSnapshot({ incrementalResult: inc, buildSessionFn: buildSessionMetricsFromIncremental, colabSummary: st, paths });
+    const { snapshot, summary } = composeSnapshot({ incrementalResult: inc, buildSessionFn: buildSessionMetricsFromIncremental, colabSummary: st, paths });
     assert.ok(existsSync(paths.snapshotPath));
     assert.ok(existsSync(paths.summaryPath));
+    assert.ok(statSync(paths.summaryPath).size < 4096, 'statusline_summary.v1.json must stay < 4KB');
+    assert.equal(snapshot.generated_at, snapshot.updated_at);
+    assert.equal(snapshot.colab.balance_cu, 84.25);
+    assert.equal(snapshot.usage.today.total_tokens, snapshot.rollups.today.tokens);
+    assert.equal(summary.colab_connected, true);
+    assert.equal(summary.colab_cu, 84.25);
+    assert.equal(summary.colab_gpu, 'A100');
+    assert.equal(summary.colab_ram_total, 83.5);
+    assert.equal(summary.colab_vram_used, 22);
+    assert.equal(summary.today_usd, summary.today_cost);
 
     const cliOut = execFileSync(process.execPath, [BIN_PATH, 'statusline', '--no-color'], {
       env: { ...process.env, AGY_HUD_NO_BG_SYNC: '1' },
@@ -357,11 +568,12 @@ async function testMockColabApiAndPermissions() {
         conversation_id: '11111111-2222-3333-4444-555555555555',
         terminal_width: 120,
         context_window: { context_window_size: 1_000_000, used_percentage: 25, current_usage: { input_tokens: 5000, cache_read_input_tokens: 45000 } },
+        cost: { total_cost_usd: 0.42 },
         quota: { 'gemini-5h': { remaining_fraction: 0.85 }, '3p-5h': { remaining_fraction: 0.95 } }
       }),
       encoding: 'utf8'
     });
-    assert.ok(cliOut.includes('25%') && cliOut.includes('Gemini') && cliOut.includes('非Gemini') && cliOut.includes('84.3 CU'));
+    assert.ok(cliOut.includes('25%') && cliOut.includes('$0.42') && cliOut.includes('Gemini') && cliOut.includes('非Gemini') && cliOut.includes('84.3 CU'));
 
     pass('Mock Colab REST API (CCU/RAM/VRAM/GPU/idle/keepalive/release), mode 0600 & CLI statusline e2e');
   } finally {
@@ -405,6 +617,7 @@ async function main() {
   testZeroCdpCompliance();
   testIncrementalJsonlAndRollup();
   testDualPoolQuotaAndLayeredStatusline();
+  testCrossSessionSnapshotIsolation();
   testSoloBridgeChaining();
   await testMockColabApiAndPermissions();
   testIsolatedInstallUninstall();
