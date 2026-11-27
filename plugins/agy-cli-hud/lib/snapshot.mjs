@@ -8,6 +8,7 @@ import { formatLocalDateKey, readJsonSafe, resolveHudPaths, writeJsonAtomic } fr
 import { extractEffortFromModel, formatModelDisplay, normalizeModelId, resolvePlanMonthlyUsd } from './pricing.mjs';
 import {
   attachWeeklyDailyToPools,
+  extractHostCacheObservations,
   extractTodayWeeklyUsageMap,
   normalizeAgyQuotaMap,
   normalizeHostCacheQuotas,
@@ -238,8 +239,22 @@ export function composeSnapshot({
     }
   }
 
-  // Daily weekly-quota consumption ledger (handles mid-day weekly resets & day rollover)
+  // Daily weekly-quota consumption ledger (handles mid-day weekly resets, Desktop sync & day rollover)
   let quotaLedger = readJsonSafe(paths.quotaLedgerPath, null);
+  let quotaLedgerChanged = false;
+  if (existsSync(paths.desktopHostCachePath)) {
+    const hostCache = readJsonSafe(paths.desktopHostCachePath, null);
+    const desktopObs = extractHostCacheObservations(hostCache, nowMs, { includeStale: false });
+    for (const obs of desktopObs) {
+      const updated = updateWeeklyQuotaLedger(quotaLedger, obs.pools, {
+        nowMs: obs.observed_at_ms,
+        onlyIfNewer: true,
+        allowEarlierSameDayAnchor: true
+      });
+      quotaLedger = updated.ledger;
+      if (updated.changed) quotaLedgerChanged = true;
+    }
+  }
   if (live?.quotas?.pools?.length && (live.quotas.source || 'agy_statusline') === 'agy_statusline') {
     const liveObsMs = Number.isFinite(Number(live.observed_at_ms))
       ? Number(live.observed_at_ms)
@@ -251,9 +266,10 @@ export function composeSnapshot({
       onlyIfNewer: true
     });
     quotaLedger = updated.ledger;
-    if (updated.changed) {
-      writeJsonAtomic(paths.quotaLedgerPath, quotaLedger, { mode: 0o600, pretty: false });
-    }
+    if (updated.changed) quotaLedgerChanged = true;
+  }
+  if (quotaLedgerChanged && quotaLedger) {
+    writeJsonAtomic(paths.quotaLedgerPath, quotaLedger, { mode: 0o600, pretty: false });
   }
   const dailyWeeklyByPool = extractTodayWeeklyUsageMap(quotaLedger, todayKey);
   const enrichedPools = attachWeeklyDailyToPools(quotas.pools || [], dailyWeeklyByPool);
@@ -277,7 +293,10 @@ export function composeSnapshot({
         used_today_percent: gDaily?.used_today_percent ?? null,
         reset_count_today: gDaily?.reset_count_today ?? 0,
         pre_reset_used_percent: gDaily?.pre_reset_used_percent ?? 0,
-        post_reset_used_percent: gDaily?.post_reset_used_percent ?? null
+        post_reset_used_percent: gDaily?.post_reset_used_percent ?? null,
+        baseline_complete: gDaily?.baseline_complete ?? null,
+        first_observed_at_ms: gDaily?.first_observed_at_ms ?? null,
+        unobserved_gap_percent: gDaily?.unobserved_gap_percent ?? 0
       }
     },
     non_gemini: {
@@ -291,7 +310,10 @@ export function composeSnapshot({
         used_today_percent: ngDaily?.used_today_percent ?? null,
         reset_count_today: ngDaily?.reset_count_today ?? 0,
         pre_reset_used_percent: ngDaily?.pre_reset_used_percent ?? 0,
-        post_reset_used_percent: ngDaily?.post_reset_used_percent ?? null
+        post_reset_used_percent: ngDaily?.post_reset_used_percent ?? null,
+        baseline_complete: ngDaily?.baseline_complete ?? null,
+        first_observed_at_ms: ngDaily?.first_observed_at_ms ?? null,
+        unobserved_gap_percent: ngDaily?.unobserved_gap_percent ?? 0
       }
     }
   };

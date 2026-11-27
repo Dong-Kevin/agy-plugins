@@ -355,6 +355,14 @@ async function runSync(args) {
   }
 }
 
+function formatLocalClockHm(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  const d = new Date(n);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
 function formatReadableStatus(snap) {
   const s = snap.active_session || {};
   const today = snap.rollups?.today || {};
@@ -382,18 +390,31 @@ function formatReadableStatus(snap) {
       let weeklyTodayPart = '';
       if (p.weekly_used_today_percent != null) {
         const usedStr = formatWeeklyUsedPercent(p.weekly_used_today_percent) || `${p.weekly_used_today_percent}%`;
+        const isPartial = p.weekly_baseline_complete === false;
+        const partialMark = isPartial ? '+' : '';
         const resetCount = Number(p.weekly_reset_count_today) || 0;
         const preUsed = Number(p.weekly_pre_reset_used_percent) || 0;
         const postUsed = p.weekly_post_reset_used_percent != null
           ? Number(p.weekly_post_reset_used_percent)
           : Math.max(0, Number(p.weekly_used_today_percent) - preUsed);
-        let resetNote = '';
-        if (resetCount > 0 && preUsed > 0) {
-          resetNote = `（今日已重置：重置前 ${formatWeeklyUsedPercent(preUsed)} + 重置后 ${formatWeeklyUsedPercent(postUsed)}）`;
-        } else if (resetCount > 0) {
-          resetNote = '（今日已重置）';
+        const notes = [];
+        if (isPartial) {
+          const sinceHm = formatLocalClockHm(p.weekly_first_observed_at_ms);
+          const gap = Number(p.weekly_unobserved_gap_percent) || 0;
+          const partialParts = [];
+          partialParts.push(sinceHm ? `自 ${sinceHm} 起计` : '半日增量');
+          if (gap > 0) {
+            partialParts.push(`隔夜未观测 ${formatWeeklyUsedPercent(gap) || `${gap}%`}`);
+          }
+          notes.push(partialParts.join('，'));
         }
-        weeklyTodayPart = ` | 今日周耗 ${usedStr}${resetNote}`;
+        if (resetCount > 0 && preUsed > 0) {
+          notes.push(`今日已重置：重置前 ${formatWeeklyUsedPercent(preUsed)} + 重置后 ${formatWeeklyUsedPercent(postUsed)}`);
+        } else if (resetCount > 0) {
+          notes.push('今日已重置');
+        }
+        const detailNote = notes.length ? `（${notes.join('；')}）` : '';
+        weeklyTodayPart = ` | 今日周耗 ${usedStr}${partialMark}${detailNote}`;
       }
       lines.push(
         `额度 [${p.label}]: 5h 剩余 ${p.five_hour_remaining_percent ?? '--'}% | 周 剩余 ${p.weekly_remaining_percent ?? '--'}%${weeklyTodayPart}`

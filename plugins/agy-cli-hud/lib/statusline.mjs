@@ -151,7 +151,10 @@ function seedLedgerFromSummary(summary, todayKey, nowMs) {
       cycle_min_remaining_percent: rem,
       last_remaining_percent: rem,
       last_resets_at: p.weekly_resets_at ?? null,
-      last_observed_at_ms: nowMs - 1
+      first_observed_at_ms: Number.isFinite(Number(p.weekly_first_observed_at_ms)) ? Number(p.weekly_first_observed_at_ms) : (nowMs - 1),
+      last_observed_at_ms: nowMs - 1,
+      baseline_complete: p.weekly_baseline_complete !== false,
+      unobserved_gap_percent: Math.max(0, Number(p.weekly_unobserved_gap_percent) || 0)
     };
   }
   return Object.keys(pools).length ? { version: 1, updated_at_ms: nowMs - 1, pools } : null;
@@ -227,7 +230,10 @@ function resolveLiveView(stdinPayload, summary, { nowMs = Date.now(), quotaLedge
         weekly_used_today_percent: null,
         weekly_reset_count_today: 0,
         weekly_pre_reset_used_percent: 0,
-        weekly_post_reset_used_percent: null
+        weekly_post_reset_used_percent: null,
+        weekly_baseline_complete: null,
+        weekly_first_observed_at_ms: null,
+        weekly_unobserved_gap_percent: 0
       }));
     } else {
       pools = rawSummaryPools;
@@ -281,10 +287,11 @@ function formatWeeklyUsedTag(pool, C, { style = 'full' } = {}) {
   const val = Math.max(0, Number(raw));
   const pctStr = formatWeeklyUsedPercent(val);
   if (!pctStr) return '';
+  const partialMark = pool?.weekly_baseline_complete === false ? '+' : '';
   const resetMark = Number(pool?.weekly_reset_count_today) > 0 ? '↻' : '';
   const text = style === 'narrow'
-    ? `今${pctStr}${resetMark}`
-    : `(今用${pctStr}${resetMark})`;
+    ? `今${pctStr}${partialMark}${resetMark}`
+    : `(今用${pctStr}${partialMark}${resetMark})`;
   return paint(text, weeklyUsedColor(val, C), { dim: val === 0 });
 }
 

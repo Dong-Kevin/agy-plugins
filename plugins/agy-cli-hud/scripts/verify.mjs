@@ -36,7 +36,13 @@ import {
   runIncrementalSync
 } from '../lib/incremental.mjs';
 import { resolveHudPaths } from '../lib/paths.mjs';
-import { applyWeeklyPoolObservation, normalizeAgyQuotaMap, updateWeeklyQuotaLedger } from '../lib/quota.mjs';
+import {
+  applyWeeklyPoolObservation,
+  extractHostCacheObservations,
+  normalizeAgyQuotaMap,
+  normalizeHostCacheQuotas,
+  updateWeeklyQuotaLedger
+} from '../lib/quota.mjs';
 import { composeSnapshot } from '../lib/snapshot.mjs';
 import {
   decodeGenMetadataTimingRow,
@@ -1241,42 +1247,214 @@ function testDailyWeeklyQuotaTrackerAndReset() {
     assert.equal(firstPostReset.entry.used_today_percent, 8);
     assert.equal(firstPostReset.entry.reset_count_today, 1);
 
-    // 5) Midnight day rollovers:
-    // 5a) Long overnight gap (yesterday 18:00 @ 80% -> today 09:00 @ 60%) -> clean 0% today
+    // 5) Midnight day rollovers, heartbeat refresh & baseline completeness:
+    // 5a) Long overnight gap with unobserved drop (yesterday 18:00 @ 80% -> today 09:00 @ 60%) -> 0%+ with gap=20
     const yest18 = applyWeeklyPoolObservation(null, { weekly_remaining_percent: 80, weekly_resets_at: midWeekReset }, { nowMs: localMs(2026, 11, 26, 18, 0) }).entry;
     const today09 = applyWeeklyPoolObservation(yest18, { weekly_remaining_percent: 60, weekly_resets_at: midWeekReset }, { nowMs: localMs(2026, 11, 27, 9, 0) }).entry;
     assert.equal(today09.used_today_percent, 0);
     assert.equal(today09.reset_count_today, 0);
+    assert.equal(today09.baseline_complete, false, 'Overnight unobserved drop must mark baseline_complete=false');
+    assert.equal(today09.unobserved_gap_percent, 20, 'Overnight unobserved drop must record gap=20%');
+
+    // 5a-2) Clean overnight rollover with zero drop (yesterday 22:00 @ 80% -> today 09:00 @ 80%) -> complete baseline
+    const yest22 = applyWeeklyPoolObservation(null, { weekly_remaining_percent: 80, weekly_resets_at: midWeekReset }, { nowMs: localMs(2026, 11, 26, 22, 0) }).entry;
+    const today09Clean = applyWeeklyPoolObservation(yest22, { weekly_remaining_percent: 80, weekly_resets_at: midWeekReset }, { nowMs: localMs(2026, 11, 27, 9, 0) }).entry;
+    assert.equal(today09Clean.used_today_percent, 0);
+    assert.equal(today09Clean.baseline_complete, true, 'Zero overnight drop from yesterday must mark baseline_complete=true');
+    assert.equal(today09Clean.unobserved_gap_percent, 0);
+    const cold100 = applyWeeklyPoolObservation(null, { weekly_remaining_percent: 100, weekly_resets_at: midWeekReset }, { nowMs: localMs(2026, 11, 27, 9, 0) }).entry;
+    assert.equal(cold100.baseline_complete, true, '100% remaining on cold start has complete baseline');
+
+    // Legacy v1 entry without first_observed_at_ms that already consumed quota must NOT misreport last_observed_at_ms as start time
+    const legacyMigrated = applyWeeklyPoolObservation({
+      day_key: '2026-11-27',
+      used_today_percent: 1.6,
+      pre_reset_used_percent: 0,
+      reset_count_today: 0,
+      cycle_start_remaining_percent: 88.1,
+      cycle_min_remaining_percent: 86.5,
+      last_remaining_percent: 86.5,
+      last_resets_at: midWeekReset,
+      last_observed_at_ms: localMs(2026, 11, 27, 13, 55)
+    }, { weekly_remaining_percent: 86.4, weekly_resets_at: midWeekReset }, { nowMs: localMs(2026, 11, 27, 13, 58) }).entry;
+    assert.equal(legacyMigrated.baseline_complete, false);
+    assert.equal(legacyMigrated.first_observed_at_ms, null, 'Legacy entry with used > 0 must keep first_observed_at_ms=null');
+    assert.equal(legacyMigrated.used_today_percent, 1.7);
 
     // 5b) Active midnight-spanning turn (yesterday 23:50 @ 72% -> today 00:05 @ 70%) -> bridges 2%
     const yest2350 = applyWeeklyPoolObservation(null, { weekly_remaining_percent: 72, weekly_resets_at: midWeekReset }, { nowMs: localMs(2026, 11, 26, 23, 50) }).entry;
     const today0005 = applyWeeklyPoolObservation(yest2350, { weekly_remaining_percent: 70, weekly_resets_at: midWeekReset }, { nowMs: localMs(2026, 11, 27, 0, 5) }).entry;
     assert.equal(today0005.used_today_percent, 2);
+    assert.equal(today0005.baseline_complete, true);
+
+    // 5b-2) Heartbeat refresh regression: 21:00 drop (80%), active again at 23:55 (still 80%) refreshes
+    // last_observed_at_ms while stale tab (85%) does NOT, so 00:05 turn (78%) bridges 2% accurately
+    const yest21 = applyWeeklyPoolObservation(null, { weekly_remaining_percent: 80, weekly_resets_at: midWeekReset }, { nowMs: localMs(2026, 11, 26, 21, 0) }).entry;
+    const hb2355 = applyWeeklyPoolObservation(yest21, { weekly_remaining_percent: 80, weekly_resets_at: midWeekReset }, { nowMs: localMs(2026, 11, 26, 23, 55) });
+    assert.equal(hb2355.changed, true, 'Throttled heartbeat (>=8m) with current rem must refresh last_observed_at_ms');
+    assert.equal(hb2355.entry.last_observed_at_ms, localMs(2026, 11, 26, 23, 55));
+    const stale2356 = applyWeeklyPoolObservation(hb2355.entry, { weekly_remaining_percent: 85, weekly_resets_at: midWeekReset }, { nowMs: localMs(2026, 11, 26, 23, 56) });
+    assert.equal(stale2356.changed, false, 'Stale tab with higher rem must not trigger heartbeat refresh');
+    const bridgedAfterHb = applyWeeklyPoolObservation(hb2355.entry, { weekly_remaining_percent: 78, weekly_resets_at: midWeekReset }, { nowMs: localMs(2026, 11, 27, 0, 5) }).entry;
+    assert.equal(bridgedAfterHb.used_today_percent, 2, 'Heartbeat-refreshed late-night session must bridge midnight turn');
+    assert.equal(bridgedAfterHb.baseline_complete, true);
 
     // 5c) Overnight reset that happened TODAY at 08:00 (first sample at 09:30 is 95%) -> 5% + reset_count_today=1
     const yestBeforeReset = applyWeeklyPoolObservation(null, { weekly_remaining_percent: 20, weekly_resets_at: localSec(2026, 11, 27, 8, 0) }, { nowMs: localMs(2026, 11, 26, 22, 0) }).entry;
     const todayAfterMorningReset = applyWeeklyPoolObservation(yestBeforeReset, { weekly_remaining_percent: 95, weekly_resets_at: resetToday08NextWk }, { nowMs: localMs(2026, 11, 27, 9, 30) }).entry;
     assert.equal(todayAfterMorningReset.used_today_percent, 5);
     assert.equal(todayAfterMorningReset.reset_count_today, 1);
+    assert.equal(todayAfterMorningReset.baseline_complete, true);
 
-    // 5d) Reset happened 2 days ago (not today) -> clean 0% today
+    // 5d) Reset happened 2 days ago (not today) -> clean 0%+ partial baseline
     const threeDaysAgo = applyWeeklyPoolObservation(null, { weekly_remaining_percent: 20, weekly_resets_at: localSec(2026, 11, 25, 8, 0) }, { nowMs: localMs(2026, 11, 24, 18, 0) }).entry;
     const todayOldReset = applyWeeklyPoolObservation(threeDaysAgo, { weekly_remaining_percent: 85, weekly_resets_at: localSec(2026, 12, 2, 8, 0) }, { nowMs: localMs(2026, 11, 27, 9, 30) }).entry;
     assert.equal(todayOldReset.used_today_percent, 0);
     assert.equal(todayOldReset.reset_count_today, 0);
+    assert.equal(todayOldReset.baseline_complete, false);
 
-    // 6) Statusline rendering: 2-line + genuine 3-line (without Colab & with Colab) + reset ↻ tag + stale-day guard
+    // 5e) Desktop host_status_cache_v1.json multi-LS entries parsing & same-day earlier anchor backfill
+    const mockDesktopHostCache = {
+      version: 1,
+      entries: {
+        ls_stale: {
+          at: localMs(2026, 11, 27, 8, 0),
+          quotaStatus: { stale: true, summaryStale: true },
+          quotaSummaryGroups: [{
+            displayName: 'Gemini Models',
+            buckets: [{ bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.99, resetTime: new Date(midWeekReset * 1000).toISOString() }]
+          }]
+        },
+        ls_afternoon: {
+          at: localMs(2026, 11, 27, 12, 0),
+          quotaStatus: { stale: false, summaryStale: false },
+          quotaSummaryGroups: [
+            {
+              displayName: 'Gemini Models',
+              buckets: [
+                { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.80, resetTime: new Date(localMs(2026, 11, 27, 14, 0)).toISOString() },
+                { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.85, resetTime: new Date(midWeekReset * 1000).toISOString() }
+              ]
+            },
+            {
+              displayName: 'Claude and GPT models',
+              buckets: [
+                { bucketId: '3p-5h', window: '5h', remainingFraction: 1 },
+                { bucketId: '3p-weekly', window: 'weekly', remainingFraction: 0.63, resetTime: new Date(midWeekReset * 1000).toISOString() }
+              ]
+            }
+          ]
+        },
+        ls_morning: {
+          at: localMs(2026, 11, 27, 9, 0),
+          quotaStatus: { stale: false, summaryStale: false },
+          quotas: [
+            {
+              id: 'summary:gemini models|gemini-5h+gemini-weekly',
+              fiveHour: { remainingFraction: 0.95 },
+              weekly: { remainingFraction: 0.95, resetTime: new Date(midWeekReset * 1000).toISOString() }
+            }
+          ]
+        }
+      }
+    };
+    const hostObs = extractHostCacheObservations(mockDesktopHostCache);
+    assert.equal(hostObs.length, 2, 'extractHostCacheObservations must parse multi-LS entries and skip stale entries');
+    assert.equal(hostObs[0].observed_at_ms, localMs(2026, 11, 27, 9, 0));
+    assert.equal(hostObs[0].pools[0].weekly_remaining_percent, 95);
+    assert.equal(hostObs[1].observed_at_ms, localMs(2026, 11, 27, 12, 0));
+    assert.equal(hostObs[1].pools[0].weekly_remaining_percent, 85);
+    const normNewest = normalizeHostCacheQuotas(mockDesktopHostCache);
+    assert.equal(normNewest.pools.find((p) => p.id === 'gemini')?.weekly_remaining_percent, 85);
+
+    // Backfill earlier-same-day Desktop anchor (09:00 @ 95%) after CLI cold-started at 11:00 @ 88%,
+    // then apply later Desktop observation (12:00 @ 85%) -> 10% total (95% -> 85%)
+    let merged = updateWeeklyQuotaLedger(null, [{ id: 'gemini', weekly_remaining_percent: 88, weekly_resets_at: midWeekReset }], { nowMs: localMs(2026, 11, 27, 11, 0) });
+    assert.equal(merged.byPool.gemini.used_today_percent, 0);
+    assert.equal(merged.byPool.gemini.baseline_complete, false);
+    for (const obs of hostObs) {
+      merged = updateWeeklyQuotaLedger(merged.ledger, obs.pools, {
+        nowMs: obs.observed_at_ms,
+        onlyIfNewer: true,
+        allowEarlierSameDayAnchor: true
+      });
+    }
+    assert.equal(merged.byPool.gemini.used_today_percent, 10, 'Earlier-same-day Desktop anchor + forward sync must compute 95% -> 85% = 10%');
+    assert.equal(merged.byPool.gemini.first_observed_at_ms, localMs(2026, 11, 27, 9, 0));
+
+    // End-to-end composeSnapshot wiring with Desktop host_status_cache_v1.json (backfill + forward)
+    const snapDeskWork = mkdtempSync(join(tmpdir(), 'agy-hud-desk-'));
+    const prevDeskHome = process.env.AGY_HUD_HOME;
+    try {
+      process.env.AGY_HUD_HOME = snapDeskWork;
+      const dPaths = resolveHudPaths();
+      const nowLiveMs = Date.now();
+      const todayStart = new Date(nowLiveMs);
+      todayStart.setHours(0, 0, 0, 0);
+      const dayStartMs = todayStart.getTime();
+      const span = Math.max(3000, nowLiveMs - dayStartMs);
+      const tAnchorMs = dayStartMs + Math.floor(span * 0.25);
+      const tCliMs = dayStartMs + Math.floor(span * 0.6);
+      const tLiveMs = dayStartMs + span;
+      const liveResetIso = new Date(tLiveMs + 4 * 86_400_000).toISOString();
+      mkdirSync(dirname(dPaths.desktopHostCachePath), { recursive: true });
+      writeFileSync(dPaths.desktopHostCachePath, JSON.stringify({
+        version: 1,
+        entries: {
+          ls_morning: {
+            at: tAnchorMs,
+            quotaStatus: { stale: false, summaryStale: false },
+            quotaSummaryGroups: [{
+              displayName: 'Gemini Models',
+              buckets: [{ bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.96, resetTime: liveResetIso }]
+            }]
+          }
+        }
+      }));
+      // Simulate CLI cold-starting later today at 90% before background sync runs composeSnapshot
+      mkdirSync(dPaths.dataDir, { recursive: true });
+      const cliInit = updateWeeklyQuotaLedger(null, [{
+        id: 'gemini',
+        weekly_remaining_percent: 90,
+        weekly_resets_at: Math.round(Date.parse(liveResetIso) / 1000)
+      }], { nowMs: tCliMs });
+      writeFileSync(dPaths.quotaLedgerPath, JSON.stringify(cliInit.ledger));
+      const { snapshot: deskSnap } = composeSnapshot({
+        incrementalResult: null,
+        buildSessionFn: null,
+        liveFacts: {
+          observed_at: Math.floor(tLiveMs / 1000),
+          observed_at_ms: tLiveMs,
+          has_stdin_payload: true,
+          quotas: normalizeAgyQuotaMap({
+            'gemini-weekly': { remaining_fraction: 0.89, resets_at: Math.round(Date.parse(liveResetIso) / 1000) }
+          }, { nowMs: tLiveMs })
+        },
+        paths: dPaths
+      });
+      assert.equal(deskSnap.quotas.gemini.weekly.used_today_percent, 7, 'composeSnapshot must backfill morning Desktop 96% anchor -> live 89% = 7%');
+      assert.equal(deskSnap.quotas.gemini.weekly.first_observed_at_ms, tAnchorMs);
+    } finally {
+      if (prevDeskHome === undefined) delete process.env.AGY_HUD_HOME;
+      else process.env.AGY_HUD_HOME = prevDeskHome;
+      rmSync(snapDeskWork, { recursive: true, force: true });
+    }
+
+    // 6) Statusline rendering: complete vs partial baseline (+), 2-line + genuine 3-line + reset ↻ tag + stale-day guard
     const now16 = localMs(2026, 11, 27, 16, 0);
     const ledgerWithReset = {
       version: 1,
       updated_at_ms: now16,
       pools: {
-        gemini: r.entry,
-        non_gemini: applyWeeklyPoolObservation(
-          applyWeeklyPoolObservation(null, { weekly_remaining_percent: 91, weekly_resets_at: midWeekReset }, { nowMs: localMs(2026, 11, 27, 9, 0) }).entry,
-          { weekly_remaining_percent: 88, weekly_resets_at: midWeekReset },
-          { nowMs: now16 }
-        ).entry
+        gemini: { ...r.entry, baseline_complete: true },
+        non_gemini: {
+          ...applyWeeklyPoolObservation(
+            applyWeeklyPoolObservation(null, { weekly_remaining_percent: 91, weekly_resets_at: midWeekReset }, { nowMs: localMs(2026, 11, 27, 9, 0) }).entry,
+            { weekly_remaining_percent: 88, weekly_resets_at: midWeekReset },
+            { nowMs: now16 }
+          ).entry,
+          baseline_complete: true
+        }
       }
     };
     const renderPayload = {
@@ -1315,7 +1493,26 @@ function testDailyWeeklyQuotaTrackerAndReset() {
     assert.ok(rows3NoColab[1].includes('今日 2.00M') && rows3NoColab[1].includes('本月 40.0M'));
     assert.ok(
       rows3NoColab[2].includes('周 余82% (今用41%↻)') && rows3NoColab[2].includes('周 余88% (今用3%)'),
-      `3-line L3 must show weekly remaining and today weekly consumption with reset mark:\n${rows3NoColab[2]}`
+      `3-line L3 must show clean complete-baseline weekly consumption:\n${rows3NoColab[2]}`
+    );
+
+    // Partial baseline must clearly surface `+` so mid-day cold starts never masquerade as full-day totals
+    const partialLedger = {
+      ...ledgerWithReset,
+      pools: {
+        gemini: { ...r.entry, baseline_complete: false },
+        non_gemini: { ...ledgerWithReset.pools.non_gemini, baseline_complete: false }
+      }
+    };
+    const outPartial = stripAnsi(renderStatusLine(renderPayload, renderSummaryNoColab, {
+      lines: 2,
+      color: false,
+      nowMs: now16,
+      quotaLedger: partialLedger
+    }));
+    assert.ok(
+      outPartial.includes('周 余82% (今用41%+↻)') && outPartial.includes('周 余88% (今用3%+)'),
+      `Partial baseline must render '+' suffix transparently:\n${outPartial}`
     );
 
     // 2-line wide also displays today's weekly consumption cleanly
@@ -1357,25 +1554,26 @@ function testDailyWeeklyQuotaTrackerAndReset() {
     }));
 
     const turn1 = runSl({ 'gemini-5h': { remaining_fraction: 0.9 }, 'gemini-weekly': { remaining_fraction: 0.40, resets_at: oldResetLive } });
-    assert.ok(turn1.includes('周 余40% (今用0%)'), `Turn 1 must initialize at 0%: ${turn1}`);
+    assert.ok(turn1.includes('周 余40% (今用0%+)'), `Cold-start mid-week Turn 1 must initialize at 0%+: ${turn1}`);
 
     const turn2 = runSl({ 'gemini-5h': { remaining_fraction: 0.8 }, 'gemini-weekly': { remaining_fraction: 0.25, resets_at: oldResetLive } });
-    assert.ok(turn2.includes('周 余25% (今用15%)'), `Turn 2 must accumulate 15%: ${turn2}`);
+    assert.ok(turn2.includes('周 余25% (今用15%+)'), `Turn 2 must accumulate 15%+: ${turn2}`);
 
     const turn3 = runSl({ 'gemini-5h': { remaining_fraction: 0.95 }, 'gemini-weekly': { remaining_fraction: 0.92, resets_at: newResetLive } });
-    assert.ok(turn3.includes('周 余92% (今用23%↻)'), `Turn 3 after reset must show 15% + 8% = 23%↻: ${turn3}`);
+    assert.ok(turn3.includes('周 余92% (今用23%+↻)'), `Turn 3 after reset on partial-start day must show 23%+↻: ${turn3}`);
 
     assert.ok(existsSync(paths.quotaLedgerPath), 'quota_daily.v1.json must be persisted');
     const statusText = execFileSync(process.execPath, [BIN_PATH, 'status'], { env: envCli, encoding: 'utf8' });
     assert.ok(
-      statusText.includes('今日周耗 23%（今日已重置：重置前 15% + 重置后 8%）'),
-      `agy-hud status must display transparent pre/post reset breakdown:\n${statusText}`
+      /今日周耗 23%\+（自 \d{2}:\d{2} 起计；今日已重置：重置前 15% \+ 重置后 8%）/.test(statusText),
+      `agy-hud status must display transparent start-time & pre/post reset breakdown:\n${statusText}`
     );
     const snapJson = JSON.parse(readFileSync(paths.snapshotPath, 'utf8'));
     assert.equal(snapJson.quotas.gemini.weekly.used_today_percent, 23);
     assert.equal(snapJson.quotas.gemini.weekly.pre_reset_used_percent, 15);
     assert.equal(snapJson.quotas.gemini.weekly.post_reset_used_percent, 8);
     assert.equal(snapJson.quotas.gemini.weekly.reset_count_today, 1);
+    assert.equal(snapJson.quotas.gemini.weekly.baseline_complete, false);
     assert.ok(statSync(paths.summaryPath).size < 4096, 'summary with daily weekly fields must remain < 4KB');
 
     // Quick updateWeeklyQuotaLedger multi-pool sanity
@@ -1386,7 +1584,7 @@ function testDailyWeeklyQuotaTrackerAndReset() {
     assert.equal(multi.byPool.gemini.used_today_percent, 0);
     assert.equal(multi.byPool.non_gemini.used_today_percent, 0);
 
-    // 8) CJK display-width anti-overflow matrix across 1/2/3 lines, +/- Colab, heavy worst-case metrics & widths 60..140
+    // 8) CJK display-width anti-overflow matrix across 1/2/3 lines, +/- Colab, heavy worst-case metrics (including +↻) & widths 60..140
     const heavyPayload = (width) => ({
       conversation_id: '11111111-2222-3333-4444-555555555555',
       terminal_width: width,
@@ -1438,7 +1636,10 @@ function testDailyWeeklyQuotaTrackerAndReset() {
           cycle_min_remaining_percent: 64,
           last_remaining_percent: 64,
           last_resets_at: resetNextWk14,
-          last_observed_at_ms: now16 - 1000
+          first_observed_at_ms: localMs(2026, 11, 27, 12, 0),
+          last_observed_at_ms: now16 - 1000,
+          baseline_complete: false,
+          unobserved_gap_percent: 8.6
         },
         non_gemini: {
           day_key: '2026-11-27',
@@ -1449,7 +1650,10 @@ function testDailyWeeklyQuotaTrackerAndReset() {
           cycle_min_remaining_percent: 88,
           last_remaining_percent: 88,
           last_resets_at: midWeekReset,
-          last_observed_at_ms: now16 - 1000
+          first_observed_at_ms: localMs(2026, 11, 27, 12, 0),
+          last_observed_at_ms: now16 - 1000,
+          baseline_complete: false,
+          unobserved_gap_percent: 0
         }
       }
     };
