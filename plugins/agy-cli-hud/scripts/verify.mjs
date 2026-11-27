@@ -43,7 +43,7 @@ import {
   enrichSessionsWithSqliteTiming,
   isSqliteAvailable
 } from '../lib/sqlite_timing.mjs';
-import { configureAgyStatusLine, renderStatusLine } from '../lib/statusline.mjs';
+import { configureAgyStatusLine, measureDisplayWidth, renderStatusLine } from '../lib/statusline.mjs';
 import { hexToAnsi256, hexToAnsiFg, THEME_NAMES, THEMES } from '../lib/themes.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -560,6 +560,43 @@ function testSoloBridgeChaining() {
     assert.equal(healedUninstall.command, canonicalNoForward, 'Uninstall must self-heal truncated Solo wrapper');
     assertShellSyntaxValid(healedUninstall.command);
 
+    // 4b) Default configureAgyStatusLine emits `agy-hud render` (immune to Solo's legacy `statusline` hijacker)
+    writeFileSync(
+      paths.cliSettingsPath,
+      JSON.stringify({ statusLine: { type: 'command', command: canonicalNoForward, enabled: true, stack_with_default: true } }, null, 2)
+    );
+    const defaultAsyncRender = configureAgyStatusLine({ paths });
+    assert.equal(defaultAsyncRender.mode, 'solo_async');
+    assert.ok(defaultAsyncRender.command.endsWith('| agy-hud render'), `Default Solo async must use agy-hud render: ${defaultAsyncRender.command}`);
+    assert.ok(soloBgMatchRe.test(defaultAsyncRender.command), 'Default agy-hud render async bypass must satisfy Solo bg_match');
+    assertShellSyntaxValid(defaultAsyncRender.command);
+    const defaultSyncRender = configureAgyStatusLine({ soloSync: true, paths });
+    assert.equal(defaultSyncRender.mode, 'solo_chained');
+    assert.ok(defaultSyncRender.command.includes("--forward-command 'agy-hud render'"), 'Default soloSync must forward to agy-hud render');
+    assert.ok(!defaultSyncRender.command.includes("'agy-hud statusline'"), 'Default soloSync must not trigger Solo legacy statusline hijacker');
+    assertShellSyntaxValid(defaultSyncRender.command);
+    const uninstalledDefaultRender = configureAgyStatusLine({ uninstall: true, paths });
+    assert.equal(uninstalledDefaultRender.mode, 'solo_preserved');
+    assert.equal(uninstalledDefaultRender.command, canonicalNoForward);
+
+    // 4c) CLI `agy-hud render` alias must produce identical output to `agy-hud statusline`
+    const aliasInput = JSON.stringify({
+      conversation_id: '11111111-2222-3333-4444-555555555555',
+      terminal_width: 120,
+      context_window: { context_window_size: 1_000_000, used_percentage: 33 }
+    });
+    const outStatuslineAlias = execFileSync(process.execPath, [BIN_PATH, 'statusline', '--no-color'], {
+      env: { ...process.env, AGY_HUD_HOME: work, AGY_HUD_NO_BG_SYNC: '1' },
+      input: aliasInput,
+      encoding: 'utf8'
+    });
+    const outRenderAlias = execFileSync(process.execPath, [BIN_PATH, 'render', '--no-color'], {
+      env: { ...process.env, AGY_HUD_HOME: work, AGY_HUD_NO_BG_SYNC: '1' },
+      input: aliasInput,
+      encoding: 'utf8'
+    });
+    assert.equal(outRenderAlias, outStatuslineAlias, 'agy-hud render alias must match agy-hud statusline byte-for-byte');
+
     // 5) Real POSIX shell execution with a 2000ms slow Solo hook must finish non-blocking (<600ms)
     if (process.platform !== 'win32') {
       const slowHook = join(work, 'slow-solo-hook.sh');
@@ -696,11 +733,15 @@ async function testStatuslineAntiKillHardening() {
     assert.equal(readFileSync(paths.syncStampPath, 'utf8'), '1000', 'Active sync.lock must block overlapping background sync spawn');
     rmSync(paths.syncLockPath, { force: true });
 
-    // 4) Incremental seenSteps pruning for inactive >7d sessions keeps totals intact + summary.sync_interval_ms
+    // 4) Incremental seenSteps pruning for inactive >24h sessions keeps totals intact while retaining active <24h sessions
     const oldConv = '00000000-0000-4000-8000-00000000007d';
+    const recentConv = '00000000-0000-4000-8000-00000000002a';
     const txDir = join(paths.cliBrainDir, oldConv, '.system_generated', 'logs');
+    const recentDir = join(paths.cliBrainDir, recentConv, '.system_generated', 'logs');
     mkdirSync(txDir, { recursive: true });
+    mkdirSync(recentDir, { recursive: true });
     const txFile = join(txDir, 'transcript.jsonl');
+    const recentFile = join(recentDir, 'transcript.jsonl');
     writeFileSync(
       txFile,
       `${JSON.stringify({
@@ -714,13 +755,29 @@ async function testStatuslineAntiKillHardening() {
       })}\n`,
       'utf8'
     );
-    const tenDaysAgo = new Date(Date.now() - 10 * 86_400_000);
-    utimesSync(txFile, tenDaysAgo, tenDaysAgo);
+    writeFileSync(
+      recentFile,
+      `${JSON.stringify({
+        step_index: 4,
+        type: 'PLANNER_RESPONSE',
+        created_at: new Date(Date.now() - 2 * 3_600_000).toISOString(),
+        model: 'gemini-4-neon-xhigh',
+        input_tokens: 5000,
+        cache_read_tokens: 20000,
+        output_tokens: 500
+      })}\n`,
+      'utf8'
+    );
+    const thirtyHoursAgo = new Date(Date.now() - 30 * 3_600_000);
+    const twoHoursAgo = new Date(Date.now() - 2 * 3_600_000);
+    utimesSync(txFile, thirtyHoursAgo, thirtyHoursAgo);
+    utimesSync(recentFile, twoHoursAgo, twoHoursAgo);
     const inc = runIncrementalSync({ scope: 'cli_only', paths, now: new Date() });
     const savedState = JSON.parse(readFileSync(paths.cursorStatePath, 'utf8'));
-    assert.deepEqual(savedState.files[txFile].seenSteps, {}, 'Inactive >7d file must prune seenSteps');
+    assert.deepEqual(savedState.files[txFile].seenSteps, {}, 'Inactive >24h file must prune seenSteps');
     assert.equal(savedState.files[txFile].session.turns, 1, 'Pruned file must retain session turns');
     assert.equal(savedState.files[txFile].session.inputTokens, 10000, 'Pruned file must retain token totals');
+    assert.ok(Object.keys(savedState.files[recentFile].seenSteps).length === 1, 'Recent <24h active file must retain seenSteps');
     const { summary: composedSum } = composeSnapshot({
       incrementalResult: inc,
       buildSessionFn: buildSessionMetricsFromIncremental,
@@ -728,7 +785,7 @@ async function testStatuslineAntiKillHardening() {
     });
     assert.equal(composedSum.sync_interval_ms, 2000, 'Composed summary must expose sync_interval_ms');
 
-    pass('Statusline anti-kill hardening (bounded stdin, write dedup, sync.lock & >7d seenSteps pruning)');
+    pass('Statusline anti-kill hardening (bounded stdin, write dedup, sync.lock & >24h seenSteps pruning)');
   } finally {
     if (prevHome === undefined) delete process.env.AGY_HUD_HOME;
     else process.env.AGY_HUD_HOME = prevHome;
@@ -1329,7 +1386,99 @@ function testDailyWeeklyQuotaTrackerAndReset() {
     assert.equal(multi.byPool.gemini.used_today_percent, 0);
     assert.equal(multi.byPool.non_gemini.used_today_percent, 0);
 
-    pass('Daily weekly-quota consumption tracker (mid-day reset, >100%, midnight rollover, multi-tab guard & 2/3-line e2e)');
+    // 8) CJK display-width anti-overflow matrix across 1/2/3 lines, +/- Colab, heavy worst-case metrics & widths 60..140
+    const heavyPayload = (width) => ({
+      conversation_id: '11111111-2222-3333-4444-555555555555',
+      terminal_width: width,
+      context_window: {
+        context_window_size: 1_048_576,
+        used_percentage: 98,
+        current_usage: { input_tokens: 800_000, cache_read_input_tokens: 180_000, cache_creation_input_tokens: 0 }
+      },
+      cost: { total_usd: 12.45 },
+      quota: {
+        'gemini-5h': { remaining_fraction: 0.12, resets_at: Math.floor(now16 / 1000) + 17460 },
+        'gemini-weekly': { remaining_fraction: 0.64, resets_at: resetNextWk14 },
+        '3p-5h': { remaining_fraction: 0.15, resets_at: Math.floor(now16 / 1000) + 17460 },
+        '3p-weekly': { remaining_fraction: 0.88, resets_at: midWeekReset }
+      }
+    });
+    const heavyBaseSummary = {
+      lines: 2,
+      color: false,
+      session_id: '11111111-2222-3333-4444-555555555555',
+      avg_cache: 18,
+      last_cache: 18,
+      cold_start: true,
+      tps: 142.8,
+      sess_cost: 12.45,
+      sess_saved: 48.2,
+      today_tokens: 24_200_000,
+      today_cost: 68.5,
+      month_tokens: 685_000_000,
+      month_cost: 1924
+    };
+    const heavyColab = {
+      tier: 'PRO+',
+      cu: 184.2,
+      rate: 13.1,
+      hrs: 14.1,
+      rt: { gpu: 'A100-40G', ram_u: 14, ram_t: 83, vram_u: 22, vram_t: 40, idle_m: 12 }
+    };
+    const heavyLedger = {
+      version: 1,
+      updated_at_ms: now16,
+      pools: {
+        gemini: {
+          day_key: '2026-11-27',
+          used_today_percent: 115,
+          pre_reset_used_percent: 79,
+          reset_count_today: 1,
+          cycle_start_remaining_percent: 100,
+          cycle_min_remaining_percent: 64,
+          last_remaining_percent: 64,
+          last_resets_at: resetNextWk14,
+          last_observed_at_ms: now16 - 1000
+        },
+        non_gemini: {
+          day_key: '2026-11-27',
+          used_today_percent: 24,
+          pre_reset_used_percent: 12,
+          reset_count_today: 1,
+          cycle_start_remaining_percent: 100,
+          cycle_min_remaining_percent: 88,
+          last_remaining_percent: 88,
+          last_resets_at: midWeekReset,
+          last_observed_at_ms: now16 - 1000
+        }
+      }
+    };
+    for (const linesCount of [1, 2, 3]) {
+      for (const withColab of [false, true]) {
+        const sum = withColab ? { ...heavyBaseSummary, colab: heavyColab } : heavyBaseSummary;
+        for (const w of [60, 68, 74, 75, 80, 90, 100, 104, 105, 110, 117, 118, 120, 130, 140]) {
+          const out = renderStatusLine(heavyPayload(w), sum, {
+            lines: linesCount,
+            color: true,
+            colorDepth: 'truecolor',
+            theme: 'nord',
+            nowMs: now16,
+            quotaLedger: heavyLedger
+          });
+          const rows = out.split('\n');
+          assert.equal(rows.length, linesCount, `lines=${linesCount} colab=${withColab} w=${w} must render ${linesCount} rows`);
+          rows.forEach((row, idx) => {
+            const cols = measureDisplayWidth(row);
+            assert.ok(
+              cols <= w,
+              `Display width overflow (+${cols - w}) at lines=${linesCount} colab=${withColab} w=${w} L${idx + 1}: ${stripAnsi(row)}`
+            );
+          });
+        }
+      }
+    }
+
+    pass('Daily weekly-quota consumption tracker, reset merge & CJK width anti-overflow matrix (1/2/3-line, +/- Colab)');
   } finally {
     if (prevHome === undefined) delete process.env.AGY_HUD_HOME;
     else process.env.AGY_HUD_HOME = prevHome;

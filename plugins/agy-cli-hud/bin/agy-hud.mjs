@@ -735,7 +735,7 @@ async function runInstallStatusline(args) {
   if (!uninstall && linesArg && [1, 2, 3].includes(Number(linesArg))) {
     saveHudConfig({ lines: Number(linesArg) }, paths);
   }
-  const hudCmd = parseFlagValue(args, '--command', 'agy-hud statusline');
+  const hudCmd = parseFlagValue(args, '--command', 'agy-hud render');
   const res = configureAgyStatusLine({
     hudCommand: hudCmd,
     uninstall,
@@ -753,7 +753,8 @@ function printHelp() {
   console.log(`agy-hud — 轻量低延迟 agy CLI & Solo 监控命令行
 
 用法:
-  agy-hud statusline [--lines 1|2|3] [--theme <name>] [--no-color]  读取 agy stdin 输出分层状态栏（热路径）
+  agy-hud render [--lines 1|2|3] [--theme <name>] [--no-color]      读取 agy stdin 输出分层状态栏（默认热路径，兼容 statusline）
+  agy-hud statusline [--lines 1|2|3] [--theme <name>] [--no-color]  同 render（向后兼容别名）
   agy-hud sync [--quiet] [--with-colab]            执行 IncrementalJSONL 增量聚合与快照刷新
   agy-hud snapshot [--refresh] [--with-colab]      输出 usage-hud.v1.json 机读快照
   agy-hud status [--json] [--with-colab]           查看当前会话/今日/本月/双池额度/Colab 概览
@@ -771,7 +772,7 @@ async function main() {
   const cmd = args[0] || 'status';
   const rest = args.slice(1);
 
-  if (cmd === 'statusline') {
+  if (cmd === 'statusline' || cmd === 'render') {
     await handleStatuslineFast(rest);
     return;
   }

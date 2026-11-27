@@ -17,6 +17,48 @@ import { detectColorDepth, resolveStatuslineColors, resolveThemeName } from './t
 
 const RESET = '\x1b[0m';
 const DIM = '\x1b[2m';
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
+
+export function measureDisplayWidth(str) {
+  if (!str) return 0;
+  const plain = String(str).replace(ANSI_RE, '');
+  let w = 0;
+  for (const ch of plain) {
+    const cp = ch.codePointAt(0);
+    if (
+      (cp >= 0x0300 && cp <= 0x036f) ||
+      (cp >= 0xfe00 && cp <= 0xfe0f) ||
+      cp === 0x200d
+    ) {
+      continue;
+    }
+    const isWide =
+      cp === 0x2744 ||
+      (cp >= 0x1100 && cp <= 0x115f) ||
+      (cp >= 0x2e80 && cp <= 0xa4cf && cp !== 0x303f) ||
+      (cp >= 0xac00 && cp <= 0xd7a3) ||
+      (cp >= 0xf900 && cp <= 0xfaff) ||
+      (cp >= 0xfe10 && cp <= 0xfe19) ||
+      (cp >= 0xfe30 && cp <= 0xfe6f) ||
+      (cp >= 0xff00 && cp <= 0xff60) ||
+      (cp >= 0xffe0 && cp <= 0xffe6) ||
+      (cp >= 0x1f300 && cp <= 0x1fbff) ||
+      (cp >= 0x20000 && cp <= 0x2fffd);
+    w += isWide ? 2 : 1;
+  }
+  return w;
+}
+
+function pickFittingLine(candidates, maxWidth) {
+  let last = '';
+  for (const fn of candidates) {
+    const line = typeof fn === 'function' ? fn() : fn;
+    if (!line) continue;
+    last = line;
+    if (measureDisplayWidth(line) <= maxWidth) return line;
+  }
+  return last;
+}
 
 function paint(text, ansiFg, { dim = false } = {}) {
   if (!text) return '';
@@ -287,13 +329,13 @@ function formatColabCompact(colab, { tierMode = 'wide', C } = {}) {
   if (cu === null && !gpu) return '';
 
   if (tierMode === 'narrow') {
-    return cu !== null ? paint(`CU ${cu}`, C.colab) : '';
+    return cu !== null ? paint(`${cu} CU`, C.colab) : '';
   }
   if (tierMode === 'mid') {
     if (cu !== null && gpu) {
-      return `${paint(`CU ${cu}`, C.colab)} ${paint(`(${gpu})`, C.colab, { dim: true })}`;
+      return `${paint(`${cu} CU`, C.colab)} ${paint(`(${gpu})`, C.colab, { dim: true })}`;
     }
-    if (cu !== null) return paint(`CU ${cu}`, C.colab);
+    if (cu !== null) return paint(`${cu} CU`, C.colab);
     return paint(`Colab ${gpu}`, C.colab);
   }
   const bits = [];
@@ -302,23 +344,24 @@ function formatColabCompact(colab, { tierMode = 'wide', C } = {}) {
   return `${paint('Colab', C.colab)} ${bits.join(paint(' · ', C.muted))}`;
 }
 
-function formatColabDetailLine(colab, C, { narrow = false } = {}) {
+function formatColabDetailLine(colab, C, { narrow = false, mode = null } = {}) {
   if (!colab) return '';
+  const resolvedMode = mode || (narrow ? 'narrow' : 'full');
   const parts = [];
   const tier = colab.tier ? `[${colab.tier}]` : '';
   const cuPart = colab.cu != null ? `${Number(colab.cu).toFixed(1)} CU` : '';
   const headText = ['Colab', tier, cuPart].filter(Boolean).join(' ');
-  const ratePart = !narrow && colab.rate != null && colab.rate > 0
+  const ratePart = resolvedMode === 'full' && colab.rate != null && colab.rate > 0
     ? ` ${paint(`(-${Number(colab.rate).toFixed(1)}/h${colab.hrs != null ? ` ≈${Number(colab.hrs).toFixed(1)}h` : ''})`, C.colab, { dim: true })}`
     : '';
   if (headText) parts.push(`${paint(headText, C.colab)}${ratePart}`);
 
   if (colab.rt) {
     if (colab.rt.gpu) parts.push(paint(colab.rt.gpu, C.colab));
-    if (!narrow && colab.rt.ram_u != null && colab.rt.ram_t != null) {
+    if (resolvedMode !== 'narrow' && colab.rt.ram_u != null && colab.rt.ram_t != null) {
       parts.push(paint(`RAM ${Math.round(colab.rt.ram_u)}/${Math.round(colab.rt.ram_t)}G`, C.total));
     }
-    if (!narrow && colab.rt.vram_u != null && colab.rt.vram_t != null) {
+    if (resolvedMode !== 'narrow' && colab.rt.vram_u != null && colab.rt.vram_t != null) {
       parts.push(paint(`VRAM ${Math.round(colab.rt.vram_u)}/${Math.round(colab.rt.vram_t)}G`, C.total));
     }
     if (colab.rt.idle_m != null) {
@@ -405,117 +448,212 @@ export function renderStatusLine(stdinPayload, summary, options = {}) {
     ? paint(`(${formatTokensCompact(view.usedTokens)}/${formatTokensCompact(view.windowSize)})`, C.label, { dim: true })
     : '';
 
+  const maxW = Math.max(40, Number(view.width) || 120);
+  const hasTps = view.tps != null && Number.isFinite(Number(view.tps)) && Number(view.tps) > 0;
+  const hasToday = view.todayTokens > 0 || view.todayCost > 0;
+  const hasMonth = view.monthTokens > 0 || view.monthCost > 0;
+
+  const buildCtxPart = (barW, includeTok) => (
+    barW > 0
+      ? `${ctxLabel} ${buildBar(view.usedPct ?? 0, barW, C)} ${pctStr}${includeTok && tokPair ? ` ${tokPair}` : ''}`
+      : `${ctxLabel} ${pctStr}`
+  );
+
+  const buildQuotaLine = (modes, colabMode = null) => {
+    const candidates = modes.map((qMode) => () => {
+      const blocks = [];
+      const gp = formatPoolSegment(gPool, { mode: qMode, C, nowSec });
+      const ngp = formatPoolSegment(ngPool, { mode: qMode, C, nowSec });
+      if (gp) blocks.push(gp);
+      if (ngp) blocks.push(ngp);
+      if (colabMode) {
+        const cb = formatColabCompact(view.colab, { tierMode: colabMode, C });
+        if (cb) blocks.push(cb);
+      }
+      return blocks.join(pipe);
+    });
+    return pickFittingLine(candidates, maxW);
+  };
+
   // 1-line compact mode
   if (linesMode === 1) {
-    const segs = [];
-    if (tierMode === 'wide') {
-      segs.push(`${ctxLabel} ${buildBar(view.usedPct ?? 0, 8, C)} ${pctStr}${tokPair ? ` ${tokPair}` : ''}`);
-      if (view.avgCache != null) segs.push(formatCacheSeg(view.avgCache, null, view.coldStart, C, { compact: false }));
-      if (view.todayTokens > 0 || view.todayCost > 0) segs.push(formatTodaySeg(view.todayTokens, view.todayCost, C));
+    const buildOneLine = ({ barW, includeTok, compactCache, showTodayCost, includeNg, includeColab }) => {
+      const segs = [buildCtxPart(barW, includeTok)];
+      if (view.avgCache != null) segs.push(formatCacheSeg(view.avgCache, null, view.coldStart, C, { compact: compactCache }));
+      if (hasToday && (showTodayCost || view.todayTokens > 0)) {
+        segs.push(formatTodaySeg(view.todayTokens, view.todayCost, C, { showCost: showTodayCost }));
+      }
       const gp = formatPoolSegment(gPool, { mode: 'narrow', C, nowSec });
-      const ngp = formatPoolSegment(ngPool, { mode: 'narrow', C, nowSec });
+      const ngp = includeNg ? formatPoolSegment(ngPool, { mode: 'narrow', C, nowSec }) : '';
       if (gp) segs.push(gp);
       if (ngp) segs.push(ngp);
-      const cb = formatColabCompact(view.colab, { tierMode: 'narrow', C });
-      if (cb) segs.push(cb);
-    } else {
-      segs.push(`${ctxLabel} ${pctStr}`);
-      if (view.avgCache != null) segs.push(formatCacheSeg(view.avgCache, null, view.coldStart, C, { compact: true }));
-      if (view.todayTokens > 0) segs.push(formatTodaySeg(view.todayTokens, view.todayCost, C, { showCost: false }));
-      const gp = formatPoolSegment(gPool, { mode: 'narrow', C, nowSec });
-      if (gp) segs.push(gp);
-    }
-    return segs.join(sep);
+      if (includeColab) {
+        const cb = formatColabCompact(view.colab, { tierMode: 'narrow', C });
+        if (cb) segs.push(cb);
+      }
+      return segs.join(sep);
+    };
+    const candidates = tierMode === 'wide'
+      ? [
+          () => buildOneLine({ barW: 8, includeTok: true, compactCache: false, showTodayCost: true, includeNg: true, includeColab: true }),
+          () => buildOneLine({ barW: 6, includeTok: false, compactCache: true, showTodayCost: true, includeNg: true, includeColab: true }),
+          () => buildOneLine({ barW: 0, includeTok: false, compactCache: true, showTodayCost: false, includeNg: true, includeColab: true }),
+          () => buildOneLine({ barW: 0, includeTok: false, compactCache: true, showTodayCost: false, includeNg: true, includeColab: false }),
+          () => buildOneLine({ barW: 0, includeTok: false, compactCache: true, showTodayCost: false, includeNg: false, includeColab: false })
+        ]
+      : [
+          () => buildOneLine({ barW: 0, includeTok: false, compactCache: true, showTodayCost: false, includeNg: false, includeColab: false })
+        ];
+    return pickFittingLine(candidates, maxW);
   }
 
   // 3-line layered mode: dedicated quota row (with daily weekly-quota consumption) so every row breathes cleanly
   if (linesMode === 3) {
     const hasColab = Boolean(view.colab);
-    const l1 = [];
-    const barW = tierMode === 'wide' ? 10 : (tierMode === 'mid' ? 6 : 0);
-    l1.push(barW > 0
-      ? `${ctxLabel} ${buildBar(view.usedPct ?? 0, barW, C)} ${pctStr}${tokPair ? ` ${tokPair}` : ''}`
-      : `${ctxLabel} ${pctStr}`
-    );
-    if (view.avgCache != null) {
-      l1.push(formatCacheSeg(view.avgCache, tierMode === 'wide' ? view.lastCache : null, view.coldStart, C, { compact: tierMode !== 'wide' }));
-    }
-    if (tierMode !== 'narrow' && view.tps != null && Number.isFinite(Number(view.tps)) && Number(view.tps) > 0) {
-      l1.push(formatTpsSeg(view.tps, C));
-    }
-    if (view.sessCost > 0 && (!hasColab || tierMode !== 'narrow')) {
-      l1.push(formatSessionCostSeg(view.sessCost, C, {
-        labeled: tierMode === 'wide',
-        saved: !hasColab && tierMode === 'wide' ? view.sessSaved : 0
-      }));
-    }
-    if (hasColab && (view.todayTokens > 0 || view.todayCost > 0)) {
-      l1.push(formatTodaySeg(view.todayTokens, view.todayCost, C, { showCost: tierMode === 'wide' }));
-    }
+    const buildL1Three = ({ barW, includeTok, compactCache, includeLastCache, includeTps, includeCost, labelCost, includeSaved, includeToday, showTodayCost }) => {
+      const l1 = [buildCtxPart(barW, includeTok)];
+      if (view.avgCache != null) {
+        l1.push(formatCacheSeg(view.avgCache, includeLastCache ? view.lastCache : null, view.coldStart, C, { compact: compactCache }));
+      }
+      if (includeTps && hasTps) {
+        l1.push(formatTpsSeg(view.tps, C));
+      }
+      if (includeCost && view.sessCost > 0) {
+        l1.push(formatSessionCostSeg(view.sessCost, C, {
+          labeled: labelCost,
+          saved: includeSaved ? view.sessSaved : 0
+        }));
+      }
+      if (includeToday && hasToday) {
+        l1.push(formatTodaySeg(view.todayTokens, view.todayCost, C, { showCost: showTodayCost }));
+      }
+      return l1.join(sep);
+    };
 
-    const quotaMode3 = tierMode === 'wide' ? 'full' : (tierMode === 'mid' ? 'mid' : 'narrow');
-    const quotaBlocks = [];
-    const gp = formatPoolSegment(gPool, { mode: quotaMode3, C, nowSec });
-    const ngp = formatPoolSegment(ngPool, { mode: quotaMode3, C, nowSec });
-    if (gp) quotaBlocks.push(gp);
-    if (ngp) quotaBlocks.push(ngp);
+    const l1Candidates = tierMode === 'wide'
+      ? [
+          () => buildL1Three({ barW: 10, includeTok: true, compactCache: false, includeLastCache: true, includeTps: true, includeCost: true, labelCost: true, includeSaved: !hasColab, includeToday: hasColab, showTodayCost: true }),
+          () => buildL1Three({ barW: 8, includeTok: true, compactCache: false, includeLastCache: false, includeTps: true, includeCost: true, labelCost: true, includeSaved: !hasColab, includeToday: hasColab, showTodayCost: true }),
+          () => buildL1Three({ barW: 6, includeTok: false, compactCache: true, includeLastCache: false, includeTps: true, includeCost: true, labelCost: false, includeSaved: false, includeToday: hasColab, showTodayCost: true }),
+          () => buildL1Three({ barW: 6, includeTok: false, compactCache: true, includeLastCache: false, includeTps: true, includeCost: true, labelCost: false, includeSaved: false, includeToday: hasColab, showTodayCost: false })
+        ]
+      : (tierMode === 'mid'
+          ? [
+              () => buildL1Three({ barW: 6, includeTok: true, compactCache: true, includeLastCache: false, includeTps: true, includeCost: true, labelCost: false, includeSaved: false, includeToday: hasColab, showTodayCost: false }),
+              () => buildL1Three({ barW: 6, includeTok: false, compactCache: true, includeLastCache: false, includeTps: true, includeCost: true, labelCost: false, includeSaved: false, includeToday: hasColab, showTodayCost: false }),
+              () => buildL1Three({ barW: 0, includeTok: false, compactCache: true, includeLastCache: false, includeTps: false, includeCost: true, labelCost: false, includeSaved: false, includeToday: hasColab, showTodayCost: false })
+            ]
+          : [
+              () => buildL1Three({ barW: 0, includeTok: false, compactCache: true, includeLastCache: false, includeTps: false, includeCost: !hasColab, labelCost: false, includeSaved: false, includeToday: hasColab, showTodayCost: false }),
+              () => buildL1Three({ barW: 0, includeTok: false, compactCache: true, includeLastCache: false, includeTps: false, includeCost: false, labelCost: false, includeSaved: false, includeToday: hasColab, showTodayCost: false })
+            ]);
 
-    const out = [l1.join(sep)];
+    const quotaModes3 = tierMode === 'wide'
+      ? ['full', 'mid', 'compact', 'narrow']
+      : (tierMode === 'mid' ? ['mid', 'compact', 'narrow'] : ['narrow']);
+    const quotaRow = buildQuotaLine(quotaModes3);
+
+    const out = [pickFittingLine(l1Candidates, maxW)];
     if (hasColab) {
-      if (quotaBlocks.length) out.push(quotaBlocks.join(pipe));
-      const l3 = formatColabDetailLine(view.colab, C, { narrow: tierMode === 'narrow' });
+      if (quotaRow) out.push(quotaRow);
+      const l3 = tierMode === 'narrow'
+        ? formatColabDetailLine(view.colab, C, { mode: 'narrow' })
+        : pickFittingLine([
+            () => formatColabDetailLine(view.colab, C, { mode: 'full' }),
+            () => formatColabDetailLine(view.colab, C, { mode: 'mid' }),
+            () => formatColabDetailLine(view.colab, C, { mode: 'narrow' })
+          ], maxW);
       if (l3) out.push(l3);
     } else {
-      const usageBits = [];
-      if (view.todayTokens > 0 || view.todayCost > 0) {
-        usageBits.push(formatTodaySeg(view.todayTokens, view.todayCost, C));
-      }
-      if (tierMode !== 'narrow' && (view.monthTokens > 0 || view.monthCost > 0)) {
-        usageBits.push(formatMonthSeg(view.monthTokens, view.monthCost, C));
-      }
-      if (usageBits.length) out.push(usageBits.join(sep));
-      if (quotaBlocks.length) out.push(quotaBlocks.join(pipe));
+      const usageRow = tierMode === 'narrow'
+        ? (hasToday
+            ? pickFittingLine([
+                () => formatTodaySeg(view.todayTokens, view.todayCost, C, { showCost: true }),
+                () => formatTodaySeg(view.todayTokens, view.todayCost, C, { showCost: false })
+              ], maxW)
+            : '')
+        : pickFittingLine([
+            () => {
+              const bits = [];
+              if (hasToday) bits.push(formatTodaySeg(view.todayTokens, view.todayCost, C));
+              if (hasMonth) bits.push(formatMonthSeg(view.monthTokens, view.monthCost, C));
+              return bits.join(sep);
+            },
+            () => (hasToday ? formatTodaySeg(view.todayTokens, view.todayCost, C) : '')
+          ], maxW);
+      if (usageRow) out.push(usageRow);
+      if (quotaRow) out.push(quotaRow);
     }
     return out.join('\n');
   }
 
   // Default 2-line layered mode
-  const l1 = [];
-  if (tierMode === 'wide') {
-    l1.push(`${ctxLabel} ${buildBar(view.usedPct ?? 0, 8, C)} ${pctStr}${tokPair ? ` ${tokPair}` : ''}`);
+  const buildL1Two = ({ barW, includeTok, compactCache, includeLastCache, includeTps, includeCost, labelCost, showTodayCost }) => {
+    const l1 = [buildCtxPart(barW, includeTok)];
     if (view.avgCache != null) {
-      l1.push(formatCacheSeg(view.avgCache, view.lastCache, view.coldStart, C, { compact: false }));
+      l1.push(formatCacheSeg(view.avgCache, includeLastCache ? view.lastCache : null, view.coldStart, C, { compact: compactCache }));
     }
-    if (view.tps != null && Number.isFinite(Number(view.tps)) && Number(view.tps) > 0) {
-      l1.push(formatTpsSeg(view.tps, C));
+    if (includeTps && hasTps) l1.push(formatTpsSeg(view.tps, C));
+    if (includeCost && view.sessCost > 0) l1.push(formatSessionCostSeg(view.sessCost, C, { labeled: labelCost }));
+    if (hasToday && (showTodayCost || view.todayTokens > 0)) {
+      l1.push(formatTodaySeg(view.todayTokens, view.todayCost, C, { showCost: showTodayCost }));
     }
-    if (view.sessCost > 0) l1.push(formatSessionCostSeg(view.sessCost, C, { labeled: true }));
-    if (view.todayTokens > 0 || view.todayCost > 0) {
-      l1.push(formatTodaySeg(view.todayTokens, view.todayCost, C));
-    }
-  } else if (tierMode === 'mid') {
-    l1.push(`${ctxLabel} ${buildBar(view.usedPct ?? 0, 6, C)} ${pctStr}${tokPair ? ` ${tokPair}` : ''}`);
-    if (view.avgCache != null) l1.push(formatCacheSeg(view.avgCache, null, view.coldStart, C, { compact: true }));
-    if (view.sessCost > 0) l1.push(formatSessionCostSeg(view.sessCost, C, { labeled: false }));
-    if (view.todayTokens > 0) l1.push(formatTodaySeg(view.todayTokens, view.todayCost, C, { showCost: false }));
-  } else {
-    l1.push(`${ctxLabel} ${pctStr}`);
-    if (view.avgCache != null) l1.push(formatCacheSeg(view.avgCache, null, view.coldStart, C, { compact: true }));
-    if (view.todayTokens > 0) l1.push(formatTodaySeg(view.todayTokens, view.todayCost, C, { showCost: false }));
-  }
+    return l1.join(sep);
+  };
 
-  const quotaMode2 = tierMode === 'wide' ? 'full' : (tierMode === 'mid' ? 'compact' : 'narrow');
-  const l2Blocks = [];
-  const gp = formatPoolSegment(gPool, { mode: quotaMode2, C, nowSec });
-  const ngp = formatPoolSegment(ngPool, { mode: quotaMode2, C, nowSec });
-  if (gp) l2Blocks.push(gp);
-  if (ngp) l2Blocks.push(ngp);
-  const colabTier2 = tierMode === 'wide' && view.width < 118 && gp && ngp ? 'narrow' : tierMode;
-  const cb = formatColabCompact(view.colab, { tierMode: colabTier2, C });
-  if (cb) l2Blocks.push(cb);
+  const l1Line = pickFittingLine(
+    tierMode === 'wide'
+      ? [
+          () => buildL1Two({ barW: 8, includeTok: true, compactCache: false, includeLastCache: true, includeTps: true, includeCost: true, labelCost: true, showTodayCost: true }),
+          () => buildL1Two({ barW: 8, includeTok: true, compactCache: false, includeLastCache: false, includeTps: true, includeCost: true, labelCost: true, showTodayCost: true }),
+          () => buildL1Two({ barW: 6, includeTok: false, compactCache: true, includeLastCache: false, includeTps: true, includeCost: true, labelCost: false, showTodayCost: true })
+        ]
+      : (tierMode === 'mid'
+          ? [
+              () => buildL1Two({ barW: 6, includeTok: true, compactCache: true, includeLastCache: false, includeTps: false, includeCost: true, labelCost: false, showTodayCost: false }),
+              () => buildL1Two({ barW: 6, includeTok: false, compactCache: true, includeLastCache: false, includeTps: false, includeCost: true, labelCost: false, showTodayCost: false })
+            ]
+          : [
+              () => buildL1Two({ barW: 0, includeTok: false, compactCache: true, includeLastCache: false, includeTps: false, includeCost: false, labelCost: false, showTodayCost: false })
+            ]),
+    maxW
+  );
 
-  if (l2Blocks.length === 0) return l1.join(sep);
-  return `${l1.join(sep)}\n${l2Blocks.join(pipe)}`;
+  const buildL2Pair = (qMode, cMode) => {
+    const blocks = [];
+    const gp = formatPoolSegment(gPool, { mode: qMode, C, nowSec });
+    const ngp = formatPoolSegment(ngPool, { mode: qMode, C, nowSec });
+    if (gp) blocks.push(gp);
+    if (ngp) blocks.push(ngp);
+    if (cMode) {
+      const cb = formatColabCompact(view.colab, { tierMode: cMode, C });
+      if (cb) blocks.push(cb);
+    }
+    return blocks.join(pipe);
+  };
+
+  const l2Candidates = tierMode === 'wide'
+    ? [
+        () => buildL2Pair('full', 'wide'),
+        () => buildL2Pair('full', 'mid'),
+        () => buildL2Pair('full', 'narrow'),
+        () => buildL2Pair('mid', 'narrow'),
+        () => buildL2Pair('compact', 'narrow')
+      ]
+    : (tierMode === 'mid'
+        ? [
+            () => buildL2Pair('compact', 'mid'),
+            () => buildL2Pair('compact', 'narrow'),
+            () => buildL2Pair('narrow', 'narrow')
+          ]
+        : [
+            () => buildL2Pair('narrow', 'narrow'),
+            () => buildL2Pair('narrow', null)
+          ]);
+
+  const l2Line = pickFittingLine(l2Candidates, maxW);
+  if (!l2Line) return l1Line;
+  return `${l1Line}\n${l2Line}`;
 }
 
 const SOLO_SURFACE_HOOK_PREFIX =
@@ -581,7 +719,7 @@ function extractDirectSoloBridge(cmd) {
  * and restoring Solo's canonical `if [ -n "$CLI_AGENTS_SURFACE_ID" ] ...; fi` wrapper on uninstall.
  */
 export function configureAgyStatusLine({
-  hudCommand = 'agy-hud statusline',
+  hudCommand = 'agy-hud render',
   uninstall = false,
   stackWithDefault = true,
   soloSync = false,

@@ -31,7 +31,7 @@ import {
 const STATE_VERSION = 2;
 const CONV_ID_RE = /^[0-9a-f-]{8,64}$/i;
 const MAX_CHUNK_BYTES = 8 * 1024 * 1024;
-const DEFAULT_SEEN_STEPS_MAX_AGE_MS = 7 * 86_400_000;
+const DEFAULT_SEEN_STEPS_MAX_AGE_MS = 24 * 3_600_000;
 
 function parseDurationSec(val) {
   if (val == null) return null;
@@ -488,7 +488,7 @@ export function runIncrementalSync({
     }
   }
 
-  // Prune deleted files and trim seenSteps on inactive historical sessions (>7d)
+  // Prune deleted files and trim seenSteps on inactive historical sessions (>24h)
   // so incremental_state.v1.json stays compact without affecting session/byDay totals.
   const nowMs = now instanceof Date ? now.getTime() : Date.now();
   const maxStepAge = Number.isFinite(seenStepsMaxAgeMs) && seenStepsMaxAgeMs > 0
