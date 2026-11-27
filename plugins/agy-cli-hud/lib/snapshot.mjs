@@ -4,9 +4,15 @@
  */
 
 import { existsSync } from 'node:fs';
-import { readJsonSafe, resolveHudPaths, writeJsonAtomic } from './paths.mjs';
+import { formatLocalDateKey, readJsonSafe, resolveHudPaths, writeJsonAtomic } from './paths.mjs';
 import { extractEffortFromModel, formatModelDisplay, normalizeModelId, resolvePlanMonthlyUsd } from './pricing.mjs';
-import { normalizeAgyQuotaMap, normalizeHostCacheQuotas } from './quota.mjs';
+import {
+  attachWeeklyDailyToPools,
+  extractTodayWeeklyUsageMap,
+  normalizeAgyQuotaMap,
+  normalizeHostCacheQuotas,
+  updateWeeklyQuotaLedger
+} from './quota.mjs';
 import { DEFAULT_THEME, normalizeThemeName } from './themes.mjs';
 
 export const DEFAULT_CONFIG = {
@@ -94,8 +100,10 @@ export function extractLiveStatuslineFacts(stdinPayload) {
     ? normalizeAgyQuotaMap(stdinPayload.quota, { source: 'agy_statusline', stale: false })
     : null;
 
+  const nowMs = Date.now();
   return {
-    observed_at: Math.floor(Date.now() / 1000),
+    observed_at: Math.floor(nowMs / 1000),
+    observed_at_ms: nowMs,
     has_stdin_payload: true,
     conversation_id: convId,
     agent_state: typeof stdinPayload.agent_state === 'string' ? stdinPayload.agent_state : null,
@@ -209,9 +217,11 @@ export function composeSnapshot({
   };
 
   // Quotas: prefer live statusLine callback -> previous snapshot -> desktop host cache
+  const nowMs = Date.now();
+  const todayKey = incrementalResult?.todayKey || formatLocalDateKey(nowMs);
   let quotas = { source: 'none', stale: true, pools: [] };
   if (live?.quotas?.pools?.length) {
-    const ageSec = Math.floor(Date.now() / 1000) - (live.observed_at || 0);
+    const ageSec = Math.floor(nowMs / 1000) - (live.observed_at || 0);
     quotas = {
       source: live.quotas.source || 'agy_statusline',
       stale: ageSec > 300,
@@ -228,10 +238,34 @@ export function composeSnapshot({
     }
   }
 
-  const gPool = (quotas.pools || []).find((p) => p.id === 'gemini') || null;
-  const ngPool = (quotas.pools || []).find((p) => p.id === 'non_gemini') || null;
+  // Daily weekly-quota consumption ledger (handles mid-day weekly resets & day rollover)
+  let quotaLedger = readJsonSafe(paths.quotaLedgerPath, null);
+  if (live?.quotas?.pools?.length && (live.quotas.source || 'agy_statusline') === 'agy_statusline') {
+    const liveObsMs = Number.isFinite(Number(live.observed_at_ms))
+      ? Number(live.observed_at_ms)
+      : (Number.isFinite(Number(live.observed_at)) && Number(live.observed_at) > 0
+          ? Number(live.observed_at) * 1000
+          : nowMs);
+    const updated = updateWeeklyQuotaLedger(quotaLedger, live.quotas.pools, {
+      nowMs: liveObsMs,
+      onlyIfNewer: true
+    });
+    quotaLedger = updated.ledger;
+    if (updated.changed) {
+      writeJsonAtomic(paths.quotaLedgerPath, quotaLedger, { mode: 0o600, pretty: false });
+    }
+  }
+  const dailyWeeklyByPool = extractTodayWeeklyUsageMap(quotaLedger, todayKey);
+  const enrichedPools = attachWeeklyDailyToPools(quotas.pools || [], dailyWeeklyByPool);
+
+  const gPool = enrichedPools.find((p) => p.id === 'gemini') || null;
+  const ngPool = enrichedPools.find((p) => p.id === 'non_gemini') || null;
+  const gDaily = dailyWeeklyByPool.gemini || null;
+  const ngDaily = dailyWeeklyByPool.non_gemini || null;
   quotas = {
     ...quotas,
+    day_key: todayKey,
+    pools: enrichedPools,
     gemini: {
       five_hour: {
         remaining_percent: gPool?.five_hour_remaining_percent ?? null,
@@ -239,7 +273,11 @@ export function composeSnapshot({
       },
       weekly: {
         remaining_percent: gPool?.weekly_remaining_percent ?? null,
-        resets_at: gPool?.weekly_resets_at ?? null
+        resets_at: gPool?.weekly_resets_at ?? null,
+        used_today_percent: gDaily?.used_today_percent ?? null,
+        reset_count_today: gDaily?.reset_count_today ?? 0,
+        pre_reset_used_percent: gDaily?.pre_reset_used_percent ?? 0,
+        post_reset_used_percent: gDaily?.post_reset_used_percent ?? null
       }
     },
     non_gemini: {
@@ -249,7 +287,11 @@ export function composeSnapshot({
       },
       weekly: {
         remaining_percent: ngPool?.weekly_remaining_percent ?? null,
-        resets_at: ngPool?.weekly_resets_at ?? null
+        resets_at: ngPool?.weekly_resets_at ?? null,
+        used_today_percent: ngDaily?.used_today_percent ?? null,
+        reset_count_today: ngDaily?.reset_count_today ?? 0,
+        pre_reset_used_percent: ngDaily?.pre_reset_used_percent ?? 0,
+        post_reset_used_percent: ngDaily?.post_reset_used_percent ?? null
       }
     }
   };
@@ -356,11 +398,14 @@ export function composeSnapshot({
     today_usd: snapshot.rollups.today.api_cost_usd,
     month_tokens: snapshot.rollups.month.tokens,
     month_cost: snapshot.rollups.month.api_cost_usd,
+    quota_day: todayKey,
     g5h: gPool?.five_hour_remaining_percent ?? null,
     g5h_reset: gPool?.five_hour_resets_at ?? null,
     gw: gPool?.weekly_remaining_percent ?? null,
+    gw_used_today: gDaily?.used_today_percent ?? null,
     ng5h: ngPool?.five_hour_remaining_percent ?? null,
     ngw: ngPool?.weekly_remaining_percent ?? null,
+    ngw_used_today: ngDaily?.used_today_percent ?? null,
     pools: quotas.pools,
     colab_connected: Boolean(colab.connected),
     colab_tier: colab.connected ? (colab.tier ?? null) : null,

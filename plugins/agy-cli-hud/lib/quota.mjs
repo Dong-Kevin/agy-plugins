@@ -1,7 +1,15 @@
 /**
- * Dual-pool quota normalization for agy CLI (Gemini + Non-Gemini / 3P) and fallback caches.
+ * Dual-pool quota normalization & daily weekly-quota consumption tracker for agy CLI
+ * (Gemini + Non-Gemini / 3P) and fallback caches.
  * Always normalizes percentages to REMAINING percent (0..100) to avoid used-vs-remaining ambiguity.
  */
+
+import { formatLocalDateKey } from './paths.mjs';
+
+const WEEKLY_WINDOW_SEC = 7 * 86_400;
+const RESET_SHIFT_THRESHOLD_SEC = 3600;
+const MIDNIGHT_BRIDGE_MS = 30 * 60_000;
+const LEDGER_VERSION = 1;
 
 function toEpochSeconds(rawReset, resetInSeconds = null, nowMs = Date.now()) {
   if (typeof rawReset === 'number' && Number.isFinite(rawReset) && rawReset > 1_000_000_000) {
@@ -149,4 +157,326 @@ export function formatResetCountdown(resetsAtEpochSec, nowSec = Math.floor(Date.
     return mins > 0 ? `${hours}h${mins}m` : `${hours}h`;
   }
   return `${totalMin}m`;
+}
+
+function round1(v) {
+  const num = Number(v);
+  if (!Number.isFinite(num) || num <= 0) return 0;
+  return Number(num.toFixed(1));
+}
+
+function getLocalDayStartMs(nowMs) {
+  const d = new Date(nowMs);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).getTime();
+}
+
+/**
+ * Checks whether a 7-day weekly quota window started earlier on the same local calendar day.
+ * When true, all consumption in the current window (100 - remaining_percent) occurred today.
+ */
+export function isWeeklyWindowStartedToday(resetsAtSec, todayKey, nowMs = Date.now()) {
+  if (typeof resetsAtSec !== 'number' || !Number.isFinite(resetsAtSec) || !todayKey) return false;
+  const nowSec = Math.floor(nowMs / 1000);
+  const remainingSec = resetsAtSec - nowSec;
+  if (remainingSec < 6 * 86_400 - 600 || remainingSec > WEEKLY_WINDOW_SEC + 600) {
+    return false;
+  }
+  const approxStartMs = (resetsAtSec - WEEKLY_WINDOW_SEC) * 1000;
+  return formatLocalDateKey(approxStartMs) === todayKey;
+}
+
+function buildPoolDailySummary(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  const used = round1(entry.used_today_percent);
+  const preReset = round1(entry.pre_reset_used_percent);
+  const resetCount = Math.max(0, Math.floor(Number(entry.reset_count_today) || 0));
+  const postReset = resetCount > 0 ? round1(Math.max(0, used - preReset)) : null;
+  return {
+    used_today_percent: used,
+    pre_reset_used_percent: preReset,
+    post_reset_used_percent: postReset,
+    reset_count_today: resetCount
+  };
+}
+
+function normalizePrevPoolEntry(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  if (typeof raw.day_key !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(raw.day_key)) return null;
+  const lastRem = clampPercent(raw.last_remaining_percent);
+  if (lastRem === null) return null;
+  const startRem = clampPercent(raw.cycle_start_remaining_percent) ?? lastRem;
+  const minRem = clampPercent(raw.cycle_min_remaining_percent) ?? lastRem;
+  const resetsAt = typeof raw.last_resets_at === 'number' && Number.isFinite(raw.last_resets_at) && raw.last_resets_at > 1_000_000_000
+    ? Math.round(raw.last_resets_at)
+    : null;
+  const obsMs = typeof raw.last_observed_at_ms === 'number' && Number.isFinite(raw.last_observed_at_ms)
+    ? Math.round(raw.last_observed_at_ms)
+    : null;
+  return {
+    day_key: raw.day_key,
+    used_today_percent: round1(raw.used_today_percent),
+    pre_reset_used_percent: round1(raw.pre_reset_used_percent),
+    reset_count_today: Math.max(0, Math.floor(Number(raw.reset_count_today) || 0)),
+    cycle_start_remaining_percent: startRem,
+    cycle_min_remaining_percent: minRem,
+    last_remaining_percent: lastRem,
+    last_resets_at: resetsAt,
+    last_observed_at_ms: obsMs
+  };
+}
+
+/**
+ * Pure state transition for one pool's daily weekly-quota consumption.
+ * Accurately accumulates pre-reset + post-reset usage when a weekly reset happens mid-day,
+ * guards against rounding oscillation and stale multi-tab observations, and rolls cleanly at local midnight.
+ */
+export function applyWeeklyPoolObservation(
+  prevRaw,
+  observation,
+  { nowMs = Date.now(), onlyIfNewer = false } = {}
+) {
+  const prev = normalizePrevPoolEntry(prevRaw);
+  const rem = clampPercent(observation?.weekly_remaining_percent ?? observation?.remaining_percent);
+  if (rem === null) {
+    return { entry: prev, changed: false };
+  }
+  const rawResetsAt = observation?.weekly_resets_at ?? observation?.resets_at;
+  const resetsAt = typeof rawResetsAt === 'number' && Number.isFinite(rawResetsAt) && rawResetsAt > 1_000_000_000
+    ? Math.round(rawResetsAt)
+    : null;
+
+  const tsMs = Number.isFinite(nowMs) ? Math.round(nowMs) : Date.now();
+  const nowSec = Math.floor(tsMs / 1000);
+  const todayKey = formatLocalDateKey(tsMs);
+  if (!todayKey) {
+    return { entry: prev, changed: false };
+  }
+
+  if (onlyIfNewer && prev && prev.last_observed_at_ms != null && tsMs <= prev.last_observed_at_ms) {
+    return { entry: prev, changed: false };
+  }
+  if (prev && todayKey < prev.day_key) {
+    return { entry: prev, changed: false };
+  }
+
+  // First observation ever or new local calendar day rollover
+  if (!prev || todayKey > prev.day_key) {
+    const prevResetFellToday = Boolean(
+      prev &&
+      prev.last_resets_at != null &&
+      resetsAt != null &&
+      (resetsAt - prev.last_resets_at) >= RESET_SHIFT_THRESHOLD_SEC &&
+      formatLocalDateKey(prev.last_resets_at * 1000) === todayKey
+    );
+    const prevResetExpiredToday = Boolean(
+      prev &&
+      prev.last_resets_at != null &&
+      resetsAt == null &&
+      nowSec >= prev.last_resets_at - 60 &&
+      rem > prev.last_remaining_percent + 1.0 &&
+      formatLocalDateKey(prev.last_resets_at * 1000) === todayKey
+    );
+    const startedToday = prevResetFellToday || prevResetExpiredToday || isWeeklyWindowStartedToday(resetsAt, todayKey, tsMs);
+
+    if (startedToday) {
+      return {
+        entry: {
+          day_key: todayKey,
+          used_today_percent: round1(Math.max(0, 100 - rem)),
+          pre_reset_used_percent: 0,
+          reset_count_today: 1,
+          cycle_start_remaining_percent: 100,
+          cycle_min_remaining_percent: rem,
+          last_remaining_percent: rem,
+          last_resets_at: resetsAt,
+          last_observed_at_ms: tsMs
+        },
+        changed: true
+      };
+    }
+
+    // Bridge turns that started shortly before local midnight (within 30m) in the same weekly cycle
+    const sameCycleAcrossMidnight = Boolean(
+      prev && (
+        prev.last_resets_at != null && resetsAt != null
+          ? Math.abs(resetsAt - prev.last_resets_at) < RESET_SHIFT_THRESHOLD_SEC
+          : rem <= prev.last_remaining_percent + 0.5
+      )
+    );
+    const todayStartMs = getLocalDayStartMs(tsMs);
+    const bridgedMidnight = Boolean(
+      prev &&
+      sameCycleAcrossMidnight &&
+      prev.last_observed_at_ms != null &&
+      prev.last_observed_at_ms < todayStartMs &&
+      (todayStartMs - prev.last_observed_at_ms) <= MIDNIGHT_BRIDGE_MS &&
+      rem <= prev.last_remaining_percent
+    );
+    if (bridgedMidnight) {
+      const startRem = prev.last_remaining_percent;
+      return {
+        entry: {
+          day_key: todayKey,
+          used_today_percent: round1(Math.max(0, startRem - rem)),
+          pre_reset_used_percent: 0,
+          reset_count_today: 0,
+          cycle_start_remaining_percent: startRem,
+          cycle_min_remaining_percent: rem,
+          last_remaining_percent: rem,
+          last_resets_at: resetsAt ?? prev.last_resets_at,
+          last_observed_at_ms: tsMs
+        },
+        changed: true
+      };
+    }
+
+    return {
+      entry: {
+        day_key: todayKey,
+        used_today_percent: 0,
+        pre_reset_used_percent: 0,
+        reset_count_today: 0,
+        cycle_start_remaining_percent: rem,
+        cycle_min_remaining_percent: rem,
+        last_remaining_percent: rem,
+        last_resets_at: resetsAt,
+        last_observed_at_ms: tsMs
+      },
+      changed: true
+    };
+  }
+
+  // Same local calendar day: ignore stale observations from an earlier weekly cycle
+  if (prev.last_resets_at != null && resetsAt != null && resetsAt < prev.last_resets_at - RESET_SHIFT_THRESHOLD_SEC) {
+    return { entry: prev, changed: false };
+  }
+
+  let didReset = false;
+  if (prev.last_resets_at != null && resetsAt != null) {
+    didReset = (resetsAt - prev.last_resets_at) >= RESET_SHIFT_THRESHOLD_SEC;
+  } else if (prev.last_resets_at != null && resetsAt == null) {
+    didReset = nowSec >= prev.last_resets_at - 60 && rem > prev.last_remaining_percent + 1.0;
+  } else if (prev.last_resets_at == null && resetsAt != null) {
+    didReset = (isWeeklyWindowStartedToday(resetsAt, todayKey, tsMs) && rem > prev.last_remaining_percent + 1.0) ||
+      (rem - prev.last_remaining_percent >= 10.0);
+  } else {
+    didReset = (rem - prev.last_remaining_percent >= 10.0);
+  }
+
+  if (didReset) {
+    const preReset = round1(prev.used_today_percent);
+    const postReset = round1(Math.max(0, 100 - rem));
+    return {
+      entry: {
+        day_key: todayKey,
+        used_today_percent: round1(preReset + postReset),
+        pre_reset_used_percent: preReset,
+        reset_count_today: prev.reset_count_today + 1,
+        cycle_start_remaining_percent: 100,
+        cycle_min_remaining_percent: rem,
+        last_remaining_percent: rem,
+        last_resets_at: resetsAt,
+        last_observed_at_ms: tsMs
+      },
+      changed: true
+    };
+  }
+
+  // Same cycle today: monotonic floor prevents oscillation drift & stale multi-tab double-counting
+  const nextMin = Math.min(prev.cycle_min_remaining_percent, rem);
+  const nextUsed = round1(prev.pre_reset_used_percent + Math.max(0, prev.cycle_start_remaining_percent - nextMin));
+  const nextResetsAt = resetsAt ?? prev.last_resets_at;
+  const meaningfulChange =
+    nextMin !== prev.cycle_min_remaining_percent ||
+    nextUsed !== prev.used_today_percent ||
+    (prev.last_resets_at == null && nextResetsAt != null);
+
+  if (!meaningfulChange) {
+    return { entry: prev, changed: false };
+  }
+
+  return {
+    entry: {
+      day_key: todayKey,
+      used_today_percent: nextUsed,
+      pre_reset_used_percent: prev.pre_reset_used_percent,
+      reset_count_today: prev.reset_count_today,
+      cycle_start_remaining_percent: prev.cycle_start_remaining_percent,
+      cycle_min_remaining_percent: nextMin,
+      last_remaining_percent: nextMin,
+      last_resets_at: nextResetsAt,
+      last_observed_at_ms: tsMs
+    },
+    changed: true
+  };
+}
+
+export function extractTodayWeeklyUsageMap(ledger, todayKey = formatLocalDateKey(Date.now())) {
+  const out = {};
+  const pools = ledger?.pools && typeof ledger.pools === 'object' ? ledger.pools : null;
+  if (!pools || !todayKey) return out;
+  for (const [poolId, raw] of Object.entries(pools)) {
+    const norm = normalizePrevPoolEntry(raw);
+    if (!norm || norm.day_key !== todayKey) continue;
+    out[poolId] = buildPoolDailySummary(norm);
+  }
+  return out;
+}
+
+export function updateWeeklyQuotaLedger(prevLedger, pools, { nowMs = Date.now(), onlyIfNewer = false } = {}) {
+  const tsMs = Number.isFinite(nowMs) ? Math.round(nowMs) : Date.now();
+  const todayKey = formatLocalDateKey(tsMs);
+  const prevPools = prevLedger?.pools && typeof prevLedger.pools === 'object' ? prevLedger.pools : {};
+  const nextPools = {};
+  for (const [poolId, raw] of Object.entries(prevPools)) {
+    const norm = normalizePrevPoolEntry(raw);
+    if (norm) nextPools[poolId] = norm;
+  }
+
+  let changed = false;
+  if (Array.isArray(pools)) {
+    for (const pool of pools) {
+      if (!pool || !pool.id || pool.weekly_remaining_percent == null) continue;
+      const res = applyWeeklyPoolObservation(nextPools[pool.id], pool, { nowMs: tsMs, onlyIfNewer });
+      if (res.entry) nextPools[pool.id] = res.entry;
+      if (res.changed) changed = true;
+    }
+  }
+
+  const ledger = {
+    version: LEDGER_VERSION,
+    updated_at_ms: changed ? tsMs : (Number(prevLedger?.updated_at_ms) || tsMs),
+    pools: nextPools
+  };
+  return {
+    ledger,
+    changed,
+    todayKey,
+    byPool: extractTodayWeeklyUsageMap(ledger, todayKey)
+  };
+}
+
+export function attachWeeklyDailyToPools(pools, byPool) {
+  if (!Array.isArray(pools)) return [];
+  const map = byPool && typeof byPool === 'object' ? byPool : {};
+  return pools.map((p) => {
+    if (!p || typeof p !== 'object') return p;
+    const daily = p.id ? map[p.id] : null;
+    if (!daily) {
+      return {
+        ...p,
+        weekly_used_today_percent: p.weekly_used_today_percent ?? null,
+        weekly_reset_count_today: p.weekly_reset_count_today ?? 0,
+        weekly_pre_reset_used_percent: p.weekly_pre_reset_used_percent ?? 0,
+        weekly_post_reset_used_percent: p.weekly_post_reset_used_percent ?? null
+      };
+    }
+    return {
+      ...p,
+      weekly_used_today_percent: daily.used_today_percent,
+      weekly_reset_count_today: daily.reset_count_today,
+      weekly_pre_reset_used_percent: daily.pre_reset_used_percent,
+      weekly_post_reset_used_percent: daily.post_reset_used_percent
+    };
+  });
 }

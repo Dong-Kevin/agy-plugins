@@ -5,8 +5,14 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { resolveHudPaths, writeJsonAtomic } from './paths.mjs';
-import { formatResetCountdown, normalizeAgyQuotaMap } from './quota.mjs';
+import { formatLocalDateKey, resolveHudPaths, writeJsonAtomic } from './paths.mjs';
+import {
+  attachWeeklyDailyToPools,
+  extractTodayWeeklyUsageMap,
+  formatResetCountdown,
+  normalizeAgyQuotaMap,
+  updateWeeklyQuotaLedger
+} from './quota.mjs';
 import { detectColorDepth, resolveStatuslineColors, resolveThemeName } from './themes.mjs';
 
 const RESET = '\x1b[0m';
@@ -83,7 +89,33 @@ function lookupSummarySession(summary, convId, hasPayload) {
   return null;
 }
 
-function resolveLiveView(stdinPayload, summary) {
+function seedLedgerFromSummary(summary, todayKey, nowMs) {
+  if (!summary || summary.quota_day !== todayKey || !Array.isArray(summary.pools)) return null;
+  const pools = {};
+  for (const p of summary.pools) {
+    if (!p || !p.id || p.weekly_remaining_percent == null || p.weekly_used_today_percent == null) continue;
+    const rem = Math.max(0, Math.min(100, Number(p.weekly_remaining_percent)));
+    const used = Math.max(0, Number(p.weekly_used_today_percent) || 0);
+    const preReset = Math.max(0, Number(p.weekly_pre_reset_used_percent) || 0);
+    const resetCount = Math.max(0, Math.floor(Number(p.weekly_reset_count_today) || 0));
+    const postUsed = Math.max(0, used - preReset);
+    const cycleStart = resetCount > 0 ? 100 : Math.min(100, Number((rem + postUsed).toFixed(1)));
+    pools[p.id] = {
+      day_key: todayKey,
+      used_today_percent: Number(used.toFixed(1)),
+      pre_reset_used_percent: Number(preReset.toFixed(1)),
+      reset_count_today: resetCount,
+      cycle_start_remaining_percent: cycleStart,
+      cycle_min_remaining_percent: rem,
+      last_remaining_percent: rem,
+      last_resets_at: p.weekly_resets_at ?? null,
+      last_observed_at_ms: nowMs - 1
+    };
+  }
+  return Object.keys(pools).length ? { version: 1, updated_at_ms: nowMs - 1, pools } : null;
+}
+
+function resolveLiveView(stdinPayload, summary, { nowMs = Date.now(), quotaLedger = null } = {}) {
   const s = summary && typeof summary === 'object' ? summary : {};
   const payload = stdinPayload && typeof stdinPayload === 'object' ? stdinPayload : null;
   const hasPayload = Boolean(payload);
@@ -133,10 +165,32 @@ function resolveLiveView(stdinPayload, summary) {
   const sessSaved = matched ? (matched.sess_saved || 0) : 0;
   const tps = matched ? (matched.tps ?? null) : null;
 
+  const todayKey = formatLocalDateKey(nowMs);
   const livePools = payload?.quota && typeof payload.quota === 'object'
-    ? normalizeAgyQuotaMap(payload.quota).pools
+    ? normalizeAgyQuotaMap(payload.quota, { nowMs }).pools
     : [];
-  const pools = livePools.length ? livePools : (Array.isArray(s.pools) ? s.pools : []);
+  let pools;
+  if (livePools.length) {
+    const baseLedger = quotaLedger || seedLedgerFromSummary(s, todayKey, nowMs);
+    const projected = updateWeeklyQuotaLedger(baseLedger, livePools, { nowMs });
+    pools = attachWeeklyDailyToPools(livePools, projected.byPool);
+  } else {
+    const rawSummaryPools = Array.isArray(s.pools) ? s.pools : [];
+    const ledgerByPool = extractTodayWeeklyUsageMap(quotaLedger, todayKey);
+    if (Object.keys(ledgerByPool).length > 0) {
+      pools = attachWeeklyDailyToPools(rawSummaryPools, ledgerByPool);
+    } else if (s.quota_day && s.quota_day !== todayKey) {
+      pools = rawSummaryPools.map((p) => ({
+        ...p,
+        weekly_used_today_percent: null,
+        weekly_reset_count_today: 0,
+        weekly_pre_reset_used_percent: 0,
+        weekly_post_reset_used_percent: null
+      }));
+    } else {
+      pools = rawSummaryPools;
+    }
+  }
 
   const width = Number(payload?.terminal_width) > 0
     ? Number(payload.terminal_width)
@@ -162,33 +216,66 @@ function resolveLiveView(stdinPayload, summary) {
   };
 }
 
-function formatPoolSegment(pool, { compact = false, C, nowSec = Math.floor(Date.now() / 1000) } = {}) {
+export function formatWeeklyUsedPercent(v) {
+  const num = Number(v);
+  if (!Number.isFinite(num) || num < 0) return null;
+  if (num === 0) return '0%';
+  if (num < 10) {
+    const rounded = Number(num.toFixed(1));
+    return Number.isInteger(rounded) ? `${rounded}%` : `${rounded.toFixed(1)}%`;
+  }
+  return `${Math.round(num)}%`;
+}
+
+function weeklyUsedColor(pct, C) {
+  if (pct >= 35) return C.barDanger;
+  if (pct >= 20) return C.barWarn;
+  return C.quota;
+}
+
+function formatWeeklyUsedTag(pool, C, { style = 'full' } = {}) {
+  const raw = pool?.weekly_used_today_percent;
+  if (raw == null || !Number.isFinite(Number(raw))) return '';
+  const val = Math.max(0, Number(raw));
+  const pctStr = formatWeeklyUsedPercent(val);
+  if (!pctStr) return '';
+  const resetMark = Number(pool?.weekly_reset_count_today) > 0 ? '↻' : '';
+  const text = style === 'narrow'
+    ? `今${pctStr}${resetMark}`
+    : `(今用${pctStr}${resetMark})`;
+  return paint(text, weeklyUsedColor(val, C), { dim: val === 0 });
+}
+
+function formatPoolSegment(pool, { compact = false, mode = null, C, nowSec = Math.floor(Date.now() / 1000) } = {}) {
   if (!pool) return '';
+  const resolvedMode = mode || (compact ? 'compact' : 'full');
   const isGemini = pool.id === 'gemini';
   const tagText = isGemini
-    ? (compact ? 'G' : 'Gemini')
-    : (compact ? '非G' : '非Gemini');
+    ? (resolvedMode === 'full' ? 'Gemini' : 'G')
+    : (resolvedMode === 'full' ? '非Gemini' : '非G');
   const f5 = pool.five_hour_remaining_percent;
   const fw = pool.weekly_remaining_percent;
   if (f5 == null && fw == null) return '';
 
   const tagStyled = paint(tagText, C.quota);
-  if (compact) {
+  if (resolvedMode === 'compact' || resolvedMode === 'narrow') {
     const p5 = f5 != null ? paint(`${Math.round(f5)}%`, remainingColor(f5, C)) : paint('--', C.muted);
     const pw = fw != null ? paint(`${Math.round(fw)}%`, remainingColor(fw, C)) : paint('--', C.muted);
     const slash = paint('/', C.muted);
-    return `${tagStyled} ${p5}${slash}${pw}`;
+    const usedTag = fw != null ? formatWeeklyUsedTag(pool, C, { style: resolvedMode }) : '';
+    return `${tagStyled} ${p5}${slash}${pw}${usedTag ? ` ${usedTag}` : ''}`;
   }
 
   const dot = paint(' · ', C.muted);
   const parts = [];
   if (f5 != null) {
-    const cd = formatResetCountdown(pool.five_hour_resets_at, nowSec);
+    const cd = resolvedMode === 'full' ? formatResetCountdown(pool.five_hour_resets_at, nowSec) : '';
     const cdStr = cd ? ` ${paint(`(${cd})`, C.quota, { dim: true })}` : '';
     parts.push(`${paint('5h', C.quota)} ${paint(`余${Math.round(f5)}%`, remainingColor(f5, C))}${cdStr}`);
   }
   if (fw != null) {
-    parts.push(`${paint('周', C.quota)} ${paint(`余${Math.round(fw)}%`, remainingColor(fw, C))}`);
+    const usedTag = formatWeeklyUsedTag(pool, C, { style: resolvedMode });
+    parts.push(`${paint('周', C.quota)} ${paint(`余${Math.round(fw)}%`, remainingColor(fw, C))}${usedTag ? ` ${usedTag}` : ''}`);
   }
   return `${tagStyled} ${parts.join(dot)}`;
 }
@@ -215,23 +302,23 @@ function formatColabCompact(colab, { tierMode = 'wide', C } = {}) {
   return `${paint('Colab', C.colab)} ${bits.join(paint(' · ', C.muted))}`;
 }
 
-function formatColabDetailLine(colab, C) {
+function formatColabDetailLine(colab, C, { narrow = false } = {}) {
   if (!colab) return '';
   const parts = [];
   const tier = colab.tier ? `[${colab.tier}]` : '';
   const cuPart = colab.cu != null ? `${Number(colab.cu).toFixed(1)} CU` : '';
   const headText = ['Colab', tier, cuPart].filter(Boolean).join(' ');
-  const ratePart = colab.rate != null && colab.rate > 0
+  const ratePart = !narrow && colab.rate != null && colab.rate > 0
     ? ` ${paint(`(-${Number(colab.rate).toFixed(1)}/h${colab.hrs != null ? ` ≈${Number(colab.hrs).toFixed(1)}h` : ''})`, C.colab, { dim: true })}`
     : '';
   if (headText) parts.push(`${paint(headText, C.colab)}${ratePart}`);
 
   if (colab.rt) {
     if (colab.rt.gpu) parts.push(paint(colab.rt.gpu, C.colab));
-    if (colab.rt.ram_u != null && colab.rt.ram_t != null) {
+    if (!narrow && colab.rt.ram_u != null && colab.rt.ram_t != null) {
       parts.push(paint(`RAM ${Math.round(colab.rt.ram_u)}/${Math.round(colab.rt.ram_t)}G`, C.total));
     }
-    if (colab.rt.vram_u != null && colab.rt.vram_t != null) {
+    if (!narrow && colab.rt.vram_u != null && colab.rt.vram_t != null) {
       parts.push(paint(`VRAM ${Math.round(colab.rt.vram_u)}/${Math.round(colab.rt.vram_t)}G`, C.total));
     }
     if (colab.rt.idle_m != null) {
@@ -280,7 +367,16 @@ function formatTpsSeg(tps, C) {
 }
 
 export function renderStatusLine(stdinPayload, summary, options = {}) {
-  const view = resolveLiveView(stdinPayload, summary);
+  const nowMs = Number.isFinite(Number(options.nowMs))
+    ? Number(options.nowMs)
+    : (Number.isFinite(Number(options.nowSec)) ? Number(options.nowSec) * 1000 : Date.now());
+  const nowSec = Number.isFinite(Number(options.nowSec))
+    ? Number(options.nowSec)
+    : Math.floor(nowMs / 1000);
+  const view = resolveLiveView(stdinPayload, summary, {
+    nowMs,
+    quotaLedger: options.quotaLedger || null
+  });
   const linesMode = [1, 2, 3].includes(Number(options.lines))
     ? Number(options.lines)
     : ([1, 2, 3].includes(Number(summary?.lines)) ? Number(summary.lines) : 2);
@@ -293,7 +389,6 @@ export function renderStatusLine(stdinPayload, summary, options = {}) {
     summaryTheme: summary?.theme
   });
   const C = resolveStatuslineColors(themeName, depth);
-  const nowSec = options.nowSec || Math.floor(Date.now() / 1000);
 
   const sep = paint(' · ', C.muted);
   const pipe = paint(' │ ', C.muted);
@@ -317,8 +412,8 @@ export function renderStatusLine(stdinPayload, summary, options = {}) {
       segs.push(`${ctxLabel} ${buildBar(view.usedPct ?? 0, 8, C)} ${pctStr}${tokPair ? ` ${tokPair}` : ''}`);
       if (view.avgCache != null) segs.push(formatCacheSeg(view.avgCache, null, view.coldStart, C, { compact: false }));
       if (view.todayTokens > 0 || view.todayCost > 0) segs.push(formatTodaySeg(view.todayTokens, view.todayCost, C));
-      const gp = formatPoolSegment(gPool, { compact: true, C, nowSec });
-      const ngp = formatPoolSegment(ngPool, { compact: true, C, nowSec });
+      const gp = formatPoolSegment(gPool, { mode: 'narrow', C, nowSec });
+      const ngp = formatPoolSegment(ngPool, { mode: 'narrow', C, nowSec });
       if (gp) segs.push(gp);
       if (ngp) segs.push(ngp);
       const cb = formatColabCompact(view.colab, { tierMode: 'narrow', C });
@@ -327,14 +422,15 @@ export function renderStatusLine(stdinPayload, summary, options = {}) {
       segs.push(`${ctxLabel} ${pctStr}`);
       if (view.avgCache != null) segs.push(formatCacheSeg(view.avgCache, null, view.coldStart, C, { compact: true }));
       if (view.todayTokens > 0) segs.push(formatTodaySeg(view.todayTokens, view.todayCost, C, { showCost: false }));
-      const gp = formatPoolSegment(gPool, { compact: true, C, nowSec });
+      const gp = formatPoolSegment(gPool, { mode: 'narrow', C, nowSec });
       if (gp) segs.push(gp);
     }
     return segs.join(sep);
   }
 
-  // 3-line layered mode
+  // 3-line layered mode: dedicated quota row (with daily weekly-quota consumption) so every row breathes cleanly
   if (linesMode === 3) {
+    const hasColab = Boolean(view.colab);
     const l1 = [];
     const barW = tierMode === 'wide' ? 10 : (tierMode === 'mid' ? 6 : 0);
     l1.push(barW > 0
@@ -347,32 +443,38 @@ export function renderStatusLine(stdinPayload, summary, options = {}) {
     if (tierMode !== 'narrow' && view.tps != null && Number.isFinite(Number(view.tps)) && Number(view.tps) > 0) {
       l1.push(formatTpsSeg(view.tps, C));
     }
-    if (view.sessCost > 0) {
+    if (view.sessCost > 0 && (!hasColab || tierMode !== 'narrow')) {
       l1.push(formatSessionCostSeg(view.sessCost, C, {
         labeled: tierMode === 'wide',
-        saved: tierMode === 'wide' ? view.sessSaved : 0
+        saved: !hasColab && tierMode === 'wide' ? view.sessSaved : 0
       }));
     }
+    if (hasColab && (view.todayTokens > 0 || view.todayCost > 0)) {
+      l1.push(formatTodaySeg(view.todayTokens, view.todayCost, C, { showCost: tierMode === 'wide' }));
+    }
 
-    const l2Blocks = [];
-    const usageBits = [];
-    if (view.todayTokens > 0 || view.todayCost > 0) {
-      usageBits.push(formatTodaySeg(view.todayTokens, view.todayCost, C));
-    }
-    if (tierMode === 'wide' && (view.monthTokens > 0 || view.monthCost > 0)) {
-      usageBits.push(formatMonthSeg(view.monthTokens, view.monthCost, C));
-    }
-    if (usageBits.length) l2Blocks.push(usageBits.join(sep));
-    const gp = formatPoolSegment(gPool, { compact: tierMode !== 'wide', C, nowSec });
-    const ngp = formatPoolSegment(ngPool, { compact: tierMode !== 'wide', C, nowSec });
-    if (gp) l2Blocks.push(gp);
-    if (ngp) l2Blocks.push(ngp);
+    const quotaMode3 = tierMode === 'wide' ? 'full' : (tierMode === 'mid' ? 'mid' : 'narrow');
+    const quotaBlocks = [];
+    const gp = formatPoolSegment(gPool, { mode: quotaMode3, C, nowSec });
+    const ngp = formatPoolSegment(ngPool, { mode: quotaMode3, C, nowSec });
+    if (gp) quotaBlocks.push(gp);
+    if (ngp) quotaBlocks.push(ngp);
 
     const out = [l1.join(sep)];
-    if (l2Blocks.length) out.push(l2Blocks.join(pipe));
-    if (view.colab) {
-      const l3 = formatColabDetailLine(view.colab, C);
+    if (hasColab) {
+      if (quotaBlocks.length) out.push(quotaBlocks.join(pipe));
+      const l3 = formatColabDetailLine(view.colab, C, { narrow: tierMode === 'narrow' });
       if (l3) out.push(l3);
+    } else {
+      const usageBits = [];
+      if (view.todayTokens > 0 || view.todayCost > 0) {
+        usageBits.push(formatTodaySeg(view.todayTokens, view.todayCost, C));
+      }
+      if (tierMode !== 'narrow' && (view.monthTokens > 0 || view.monthCost > 0)) {
+        usageBits.push(formatMonthSeg(view.monthTokens, view.monthCost, C));
+      }
+      if (usageBits.length) out.push(usageBits.join(sep));
+      if (quotaBlocks.length) out.push(quotaBlocks.join(pipe));
     }
     return out.join('\n');
   }
@@ -402,12 +504,14 @@ export function renderStatusLine(stdinPayload, summary, options = {}) {
     if (view.todayTokens > 0) l1.push(formatTodaySeg(view.todayTokens, view.todayCost, C, { showCost: false }));
   }
 
+  const quotaMode2 = tierMode === 'wide' ? 'full' : (tierMode === 'mid' ? 'compact' : 'narrow');
   const l2Blocks = [];
-  const gp = formatPoolSegment(gPool, { compact: tierMode !== 'wide', C, nowSec });
-  const ngp = formatPoolSegment(ngPool, { compact: tierMode !== 'wide', C, nowSec });
+  const gp = formatPoolSegment(gPool, { mode: quotaMode2, C, nowSec });
+  const ngp = formatPoolSegment(ngPool, { mode: quotaMode2, C, nowSec });
   if (gp) l2Blocks.push(gp);
   if (ngp) l2Blocks.push(ngp);
-  const cb = formatColabCompact(view.colab, { tierMode, C });
+  const colabTier2 = tierMode === 'wide' && view.width < 118 && gp && ngp ? 'narrow' : tierMode;
+  const cb = formatColabCompact(view.colab, { tierMode: colabTier2, C });
   if (cb) l2Blocks.push(cb);
 
   if (l2Blocks.length === 0) return l1.join(sep);

@@ -56,6 +56,7 @@ export function resolveHudPaths() {
     snapshotPath: join(dataDir, 'usage-hud.v1.json'),
     summaryPath: join(dataDir, 'statusline_summary.v1.json'),
     liveSessionPath: join(dataDir, 'live_statusline.v1.json'),
+    quotaLedgerPath: join(dataDir, 'quota_daily.v1.json'),
     syncStampPath: join(dataDir, 'last_sync.stamp'),
     soloSyncStampPath: join(dataDir, 'sync.stamp'),
     syncLockPath: join(dataDir, 'sync.lock'),

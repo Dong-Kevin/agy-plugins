@@ -9,8 +9,9 @@
 import { spawn } from 'node:child_process';
 import { existsSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { ensurePrivateDir, readJsonSafe, resolveHudPaths, writeJsonAtomic } from '../lib/paths.mjs';
-import { formatTokensCompact, formatUsdCompact, renderStatusLine } from '../lib/statusline.mjs';
+import { ensurePrivateDir, formatLocalDateKey, readJsonSafe, resolveHudPaths, writeJsonAtomic } from '../lib/paths.mjs';
+import { normalizeAgyQuotaMap, updateWeeklyQuotaLedger } from '../lib/quota.mjs';
+import { formatTokensCompact, formatUsdCompact, formatWeeklyUsedPercent, renderStatusLine } from '../lib/statusline.mjs';
 
 const SELF_PATH = fileURLToPath(import.meta.url);
 const SYNC_LOCK_STALE_MS = 30_000;
@@ -157,7 +158,7 @@ function isLivePayloadEquivalent(prev, next) {
   return JSON.stringify(prev.raw_quota ?? null) === JSON.stringify(next.raw_quota ?? null);
 }
 
-function persistLiveStdinFast(payload, paths) {
+function persistLiveStdinFast(payload, paths, nowMs = Date.now()) {
   if (!payload || typeof payload !== 'object') return;
   try {
     // Only keep lightweight scalar facts, never raw prompts or email
@@ -176,9 +177,10 @@ function persistLiveStdinFast(payload, paths) {
       : (usedPct === 0 ? 0 : (windowSize && usedPct !== null ? Math.round((usedPct / 100) * windowSize) : null));
     const model = payload.model && typeof payload.model === 'object' ? payload.model : {};
     const rawSessionCost = payload.cost?.total_cost_usd ?? payload.cost?.total_usd;
-    const nowSec = Math.floor(Date.now() / 1000);
+    const nowSec = Math.floor(nowMs / 1000);
     const live = {
       observed_at: nowSec,
+      observed_at_ms: nowMs,
       has_stdin_payload: true,
       conversation_id: String(payload.conversation_id || payload.session_id || '').trim() || null,
       agent_state: typeof payload.agent_state === 'string' ? payload.agent_state : null,
@@ -217,22 +219,42 @@ async function handleStatuslineFast(args) {
     try { stdinPayload = JSON.parse(raw); } catch {}
   }
 
+  const nowMs = Date.now();
   const summary = readJsonSafe(paths.summaryPath, null);
+  const quotaLedger = readJsonSafe(paths.quotaLedgerPath, null);
+  let nextQuotaLedger = quotaLedger;
+  let quotaLedgerChanged = false;
+  if (stdinPayload?.quota && typeof stdinPayload.quota === 'object') {
+    const livePools = normalizeAgyQuotaMap(stdinPayload.quota, { nowMs }).pools;
+    if (livePools.length) {
+      const updated = updateWeeklyQuotaLedger(quotaLedger, livePools, { nowMs });
+      nextQuotaLedger = updated.ledger;
+      quotaLedgerChanged = updated.changed;
+    }
+  }
+
   const linesArg = parseFlagValue(args, '--lines', null);
   const themeArg = parseFlagValue(args, '--theme', null);
   const noColor = args.includes('--no-color') || process.env.NO_COLOR !== undefined;
   const output = renderStatusLine(stdinPayload, summary, {
     lines: linesArg ? Number(linesArg) : undefined,
     theme: themeArg || undefined,
-    color: noColor ? false : undefined
+    color: noColor ? false : undefined,
+    nowMs,
+    quotaLedger: nextQuotaLedger
   });
 
   if (output) {
     process.stdout.write(`${output}\n`);
   }
 
+  if (quotaLedgerChanged && nextQuotaLedger) {
+    try {
+      writeJsonAtomic(paths.quotaLedgerPath, nextQuotaLedger, { mode: 0o600, pretty: false });
+    } catch {}
+  }
   if (stdinPayload) {
-    persistLiveStdinFast(stdinPayload, paths);
+    persistLiveStdinFast(stdinPayload, paths, nowMs);
   }
   const curConvId = stdinPayload && typeof stdinPayload === 'object'
     ? (String(stdinPayload.conversation_id || stdinPayload.session_id || '').trim() || null)
@@ -357,8 +379,24 @@ function formatReadableStatus(snap) {
   );
   if (pools.length) {
     for (const p of pools) {
+      let weeklyTodayPart = '';
+      if (p.weekly_used_today_percent != null) {
+        const usedStr = formatWeeklyUsedPercent(p.weekly_used_today_percent) || `${p.weekly_used_today_percent}%`;
+        const resetCount = Number(p.weekly_reset_count_today) || 0;
+        const preUsed = Number(p.weekly_pre_reset_used_percent) || 0;
+        const postUsed = p.weekly_post_reset_used_percent != null
+          ? Number(p.weekly_post_reset_used_percent)
+          : Math.max(0, Number(p.weekly_used_today_percent) - preUsed);
+        let resetNote = '';
+        if (resetCount > 0 && preUsed > 0) {
+          resetNote = `（今日已重置：重置前 ${formatWeeklyUsedPercent(preUsed)} + 重置后 ${formatWeeklyUsedPercent(postUsed)}）`;
+        } else if (resetCount > 0) {
+          resetNote = '（今日已重置）';
+        }
+        weeklyTodayPart = ` | 今日周耗 ${usedStr}${resetNote}`;
+      }
       lines.push(
-        `额度 [${p.label}]: 5h 剩余 ${p.five_hour_remaining_percent ?? '--'}% | 周 剩余 ${p.weekly_remaining_percent ?? '--'}%`
+        `额度 [${p.label}]: 5h 剩余 ${p.five_hour_remaining_percent ?? '--'}% | 周 剩余 ${p.weekly_remaining_percent ?? '--'}%${weeklyTodayPart}`
       );
     }
   } else {
@@ -576,6 +614,7 @@ function buildThemeSample(themeName, { color = true, colorDepth = null, lines = 
     lines,
     color,
     theme: themeName,
+    quota_day: formatLocalDateKey(nowSec * 1000),
     session_id: 'sample',
     avg_cache: 86,
     last_cache: 94,
@@ -586,6 +625,10 @@ function buildThemeSample(themeName, { color = true, colorDepth = null, lines = 
     today_cost: 6.8,
     month_tokens: 68_500_000,
     month_cost: 192.4,
+    pools: [
+      { id: 'gemini', weekly_remaining_percent: 64, weekly_resets_at: nowSec + 280000, weekly_used_today_percent: 14, weekly_reset_count_today: 0, weekly_pre_reset_used_percent: 0 },
+      { id: 'non_gemini', weekly_remaining_percent: 88, weekly_resets_at: nowSec + 471600, weekly_used_today_percent: 3, weekly_reset_count_today: 0, weekly_pre_reset_used_percent: 0 }
+    ],
     colab: { tier: 'PRO+', cu: 84.2, rate: 13.1, hrs: 6.4, rt: { gpu: 'A100', ram_u: 14, ram_t: 83, vram_u: 22, vram_t: 40, idle_m: 72 } }
   };
   return renderStatusLine(samplePayload, sampleSummary, {
