@@ -211,7 +211,7 @@ try {
     $ScriptDir = $FoundManifest.Directory.FullName
   }
 
-  $TreeFiles = @("package.json", "main.mjs", "path_utils.mjs", "mentions.mjs", "drawer.mjs", "cli.mjs", "native_drawer_macos.swift", "index.html", "styles.css", "app.js", "sidecar.json")
+  $TreeFiles = @("package.json", "main.mjs", "path_utils.mjs", "mentions.mjs", "drawer.mjs", "updater.mjs", "cli.mjs", "native_drawer_macos.swift", "index.html", "styles.css", "app.js", "sidecar.json")
   foreach ($Req in @("plugin.json", "hooks.json", "hooks\session_host_guard.mjs", "assets\logo.svg", "rules\AGENTS.md", "skills\agy-finder\SKILL.md")) {
     if (-not (Test-Path (Join-Path $ScriptDir $Req))) {
       throw "安装包缺少必需文件：$Req"
@@ -253,7 +253,7 @@ try {
   Copy-Item -Force (Join-Path $ScriptDir "rules\AGENTS.md") (Join-Path $TargetDir "rules\AGENTS.md")
   Copy-Item -Force (Join-Path $ScriptDir "skills\agy-finder\SKILL.md") (Join-Path $TargetDir "skills\agy-finder\SKILL.md")
 
-  foreach ($f in @("package.json", "main.mjs", "path_utils.mjs", "mentions.mjs", "drawer.mjs", "cli.mjs", "native_drawer_macos.swift", "index.html", "styles.css", "app.js")) {
+  foreach ($f in @("package.json", "main.mjs", "path_utils.mjs", "mentions.mjs", "drawer.mjs", "updater.mjs", "cli.mjs", "native_drawer_macos.swift", "index.html", "styles.css", "app.js")) {
     Copy-Item -Force (Join-Path $ScriptDir "sidecars\tree\$f") (Join-Path $TargetDir "sidecars\tree\$f")
   }
 

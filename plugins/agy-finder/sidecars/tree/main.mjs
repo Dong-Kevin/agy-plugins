@@ -5,7 +5,7 @@
  * and supports `--standalone` loopback mode on 127.0.0.1 for local testing.
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync, watchFile } from 'node:fs';
 import { createServer } from 'node:http';
@@ -36,6 +36,7 @@ import {
   toFileUri,
   toLocalPath
 } from './path_utils.mjs';
+import { checkForUpdates, performSelfUpdate } from './updater.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = resolve(__dirname, '..', '..');
@@ -117,7 +118,7 @@ function getHostShortcuts() {
   };
 }
 
-function createHandlers(getDefaultConvId, makeResponse, transformHtml = (html) => html) {
+function createHandlers(getDefaultConvId, makeResponse, transformHtml = (html) => html, handlerOpts = {}) {
   return {
     indexHtml: () =>
       makeResponse(transformHtml(readLocal(join(__dirname, 'index.html'))), {
@@ -272,6 +273,24 @@ function createHandlers(getDefaultConvId, makeResponse, transformHtml = (html) =
         return { ok: false, lockBusy: true, error: '共享触发锁繁忙，请稍后重试', trigger };
       }
       return { ok: true, trigger };
+    },
+
+    apiUpdateGet: async (data = {}) => {
+      const force = data.force === '1' || data.force === 'true' || data.force === true;
+      return checkForUpdates({ force });
+    },
+
+    apiUpdatePost: async (data = {}) => {
+      const action = String(data.action || 'apply').toLowerCase();
+      if (action === 'check') {
+        return checkForUpdates({ force: true });
+      }
+      const force = data.force === '1' || data.force === 'true' || data.force === true;
+      const res = await performSelfUpdate({ force });
+      if (res?.ok && res?.updated && typeof handlerOpts.onSelfUpdated === 'function') {
+        handlerOpts.onSelfUpdated(res);
+      }
+      return res;
     }
   };
 }
@@ -279,7 +298,7 @@ function createHandlers(getDefaultConvId, makeResponse, transformHtml = (html) =
 async function startOfficialSidecar() {
   if (process.env.ANTIGRAVITY_SIDECAR_HOT_RELOAD !== '0') {
     let reloadTimer = null;
-    for (const f of ['main.mjs', 'path_utils.mjs', 'mentions.mjs', 'drawer.mjs', 'app.js', 'styles.css', 'index.html']) {
+    for (const f of ['main.mjs', 'path_utils.mjs', 'mentions.mjs', 'drawer.mjs', 'updater.mjs', 'app.js', 'styles.css', 'index.html']) {
       watchFile(join(__dirname, f), { interval: 2500 }, (curr, prev) => {
         if (curr.mtimeMs > 0 && curr.mtimeMs !== prev.mtimeMs && !reloadTimer) {
           reloadTimer = setTimeout(() => process.exit(0), 350);
@@ -292,7 +311,25 @@ async function startOfficialSidecar() {
   const app = new SidecarApp();
   const h = createHandlers(
     () => app.config.conversationId || '',
-    (body, opts) => new Response(body, opts)
+    (body, opts) => new Response(body, opts),
+    (html) => html,
+    {
+      onSelfUpdated: () => {
+        if (process.env.AGY_FINDER_UPDATE_TARGET_DIR || process.env.AGY_FINDER_UPDATE_NO_RESTART === '1') return;
+        const t = setTimeout(async () => {
+          if (process.platform === 'darwin' && process.env.AGY_FINDER_DISABLE_DRAWER !== '1') {
+            try {
+              const st = getDrawerStatus();
+              if (st?.daemonRunning) {
+                await controlDrawer({ action: 'ensure-hotkey' }).catch(() => {});
+              }
+            } catch {}
+          }
+          process.exit(0);
+        }, 500);
+        t.unref?.();
+      }
+    }
   );
 
   app.page('/', h.indexHtml);
@@ -312,6 +349,8 @@ async function startOfficialSidecar() {
   app.api('/api/shortcut', h.apiShortcutPost, 'POST');
   app.api('/api/aux-pane-trigger', h.apiAuxTriggerGet, 'GET');
   app.api('/api/aux-pane-trigger', h.apiAuxTriggerPost, 'POST');
+  app.api('/api/update', h.apiUpdateGet, 'GET');
+  app.api('/api/update', h.apiUpdatePost, 'POST');
 
   recordActiveContextHint({
     conversationId: app.config.conversationId || '',
@@ -382,10 +421,37 @@ async function startStandaloneServer() {
     return html.includes('</head>') ? html.replace('</head>', `${tag}</head>`) : `${tag}${html}`;
   };
 
+  let serverRef = null;
   const h = createHandlers(
     () => process.env.ANTIGRAVITY_CONVERSATION_ID || '',
     (body, opts) => ({ __rawResponse: true, body, ...opts }),
-    injectTokenMeta
+    injectTokenMeta,
+    {
+      onSelfUpdated: () => {
+        if (process.env.AGY_FINDER_UPDATE_TARGET_DIR || process.env.AGY_FINDER_UPDATE_NO_RESTART === '1') return;
+        const boundPort = serverRef?.address()?.port || port;
+        const t = setTimeout(() => {
+          const relaunch = () => {
+            try {
+              const child = spawn(
+                process.execPath,
+                [join(__dirname, 'main.mjs'), '--standalone', '--port', String(boundPort)],
+                { detached: true, stdio: 'ignore', env: process.env }
+              );
+              child.unref();
+            } catch {}
+            process.exit(0);
+          };
+          try {
+            serverRef?.close(() => relaunch());
+            setTimeout(relaunch, 600).unref?.();
+          } catch {
+            relaunch();
+          }
+        }, 450);
+        t.unref?.();
+      }
+    }
   );
 
   const routes = new Map([
@@ -410,7 +476,9 @@ async function startStandaloneServer() {
     ['GET:/api/shortcut', h.apiShortcutGet],
     ['POST:/api/shortcut', h.apiShortcutPost],
     ['GET:/api/aux-pane-trigger', h.apiAuxTriggerGet],
-    ['POST:/api/aux-pane-trigger', h.apiAuxTriggerPost]
+    ['POST:/api/aux-pane-trigger', h.apiAuxTriggerPost],
+    ['GET:/api/update', h.apiUpdateGet],
+    ['POST:/api/update', h.apiUpdatePost]
   ]);
 
   const server = createServer(async (req, res) => {
@@ -465,6 +533,7 @@ async function startStandaloneServer() {
     }
   });
 
+  serverRef = server;
   server.listen(port, '127.0.0.1', () => {
     const actualUrl = `http://127.0.0.1:${server.address().port}`;
     console.log(`AGY_FINDER_URL=${actualUrl}`);

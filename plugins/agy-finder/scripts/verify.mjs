@@ -5,6 +5,7 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   appendFileSync,
   existsSync,
@@ -16,11 +17,12 @@ import {
   utimesSync,
   writeFileSync
 } from 'node:fs';
-import { request as httpRequest } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import vm from 'node:vm';
+import { deflateRawSync } from 'node:zlib';
 
 import {
   CLI_GUARD_MESSAGE,
@@ -43,6 +45,13 @@ import {
   writeAuxPaneTrigger
 } from '../sidecars/tree/drawer.mjs';
 import { getConversationMentions } from '../sidecars/tree/mentions.mjs';
+import {
+  checkForUpdates,
+  compareSemver,
+  extractZipBuffer,
+  parseSemver,
+  performSelfUpdate
+} from '../sidecars/tree/updater.mjs';
 import {
   BROWSER_HTML_EXTS,
   isBrowserHtmlPath,
@@ -108,6 +117,7 @@ function verifySyntax() {
     'sidecars/tree/path_utils.mjs',
     'sidecars/tree/mentions.mjs',
     'sidecars/tree/drawer.mjs',
+    'sidecars/tree/updater.mjs',
     'sidecars/tree/cli.mjs',
     'sidecars/tree/app.js',
     'scripts/verify.mjs'
@@ -154,6 +164,11 @@ function verifyCssAndHtml() {
     'btn-record-aux-shortcut',
     'btn-toggle-aux-shortcut',
     'btn-aux-open',
+    'btn-update',
+    'update-dot',
+    'update-panel-row',
+    'btn-panel-update',
+    'update-banner',
     'preview-modal',
     'btn-preview-browser'
   ]) {
@@ -2011,6 +2026,190 @@ function verifyCliSessionHostGuard() {
   pass('SessionStart CLI host guard hook (POSIX/Win path detection, desktop/IDE precedence & stdin/stdout contract)');
 }
 
+function buildTestZip(entries) {
+  const crcTable = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    crcTable[n] = c >>> 0;
+  }
+  const crc32 = (buf) => {
+    let c = 0xffffffff;
+    for (let i = 0; i < buf.length; i++) c = crcTable[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  for (const e of entries) {
+    const nameBuf = Buffer.from(e.name, 'utf8');
+    const raw = Buffer.isBuffer(e.data) ? e.data : Buffer.from(String(e.data), 'utf8');
+    const crc = e.badCrc ? (crc32(raw) ^ 0x12345678) >>> 0 : crc32(raw);
+    const comp = deflateRawSync(raw);
+    const lfh = Buffer.alloc(30);
+    lfh.writeUInt32LE(0x04034b50, 0);
+    lfh.writeUInt16LE(20, 4);
+    lfh.writeUInt16LE(8, 8);
+    lfh.writeUInt32LE(crc, 14);
+    lfh.writeUInt32LE(comp.length, 18);
+    lfh.writeUInt32LE(raw.length, 22);
+    lfh.writeUInt16LE(nameBuf.length, 26);
+    localParts.push(lfh, nameBuf, comp);
+
+    const cdh = Buffer.alloc(46);
+    cdh.writeUInt32LE(0x02014b50, 0);
+    cdh.writeUInt16LE((3 << 8) | 20, 4);
+    cdh.writeUInt16LE(20, 6);
+    cdh.writeUInt16LE(8, 10);
+    cdh.writeUInt32LE(crc, 16);
+    cdh.writeUInt32LE(comp.length, 20);
+    cdh.writeUInt32LE(raw.length, 24);
+    cdh.writeUInt16LE(nameBuf.length, 28);
+    const mode = e.unixMode ?? (e.executable ? 0o100755 : 0o100644);
+    cdh.writeUInt32LE((mode << 16) >>> 0, 38);
+    cdh.writeUInt32LE(offset, 42);
+    centralParts.push(cdh, nameBuf);
+    offset += lfh.length + nameBuf.length + comp.length;
+  }
+  const centralBuf = Buffer.concat(centralParts);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(centralBuf.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  return Buffer.concat([...localParts, centralBuf, eocd]);
+}
+
+async function verifyAutoUpdater() {
+  assert.equal(compareSemver('0.3.1', '0.3.0'), 1);
+  assert.equal(compareSemver('0.3.0', '0.3.0'), 0);
+  assert.equal(compareSemver('0.3.0-beta.1', '0.3.0'), -1);
+  assert.equal(parseSemver('invalid'), null);
+
+  assert.throws(() => extractZipBuffer(buildTestZip([{ name: '../evil.txt', data: 'x' }])), /越界路径/);
+  assert.throws(() => extractZipBuffer(buildTestZip([{ name: 'agy-finder/link', data: 'x', unixMode: 0o120777 }])), /符号链接/);
+  assert.throws(() => extractZipBuffer(buildTestZip([{ name: 'agy-finder/a.txt', data: 'abc', badCrc: true }])), /CRC-32/);
+
+  const work = mkdtempSync(join(tmpdir(), 'agy-finder-updater-test-'));
+  const targetDir = join(work, 'installed', 'agy-finder');
+  const dataDir = join(work, 'state');
+  mkdirSync(join(targetDir, 'sidecars', 'tree'), { recursive: true });
+  writeFileSync(join(targetDir, 'plugin.json'), JSON.stringify({
+    name: 'agy-finder',
+    version: '0.3.0',
+    repository: 'https://github.com/Dong-Kevin/agy-plugins'
+  }, null, 2));
+  writeFileSync(join(targetDir, 'sidecars', 'tree', 'main.mjs'), '// old-v0.3.0\n');
+  writeFileSync(join(targetDir, 'sidecars', 'tree', 'sidecar.json'), JSON.stringify({ version: '0.3.0' }));
+
+  const nextZip = buildTestZip([
+    {
+      name: 'agy-finder/plugin.json',
+      data: JSON.stringify({ name: 'agy-finder', version: '0.3.1', repository: 'https://github.com/Dong-Kevin/agy-plugins' })
+    },
+    { name: 'agy-finder/sidecars/tree/main.mjs', data: '// upgraded-v0.3.1\n' },
+    { name: 'agy-finder/sidecars/tree/sidecar.json', data: JSON.stringify({ version: '0.3.1' }) },
+    { name: 'agy-finder/sidecars/tree/cli.mjs', data: '#!/usr/bin/env node\n', executable: true }
+  ]);
+  const validSha = createHash('sha256').update(nextZip).digest('hex');
+
+  let mode = 'normal';
+  let apiHits = 0;
+  let baseUrl = '';
+  const srv = createServer((req, res) => {
+    const u = new URL(req.url || '/', 'http://127.0.0.1');
+    if (u.pathname === '/api/latest') {
+      apiHits += 1;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        tag_name: 'v2026.12.01',
+        name: 'v2026.12.01',
+        html_url: 'https://github.com/Dong-Kevin/agy-plugins/releases/tag/v2026.12.01',
+        published_at: '2026-12-01T00:00:00Z',
+        body: 'Test release',
+        assets: [
+          { name: 'agy-finder-v0.3.1.zip', size: nextZip.length, browser_download_url: `${baseUrl}/dl/zip` },
+          { name: 'agy-finder-v0.3.1.zip.sha256', size: 80, browser_download_url: `${baseUrl}/dl/sha` }
+        ]
+      }));
+      return;
+    }
+    if (u.pathname === '/dl/sha') {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end(`${mode === 'bad-sha' ? '0'.repeat(64) : validSha}  agy-finder-v0.3.1.zip\n`);
+      return;
+    }
+    if (u.pathname === '/dl/zip') {
+      if (mode === 'evil-redirect') {
+        res.writeHead(302, { Location: 'https://evil.example.invalid/malware.zip' });
+        res.end();
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/zip' });
+      res.end(nextZip);
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  const prevEnv = {
+    AGY_FINDER_DATA_DIR: process.env.AGY_FINDER_DATA_DIR,
+    AGY_FINDER_UPDATE_TARGET_DIR: process.env.AGY_FINDER_UPDATE_TARGET_DIR,
+    AGY_FINDER_UPDATE_API_URL: process.env.AGY_FINDER_UPDATE_API_URL,
+    AGY_FINDER_UPDATE_ALLOWED_HOSTS: process.env.AGY_FINDER_UPDATE_ALLOWED_HOSTS
+  };
+  try {
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    baseUrl = `http://127.0.0.1:${srv.address().port}`;
+    process.env.AGY_FINDER_DATA_DIR = dataDir;
+    process.env.AGY_FINDER_UPDATE_TARGET_DIR = targetDir;
+    process.env.AGY_FINDER_UPDATE_API_URL = `${baseUrl}/api/latest`;
+    process.env.AGY_FINDER_UPDATE_ALLOWED_HOSTS = '127.0.0.1';
+
+    const first = await checkForUpdates({ force: true });
+    assert.equal(first.ok, true);
+    assert.equal(first.hasUpdate, true);
+    assert.equal(first.currentVersion, '0.3.0');
+    assert.equal(first.latestVersion, '0.3.1');
+
+    const cached = await checkForUpdates({ force: false });
+    assert.equal(cached.fromCache, true);
+    assert.equal(apiHits, 1, 'Second non-forced check must hit 6h cache');
+
+    mode = 'evil-redirect';
+    const evilRes = await performSelfUpdate();
+    assert.equal(evilRes.ok, false);
+    assert.match(evilRes.error || '', /不受信任的更新域名/);
+
+    mode = 'bad-sha';
+    const badShaRes = await performSelfUpdate();
+    assert.equal(badShaRes.ok, false);
+    assert.match(badShaRes.error || '', /SHA-256/);
+    assert.ok(readFileSync(join(targetDir, 'sidecars', 'tree', 'main.mjs'), 'utf8').includes('old-v0.3.0'));
+
+    mode = 'normal';
+    const okRes = await performSelfUpdate();
+    assert.equal(okRes.ok, true, `Expected update success: ${okRes.error}`);
+    assert.equal(okRes.updated, true);
+    assert.equal(okRes.previousVersion, '0.3.0');
+    assert.equal(okRes.currentVersion, '0.3.1');
+    assert.equal(JSON.parse(readFileSync(join(targetDir, 'plugin.json'), 'utf8')).version, '0.3.1');
+    assert.ok(readFileSync(join(targetDir, 'sidecars', 'tree', 'main.mjs'), 'utf8').includes('upgraded-v0.3.1'));
+    assert.equal(JSON.parse(readFileSync(join(targetDir, 'sidecars', 'tree', 'sidecar.json'), 'utf8')).version, '0.3.1');
+
+    pass('Auto-updater (Semver, Zip-Slip/symlink/CRC-32, allowlist redirect, SHA-256 guard & atomic E2E upgrade)');
+  } finally {
+    srv.close();
+    for (const [k, v] of Object.entries(prevEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   verifyManifestAndAssets();
   verifySyntax();
@@ -2024,6 +2223,7 @@ async function main() {
   await verifyFinderFrontendBehavior();
   await verifyFinderAuxBridgeBehavior();
   verifyCliSessionHostGuard();
+  await verifyAutoUpdater();
   console.log('\nAll agy-finder verification checks passed.');
 }
 

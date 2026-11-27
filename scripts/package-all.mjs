@@ -124,6 +124,7 @@ function packageAgyFinder() {
     ['sidecars/tree/path_utils.mjs', false],
     ['sidecars/tree/mentions.mjs', false],
     ['sidecars/tree/drawer.mjs', false],
+    ['sidecars/tree/updater.mjs', false],
     ['sidecars/tree/cli.mjs', true],
     ['sidecars/tree/native_drawer_macos.swift', false],
     ['sidecars/tree/index.html', false],
@@ -207,7 +208,8 @@ function packageAgyCliHud() {
     ['lib/colab.mjs', false],
     ['lib/snapshot.mjs', false],
     ['lib/themes.mjs', false],
-    ['lib/statusline.mjs', false]
+    ['lib/statusline.mjs', false],
+    ['lib/updater.mjs', false]
   ];
 
   const entries = relFiles.map(([rel, executable]) => {

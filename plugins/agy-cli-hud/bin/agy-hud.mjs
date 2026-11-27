@@ -784,6 +784,7 @@ function printHelp() {
   agy-hud install-statusline [--lines 2] [--solo-sync] 安全写入 agy settings.json（Solo 下默认异步旁路防强杀）
   agy-hud install-statusline --uninstall           移除 HUD 底栏并完好保留 Solo 桥接
   agy-hud config show | set <key> <value>          配置分层行数（1/2/3）、主题、统计范围、月费折算
+  agy-hud update [--check|--apply] [--json]        检查或自动更新至最新 GitHub Release（含 SHA-256 校验）
   agy-hud colab <import-secret|login|logout|status|keepalive|release|snipe>
 `);
 }
@@ -839,6 +840,29 @@ async function main() {
   }
   if (cmd === 'config') {
     await runConfigCommand(rest);
+    return;
+  }
+  if (cmd === 'update') {
+    const paths = resolveHudPaths();
+    const { checkForUpdates, performSelfUpdate } = await import('../lib/updater.mjs');
+    const asJson = rest.includes('--json');
+    const checkOnly = rest.includes('--check') || rest[0] === 'check';
+    const force = rest.includes('--force');
+    const res = checkOnly ? await checkForUpdates({ force: true, paths }) : await performSelfUpdate({ force, paths });
+    if (asJson) {
+      console.log(JSON.stringify(res, null, 2));
+    } else if (!res.ok) {
+      throw new Error(res.error || '检查或更新失败');
+    } else if (checkOnly) {
+      console.log(
+        res.hasUpdate
+          ? `[agy-hud] 发现新版本 v${res.latestVersion}（当前 v${res.currentVersion}），运行 agy-hud update 自动升级。`
+          : `[agy-hud] 当前已是最新版本 v${res.currentVersion}`
+      );
+    } else {
+      console.log(`[agy-hud] ${res.message || `已更新至 v${res.currentVersion}`}`);
+    }
+    if (res.ok === false) process.exit(1);
     return;
   }
   if (cmd === 'colab') {

@@ -48,7 +48,11 @@
     shortcutPanelOpen: false,
     previewPath: '',
     renderedMode: '',          // 'tree' | 'search' | 'empty'
-    renderedRoot: ''
+    renderedRoot: '',
+    updateInfo: null,
+    updateChecking: false,
+    updateApplying: false,
+    updateDismissedVer: ''
   };
 
   // Real-time prefers-reduced-motion tracking
@@ -1454,6 +1458,199 @@
     }
   }
 
+  const UPDATE_DISMISS_STORAGE_KEY = 'af_dismissed_update_ver';
+
+  function readDismissedUpdateVer() {
+    try {
+      return String(localStorage.getItem(UPDATE_DISMISS_STORAGE_KEY) || '').trim();
+    } catch {
+      return state.updateDismissedVer || '';
+    }
+  }
+
+  function writeDismissedUpdateVer(ver) {
+    state.updateDismissedVer = String(ver || '').trim();
+    try {
+      if (state.updateDismissedVer) {
+        localStorage.setItem(UPDATE_DISMISS_STORAGE_KEY, state.updateDismissedVer);
+      } else {
+        localStorage.removeItem(UPDATE_DISMISS_STORAGE_KEY);
+      }
+    } catch {}
+  }
+
+  function renderUpdateUi() {
+    const info = state.updateInfo;
+    const btnTop = $('btn-update');
+    const dotEl = $('update-dot');
+    const curVerEl = $('update-cur-ver');
+    const statusEl = $('update-status-text');
+    const panelBtn = $('btn-panel-update');
+    const bannerEl = $('update-banner');
+    const bannerText = $('update-banner-text');
+    const bannerBtn = $('btn-banner-update');
+
+    const curVer = info?.currentVersion || '0.3.0';
+    const latestVer = info?.latestVersion || curVer;
+    const hasUpdate = Boolean(info?.ok && info?.hasUpdate);
+    const isBusy = Boolean(state.updateChecking || state.updateApplying);
+
+    if (curVerEl) {
+      curVerEl.textContent = `v${curVer}`;
+    }
+    if (btnTop) {
+      btnTop.classList.toggle('has-update', hasUpdate && !state.updateApplying);
+      btnTop.classList.toggle('is-updating', isBusy);
+      btnTop.disabled = state.updateApplying;
+      btnTop.title = state.updateApplying
+        ? '正在下载校验并安装更新…'
+        : hasUpdate
+          ? formatZh(`发现新版本 v${latestVer}，点击一键更新`)
+          : '检查版本更新';
+    }
+    if (dotEl) {
+      dotEl.classList.toggle('hidden', !hasUpdate || state.updateApplying);
+    }
+
+    if (statusEl) {
+      statusEl.classList.remove('is-available', 'is-error');
+      if (state.updateApplying) {
+        statusEl.textContent = '正在更新并重载…';
+        statusEl.classList.add('is-available');
+      } else if (state.updateChecking) {
+        statusEl.textContent = '正在检查…';
+      } else if (!info) {
+        statusEl.textContent = '未检查';
+      } else if (!info.ok) {
+        statusEl.textContent = formatZh(info.error || '检查失败');
+        statusEl.classList.add('is-error');
+      } else if (hasUpdate) {
+        statusEl.textContent = formatZh(`发现新版本 v${latestVer}`);
+        statusEl.classList.add('is-available');
+      } else {
+        statusEl.textContent = '已是最新版本';
+      }
+    }
+
+    if (panelBtn) {
+      panelBtn.disabled = isBusy;
+      panelBtn.classList.toggle('is-pending', isBusy);
+      panelBtn.classList.toggle('af-update-primary-btn', hasUpdate && !isBusy);
+      panelBtn.textContent = state.updateApplying
+        ? '更新中…'
+        : state.updateChecking
+          ? '检查中…'
+          : hasUpdate
+            ? `更新至 v${latestVer}`
+            : '检查更新';
+    }
+
+    if (bannerEl) {
+      const dismissed = readDismissedUpdateVer();
+      const shouldShow = hasUpdate && !state.updateApplying && dismissed !== latestVer;
+      bannerEl.classList.toggle('hidden', !shouldShow);
+      bannerEl.setAttribute('aria-hidden', String(!shouldShow));
+      bannerEl.inert = !shouldShow;
+      if (bannerText && hasUpdate) {
+        bannerText.textContent = formatZh(`AGY Finder v${latestVer} 可用（当前 v${curVer}）`);
+      }
+      if (bannerBtn) {
+        bannerBtn.disabled = isBusy;
+        bannerBtn.textContent = state.updateApplying ? '更新中…' : '立即更新';
+      }
+    }
+  }
+
+  async function loadUpdateStatus({ force = false, silent = true } = {}) {
+    if (state.updateChecking || state.updateApplying) return null;
+    state.updateChecking = true;
+    renderUpdateUi();
+    try {
+      const res = await apiGet('/api/update', force ? { force: '1' } : {});
+      if (res && typeof res === 'object') {
+        state.updateInfo = res;
+        if (!silent) {
+          if (!res.ok) {
+            showToast(res.error || '检查更新失败', 2600);
+          } else if (res.hasUpdate) {
+            showToast(`发现新版本 v${res.latestVersion}，可一键更新`, 2600);
+          } else {
+            showToast(`当前已是最新版本 v${res.currentVersion}`, 2000);
+          }
+        }
+      }
+      return res;
+    } catch (err) {
+      if (!silent) {
+        showToast(`检查更新失败 · ${err?.message || '网络异常'}`, 2600);
+      }
+      return null;
+    } finally {
+      state.updateChecking = false;
+      renderUpdateUi();
+    }
+  }
+
+  function pollUntilReloadReady(expectedVersion) {
+    let attempts = 0;
+    const maxAttempts = 24;
+    const tick = async () => {
+      attempts += 1;
+      try {
+        const res = await apiGet('/api/update');
+        if (res?.currentVersion && (!expectedVersion || res.currentVersion === expectedVersion)) {
+          window.location?.reload?.();
+          return;
+        }
+      } catch {}
+      if (attempts < maxAttempts) {
+        setTimeout(tick, 500);
+      } else {
+        window.location?.reload?.();
+      }
+    };
+    setTimeout(tick, 900);
+  }
+
+  async function triggerPluginUpdate() {
+    if (state.updateApplying) return;
+    if (state.updateInfo?.isDevRepo) {
+      showToast('当前位于源码仓库，请使用 git pull 与 ./install.sh 更新', 2800);
+      return;
+    }
+    state.updateApplying = true;
+    renderUpdateUi();
+    showToast('正在下载校验并安装更新…', 3500);
+    try {
+      const res = await apiPost('/api/update', { action: 'apply' });
+      if (res?.ok && res?.updated) {
+        state.updateInfo = {
+          ...state.updateInfo,
+          ok: true,
+          state: 'up-to-date',
+          hasUpdate: false,
+          currentVersion: res.currentVersion || state.updateInfo?.latestVersion,
+          latestVersion: res.latestVersion || res.currentVersion
+        };
+        writeDismissedUpdateVer('');
+        showToast(res.message || `已更新至 v${res.currentVersion}，正在重载…`, 3200);
+        if (res.requiresReload) {
+          pollUntilReloadReady(res.currentVersion);
+        }
+      } else if (res?.ok && !res?.updated) {
+        state.updateInfo = { ...state.updateInfo, ...res, hasUpdate: false };
+        showToast(res.message || `当前已是最新版本 v${res.currentVersion}`, 2200);
+      } else {
+        showToast(res?.error || '自动更新失败，请稍后重试', 3200);
+      }
+    } catch (err) {
+      showToast(`自动更新失败 · ${err?.message || '网络异常'}`, 3200);
+    } finally {
+      state.updateApplying = false;
+      renderUpdateUi();
+    }
+  }
+
   async function loadShortcutInfo() {
     try {
       const res = await apiGet('/api/shortcut');
@@ -2108,6 +2305,33 @@
       } else {
         updateTreeSelectionOnly(relPath);
       }
+    });
+
+    $('btn-update')?.addEventListener('click', () => {
+      if (state.updateInfo?.ok && state.updateInfo?.hasUpdate) {
+        triggerPluginUpdate();
+      } else {
+        loadUpdateStatus({ force: true, silent: false });
+      }
+    });
+
+    $('btn-panel-update')?.addEventListener('click', () => {
+      if (state.updateInfo?.ok && state.updateInfo?.hasUpdate) {
+        triggerPluginUpdate();
+      } else {
+        loadUpdateStatus({ force: true, silent: false });
+      }
+    });
+
+    $('btn-banner-update')?.addEventListener('click', () => {
+      triggerPluginUpdate();
+    });
+
+    $('btn-banner-dismiss')?.addEventListener('click', () => {
+      if (state.updateInfo?.latestVersion) {
+        writeDismissedUpdateVer(state.updateInfo.latestVersion);
+      }
+      renderUpdateUi();
     });
 
     treeContent?.addEventListener('dblclick', (e) => {
@@ -2765,7 +2989,10 @@
     if (shortcutPanel) shortcutPanel.inert = true;
     const previewModal = $('preview-modal');
     if (previewModal) previewModal.inert = true;
+    const updateBanner = $('update-banner');
+    if (updateBanner) updateBanner.inert = true;
     renderActivePathBar();
+    renderUpdateUi();
     bindEvents();
     startAuxPaneBridgeCoordinator();
     auxVisibilityCallbacks.add(() => {
@@ -2786,6 +3013,9 @@
     setInterval(() => syncVisibleExpandedDirs().catch(() => {}), 3500);
     await pollMentions();
     setInterval(pollMentions, 2500);
+    setTimeout(() => {
+      loadUpdateStatus({ force: false, silent: true }).catch(() => {});
+    }, 1500);
   }
 
   bootstrap();

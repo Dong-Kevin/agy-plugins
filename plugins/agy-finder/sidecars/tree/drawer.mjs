@@ -47,6 +47,7 @@ import {
   toFileUri,
   toLocalPath
 } from './path_utils.mjs';
+import { checkForUpdates, performSelfUpdate } from './updater.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = resolve(__dirname, '..', '..');
@@ -353,6 +354,7 @@ export function normalizeShortcutSpec(raw, platform = process.platform) {
 
 const DAEMON_RUNTIME_FILES = [
   'drawer.mjs',
+  'updater.mjs',
   'native_drawer_macos.swift',
   'path_utils.mjs',
   'mentions.mjs',
@@ -2734,6 +2736,24 @@ async function dispatchDrawerRpc(rawPath, method, rawBody, stateObj, hooks = {})
       return { ok: true, trigger };
     }
   }
+  if (u.pathname === '/api/update') {
+    if (method === 'GET') {
+      const force = data.force === '1' || data.force === 'true' || data.force === true;
+      return checkForUpdates({ force });
+    }
+    if (method === 'POST') {
+      const act = String(data.action || 'apply').toLowerCase();
+      if (act === 'check') {
+        return checkForUpdates({ force: true });
+      }
+      const force = data.force === '1' || data.force === 'true' || data.force === true;
+      const res = await performSelfUpdate({ force });
+      if (res?.ok && res?.updated && typeof hooks.onSelfUpdated === 'function') {
+        hooks.onSelfUpdated(res);
+      }
+      return res;
+    }
+  }
 
   const err = new Error(`Unknown route: ${method} ${u.pathname}`);
   err.status = 404;
@@ -2836,7 +2856,31 @@ async function startMacNativeDaemon({
     onSetPinned: (p) => sendToChild({ type: 'setPinned', pinned: p }),
     onHide: () => sendToChild({ type: 'hideWindow' }),
     onShow: (rp) => sendToChild({ type: 'showWindow', revealPath: rp || '' }),
-    onToggle: () => sendToChild({ type: 'toggleWindow' })
+    onToggle: () => sendToChild({ type: 'toggleWindow' }),
+    onSelfUpdated: () => {
+      if (process.env.AGY_FINDER_UPDATE_TARGET_DIR || process.env.AGY_FINDER_UPDATE_NO_RESTART === '1') return;
+      const wasVisible = Boolean(stateObj.windowVisible);
+      const t = setTimeout(() => {
+        clearDrawerStateIfOwned();
+        sendToChild({ type: 'quit' });
+        setTimeout(() => {
+          try { child.kill('SIGTERM'); } catch {}
+          try {
+            const nextArgs = [join(__dirname, 'drawer.mjs'), '--daemon'];
+            if (wasVisible) nextArgs.push('--show');
+            if (!stateObj.pinned) nextArgs.push('--no-pin');
+            const spawned = spawn(process.execPath, nextArgs, {
+              detached: true,
+              stdio: 'ignore',
+              env: process.env
+            });
+            spawned.unref();
+          } catch {}
+          process.exit(0);
+        }, 160);
+      }, 450);
+      t.unref?.();
+    }
   };
 
   const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
@@ -3148,7 +3192,22 @@ async function startFallbackAppWindowDaemon({ initialPinned, initialPreset, init
 
     try {
       const payload = await dispatchDrawerRpc(u.pathname + u.search, req.method, rawBody, stateObj, {
-        onHide: () => setTimeout(shutdown, 40)
+        onHide: () => setTimeout(shutdown, 40),
+        onSelfUpdated: () => {
+          if (process.env.AGY_FINDER_UPDATE_TARGET_DIR || process.env.AGY_FINDER_UPDATE_NO_RESTART === '1') return;
+          setTimeout(() => {
+            try {
+              const nextArgs = [join(__dirname, 'drawer.mjs'), '--daemon', '--show'];
+              const spawned = spawn(process.execPath, nextArgs, {
+                detached: true,
+                stdio: 'ignore',
+                env: process.env
+              });
+              spawned.unref();
+            } catch {}
+            shutdown();
+          }, 450).unref?.();
+        }
       });
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify(payload));

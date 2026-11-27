@@ -8,6 +8,7 @@
 
 import { controlDrawer, getDrawerStatus, HOTKEY_PRESETS, readActiveContextHint } from './drawer.mjs';
 import { openInDefaultBrowser } from './path_utils.mjs';
+import { checkForUpdates, performSelfUpdate } from './updater.mjs';
 
 function printHelp() {
   console.log(`AGY Finder CLI
@@ -19,6 +20,7 @@ function printHelp() {
   agy-finder close                        关闭/隐藏独立抽屉
   agy-finder aux [path]                   在 AGY 右侧辅助栏打开/切换目录树（可选定位路径）
   agy-finder status [--json]              查看独立抽屉、右侧辅助栏与快捷键状态
+  agy-finder update [--check|--apply]     检查或自动更新至最新 GitHub Release（含 SHA-256 校验）
   agy-finder shortcut [arg]               设置独立抽屉自定义快捷键（off/on/reset/app/global/Ctrl+Shift+E）
   agy-finder aux-shortcut [arg]           设置 AGY 侧栏目录树快捷键（off/on/reset/app/global/Alt+Meta+E）
   agy-finder hotkey <preset>              兼容切换预设快捷键:
@@ -146,6 +148,33 @@ async function main() {
     if (wantsJson) console.log(JSON.stringify(res, null, 2));
     else if (res.ok) console.log(`[agy-finder] 已在默认浏览器中打开：${res.path}`);
     else console.error(`[agy-finder] ${res.error || '无法在默认浏览器中打开'}`);
+    if (res.ok === false) process.exit(1);
+    return;
+  }
+
+  if (cmd === 'update') {
+    const checkOnly = args.includes('--check') || positional[1] === 'check';
+    const force = args.includes('--force');
+    const res = checkOnly ? await checkForUpdates({ force: true }) : await performSelfUpdate({ force });
+    if (res?.ok && res?.updated && process.platform === 'darwin' && !process.env.AGY_FINDER_UPDATE_TARGET_DIR) {
+      const st = getDrawerStatus();
+      if (st?.daemonRunning) {
+        await controlDrawer({ action: 'ensure-hotkey' }).catch(() => {});
+      }
+    }
+    if (wantsJson) {
+      console.log(JSON.stringify(res, null, 2));
+    } else if (!res.ok) {
+      console.error(`[agy-finder] ${res.error || '更新失败'}`);
+    } else if (checkOnly) {
+      console.log(
+        res.hasUpdate
+          ? `[agy-finder] 发现新版本 v${res.latestVersion}（当前 v${res.currentVersion}），运行 agy-finder update 自动升级。`
+          : `[agy-finder] 当前已是最新版本 v${res.currentVersion}`
+      );
+    } else {
+      console.log(`[agy-finder] ${res.message || `已更新至 v${res.currentVersion}`}`);
+    }
     if (res.ok === false) process.exit(1);
     return;
   }

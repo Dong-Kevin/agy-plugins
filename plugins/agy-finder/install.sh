@@ -221,7 +221,7 @@ cp "$SCRIPT_DIR/assets/logo.svg" "$STAGE_DIR/assets/logo.svg"
 cp "$SCRIPT_DIR/rules/AGENTS.md" "$STAGE_DIR/rules/AGENTS.md"
 cp "$SCRIPT_DIR/skills/agy-finder/SKILL.md" "$STAGE_DIR/skills/agy-finder/SKILL.md"
 
-for f in package.json main.mjs path_utils.mjs mentions.mjs drawer.mjs cli.mjs native_drawer_macos.swift index.html styles.css app.js; do
+for f in package.json main.mjs path_utils.mjs mentions.mjs drawer.mjs updater.mjs cli.mjs native_drawer_macos.swift index.html styles.css app.js; do
   cp "$SCRIPT_DIR/sidecars/tree/$f" "$STAGE_DIR/sidecars/tree/$f"
 done
 
@@ -241,7 +241,7 @@ cp -f "$STAGE_DIR/assets/logo.svg" "$TARGET_DIR/assets/logo.svg"
 cp -f "$STAGE_DIR/rules/AGENTS.md" "$TARGET_DIR/rules/AGENTS.md"
 cp -f "$STAGE_DIR/skills/agy-finder/SKILL.md" "$TARGET_DIR/skills/agy-finder/SKILL.md"
 
-for f in package.json main.mjs path_utils.mjs mentions.mjs drawer.mjs cli.mjs native_drawer_macos.swift index.html styles.css app.js; do
+for f in package.json main.mjs path_utils.mjs mentions.mjs drawer.mjs updater.mjs cli.mjs native_drawer_macos.swift index.html styles.css app.js; do
   cp -f "$STAGE_DIR/sidecars/tree/$f" "$TARGET_DIR/sidecars/tree/$f"
 done
 chmod +x "$TARGET_DIR/sidecars/tree/cli.mjs"

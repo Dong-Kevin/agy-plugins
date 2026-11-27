@@ -20,6 +20,7 @@
   --af-pulse-bg: color-mix(in srgb, var(--af-accent) 26%, transparent);
   --af-success: #16a34a;
   --af-success-soft: color-mix(in srgb, var(--af-success) 14%, transparent);
+  --af-danger: #dc2626;
   --af-dir-col: #d97706;
   --af-backdrop: rgba(15, 17, 23, 0.3);
   --af-shadow-sm: 0 4px 12px rgba(0, 0, 0, 0.1);
@@ -67,6 +68,7 @@
   --af-pulse-bg: color-mix(in srgb, var(--af-accent) 34%, transparent);
   --af-success: #4ade80;
   --af-success-soft: color-mix(in srgb, var(--af-success) 18%, transparent);
+  --af-danger: #f87171;
   --af-dir-col: #f59e0b;
   --af-backdrop: rgba(0, 0, 0, 0.52);
   --af-shadow-sm: 0 4px 14px rgba(0, 0, 0, 0.34);
@@ -86,6 +88,7 @@ html.is-theme-switching .af-header,
 html.is-theme-switching .af-path-bar,
 html.is-theme-switching .af-mentions,
 html.is-theme-switching .af-shortcut-panel,
+html.is-theme-switching .af-update-banner,
 html.is-theme-switching .af-preview-modal,
 html.is-theme-switching .af-preview-head,
 html.is-theme-switching .af-preview-body,
@@ -1513,6 +1516,160 @@ html, body {
   }
 }
 
+/* Auto-updater toolbar indicator, shortcut panel row & zero-CLS overlay banner */
+.af-update-btn {
+  position: relative;
+}
+
+.af-update-btn.has-update {
+  color: var(--af-accent);
+  border-color: color-mix(in srgb, var(--af-accent) 42%, transparent);
+  background: var(--af-accent-soft);
+}
+
+.af-update-btn.is-updating svg {
+  animation: af-spin 700ms var(--af-ease-linear) infinite;
+}
+
+.af-update-dot {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--af-accent);
+  box-shadow: 0 0 0 1.5px var(--af-surface);
+  pointer-events: none;
+}
+
+.af-update-panel-row {
+  padding-top: 7px;
+  margin-top: 2px;
+  border-top: 1px solid var(--af-border);
+}
+
+.af-update-ver-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.af-ver-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--af-fg);
+  background: var(--af-surface-2);
+  border: 1px solid var(--af-border);
+}
+
+.af-update-status {
+  font-size: 11px;
+  color: var(--af-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.af-update-status.is-available {
+  color: var(--af-accent);
+  font-weight: 500;
+}
+
+.af-update-status.is-error {
+  color: var(--af-danger);
+}
+
+.af-shell .af-update-banner {
+  position: fixed;
+  left: 8px;
+  right: 8px;
+  bottom: 36px;
+  z-index: 44;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: var(--af-surface);
+  border: 1px solid color-mix(in srgb, var(--af-accent) 44%, var(--af-border));
+  box-shadow: var(--af-shadow-md);
+  color: var(--af-fg);
+  opacity: 1;
+  visibility: visible;
+  transform: translate3d(0, 0, 0);
+  transition:
+    opacity var(--af-dur-base) var(--af-ease-out),
+    transform var(--af-dur-base) var(--af-ease-out),
+    visibility 0s linear 0s;
+}
+
+.af-shell .af-update-banner.hidden {
+  display: flex !important;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translate3d(0, 8px, 0);
+  transition:
+    opacity var(--af-dur-fast) var(--af-ease-in),
+    transform var(--af-dur-fast) var(--af-ease-in),
+    visibility 0s linear var(--af-dur-fast);
+}
+
+.af-update-banner-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.af-update-banner-badge {
+  flex: 0 0 auto;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--af-accent);
+  color: #fff;
+}
+
+.af-update-banner-text {
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.af-update-banner-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+}
+
+.af-update-primary-btn {
+  background: var(--af-accent);
+  border-color: var(--af-accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.af-update-primary-btn:hover:not(:disabled) {
+  filter: brightness(1.06);
+  color: #fff;
+  border-color: var(--af-accent);
+}
+
 /* Complete prefers-reduced-motion degradation matrix */
 @media (prefers-reduced-motion: reduce) {
   :root {
@@ -1572,6 +1729,8 @@ html, body {
   .af-shell .af-shortcut-panel.hidden,
   .af-shell .af-preview-modal,
   .af-shell .af-preview-modal.hidden,
+  .af-shell .af-update-banner,
+  .af-shell .af-update-banner.hidden,
   .af-shell .af-clear-btn,
   .af-shell .af-clear-btn.hidden,
   .af-shell .af-search-spinner,
@@ -1583,6 +1742,7 @@ html, body {
 
   .af-shell .af-shortcut-panel.hidden,
   .af-shell .af-preview-modal.hidden,
+  .af-shell .af-update-banner.hidden,
   .af-shell .af-clear-btn.hidden,
   .af-shell .af-search-spinner.hidden {
     transition: opacity 80ms linear, visibility 0s linear 80ms;
@@ -1598,6 +1758,7 @@ html, body {
   }
 
   .af-icon-btn.is-spinning svg,
+  .af-update-btn.is-updating svg,
   .af-shell .af-search-spinner,
   .af-mini-btn.is-pending::before,
   .af-top-progress.is-active::after,

@@ -39,6 +39,10 @@
             <svg class="af-theme-ic af-theme-ic-light" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M12.6 3.4l-1.1 1.1M4.5 11.5l-1.1 1.1"/></svg>
             <svg class="af-theme-ic af-theme-ic-dark" viewBox="0 0 16 16" aria-hidden="true"><path d="M8.4 2.2a5.8 5.8 0 1 0 5.4 7.4A4.6 4.6 0 0 1 8.4 2.2Z"/></svg>
           </button>
+          <button id="btn-update" class="af-icon-btn af-update-btn" type="button" title="检查版本更新" aria-label="检查版本更新">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.2v7.6M5.2 7 8 9.8 10.8 7"/><path d="M2.8 11.4v1.2A1.4 1.4 0 0 0 4.2 14h7.6a1.4 1.4 0 0 0 1.4-1.4v-1.2"/></svg>
+            <span id="update-dot" class="af-update-dot hidden" aria-hidden="true"></span>
+          </button>
           <button id="btn-refresh" class="af-icon-btn" type="button" title="刷新目录树" aria-label="刷新目录树">
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.6v3h-3"/></svg>
           </button>
@@ -112,6 +116,14 @@
         <span><kbd class="af-kbd">⌘.</kbd> 隐藏项</span>
         <span><kbd class="af-kbd">Esc</kbd> 收起</span>
       </div>
+      <div id="update-panel-row" class="af-shortcut-row af-update-panel-row">
+        <div class="af-update-ver-group">
+          <span class="af-shortcut-label">插件版本</span>
+          <span id="update-cur-ver" class="af-ver-chip af-num">v0.3.0</span>
+          <span id="update-status-text" class="af-update-status">未检查</span>
+        </div>
+        <button id="btn-panel-update" class="af-mini-btn" type="button">检查更新</button>
+      </div>
     </section>
 
     <section id="mentions-bar" class="af-mentions hidden" aria-label="对话提及文件">
@@ -162,6 +174,17 @@
         </div>
       </div>
       <pre id="preview-body" class="af-preview-body"></pre>
+    </div>
+
+    <div id="update-banner" class="af-update-banner hidden" role="status" aria-live="polite" aria-hidden="true">
+      <div class="af-update-banner-main">
+        <span class="af-update-banner-badge">NEW</span>
+        <span id="update-banner-text" class="af-update-banner-text">发现新版本</span>
+      </div>
+      <div class="af-update-banner-actions">
+        <button id="btn-banner-update" class="af-mini-btn af-update-primary-btn" type="button">立即更新</button>
+        <button id="btn-banner-dismiss" class="af-mini-btn" type="button" title="暂不提示此版本">忽略</button>
+      </div>
     </div>
 
     <div id="toast" class="af-toast hidden" role="status" aria-live="polite" aria-hidden="true"></div>

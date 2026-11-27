@@ -7,7 +7,8 @@
  */
 
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   appendFileSync,
   chmodSync,
@@ -20,9 +21,11 @@ import {
   utimesSync,
   writeFileSync
 } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { deflateRawSync } from 'node:zlib';
 
 import {
   importClientSecretFile,
@@ -51,6 +54,7 @@ import {
 } from '../lib/sqlite_timing.mjs';
 import { configureAgyStatusLine, measureDisplayWidth, renderStatusLine } from '../lib/statusline.mjs';
 import { hexToAnsi256, hexToAnsiFg, THEME_NAMES, THEMES } from '../lib/themes.mjs';
+import { compareSemver, extractZipBuffer, parseSemver } from '../lib/updater.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = resolve(__dirname, '..');
@@ -1690,6 +1694,178 @@ function testDailyWeeklyQuotaTrackerAndReset() {
   }
 }
 
+function buildTestZip(entries) {
+  const crcTable = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    crcTable[n] = c >>> 0;
+  }
+  const crc32 = (buf) => {
+    let c = 0xffffffff;
+    for (let i = 0; i < buf.length; i++) c = crcTable[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  for (const e of entries) {
+    const nameBuf = Buffer.from(e.name, 'utf8');
+    const raw = Buffer.isBuffer(e.data) ? e.data : Buffer.from(String(e.data), 'utf8');
+    const crc = e.badCrc ? (crc32(raw) ^ 0x12345678) >>> 0 : crc32(raw);
+    const comp = deflateRawSync(raw);
+    const lfh = Buffer.alloc(30);
+    lfh.writeUInt32LE(0x04034b50, 0);
+    lfh.writeUInt16LE(20, 4);
+    lfh.writeUInt16LE(8, 8);
+    lfh.writeUInt32LE(crc, 14);
+    lfh.writeUInt32LE(comp.length, 18);
+    lfh.writeUInt32LE(raw.length, 22);
+    lfh.writeUInt16LE(nameBuf.length, 26);
+    localParts.push(lfh, nameBuf, comp);
+
+    const cdh = Buffer.alloc(46);
+    cdh.writeUInt32LE(0x02014b50, 0);
+    cdh.writeUInt16LE((3 << 8) | 20, 4);
+    cdh.writeUInt16LE(20, 6);
+    cdh.writeUInt16LE(8, 10);
+    cdh.writeUInt32LE(crc, 16);
+    cdh.writeUInt32LE(comp.length, 20);
+    cdh.writeUInt32LE(raw.length, 24);
+    cdh.writeUInt16LE(nameBuf.length, 28);
+    const mode = e.unixMode ?? (e.executable ? 0o100755 : 0o100644);
+    cdh.writeUInt32LE((mode << 16) >>> 0, 38);
+    cdh.writeUInt32LE(offset, 42);
+    centralParts.push(cdh, nameBuf);
+    offset += lfh.length + nameBuf.length + comp.length;
+  }
+  const centralBuf = Buffer.concat(centralParts);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(centralBuf.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  return Buffer.concat([...localParts, centralBuf, eocd]);
+}
+
+async function testAutoUpdater() {
+  // Hot path must remain lazy: bin/agy-hud.mjs must not statically import updater.mjs
+  const binSrc = readFileSync(BIN_PATH, 'utf8');
+  assert.ok(!/^import\s+.*updater\.mjs/m.test(binSrc), 'bin/agy-hud.mjs must dynamically import updater.mjs only on update command');
+
+  assert.equal(compareSemver('0.1.1', '0.1.0'), 1);
+  assert.equal(compareSemver('0.1.0', '0.1.0'), 0);
+  assert.equal(parseSemver('bad-ver'), null);
+  assert.throws(() => extractZipBuffer(buildTestZip([{ name: '../evil.txt', data: 'x' }])), /越界路径/);
+  assert.throws(() => extractZipBuffer(buildTestZip([{ name: 'agy-cli-hud/link', data: 'x', unixMode: 0o120777 }])), /符号链接/);
+  assert.throws(() => extractZipBuffer(buildTestZip([{ name: 'agy-cli-hud/a.txt', data: 'abc', badCrc: true }])), /CRC-32/);
+
+  const work = mkdtempSync(join(tmpdir(), 'agy-hud-upd-test-'));
+  const targetDir = join(work, 'installed', 'agy-cli-hud');
+  mkdirSync(join(targetDir, 'bin'), { recursive: true });
+  mkdirSync(join(targetDir, 'lib'), { recursive: true });
+  writeFileSync(join(targetDir, 'plugin.json'), JSON.stringify({
+    name: 'agy-cli-hud',
+    version: '0.1.0',
+    repository: 'https://github.com/Dong-Kevin/agy-plugins'
+  }));
+  writeFileSync(join(targetDir, 'bin', 'agy-hud.mjs'), '#!/usr/bin/env node\n// old-0.1.0\n');
+  writeFileSync(join(targetDir, 'lib', 'statusline.mjs'), '// old-0.1.0\n');
+
+  const nextZip = buildTestZip([
+    {
+      name: 'agy-cli-hud/plugin.json',
+      data: JSON.stringify({ name: 'agy-cli-hud', version: '0.1.1', repository: 'https://github.com/Dong-Kevin/agy-plugins' })
+    },
+    { name: 'agy-cli-hud/bin/agy-hud.mjs', data: '#!/usr/bin/env node\n// upgraded-0.1.1\n', executable: true },
+    { name: 'agy-cli-hud/lib/statusline.mjs', data: '// upgraded-0.1.1\n' }
+  ]);
+  const validSha = createHash('sha256').update(nextZip).digest('hex');
+
+  let mode = 'normal';
+  let baseUrl = '';
+  const srv = createServer((req, res) => {
+    const u = new URL(req.url || '/', 'http://127.0.0.1');
+    if (u.pathname === '/api/latest') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        tag_name: 'v2026.12.01',
+        name: 'v2026.12.01',
+        html_url: 'https://github.com/Dong-Kevin/agy-plugins/releases/tag/v2026.12.01',
+        published_at: '2026-12-01T00:00:00Z',
+        body: 'Test HUD release',
+        assets: [
+          { name: 'agy-cli-hud-v0.1.1.zip', size: nextZip.length, browser_download_url: `${baseUrl}/dl/zip` },
+          { name: 'agy-cli-hud-v0.1.1.zip.sha256', size: 80, browser_download_url: `${baseUrl}/dl/sha` }
+        ]
+      }));
+      return;
+    }
+    if (u.pathname === '/dl/sha') {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end(`${mode === 'bad-sha' ? '0'.repeat(64) : validSha}  agy-cli-hud-v0.1.1.zip\n`);
+      return;
+    }
+    if (u.pathname === '/dl/zip') {
+      res.writeHead(200, { 'Content-Type': 'application/zip' });
+      res.end(nextZip);
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  try {
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    baseUrl = `http://127.0.0.1:${srv.address().port}`;
+    const env = {
+      ...process.env,
+      AGY_HUD_HOME: work,
+      AGY_HUD_UPDATE_TARGET_DIR: targetDir,
+      AGY_HUD_UPDATE_API_URL: `${baseUrl}/api/latest`,
+      AGY_HUD_UPDATE_ALLOWED_HOSTS: '127.0.0.1'
+    };
+
+    const runHudAsync = (args) => new Promise((resolveRun) => {
+      execFile(process.execPath, [BIN_PATH, ...args], { env, encoding: 'utf8' }, (error, stdout, stderr) => {
+        resolveRun({ error, stdout: String(stdout || ''), stderr: String(stderr || '') });
+      });
+    });
+
+    const chkRun = await runHudAsync(['update', '--check', '--json']);
+    assert.equal(chkRun.error, null, `Expected update --check success: ${chkRun.stderr || chkRun.stdout}`);
+    const chk = JSON.parse(chkRun.stdout);
+    assert.equal(chk.ok, true);
+    assert.equal(chk.hasUpdate, true);
+    assert.equal(chk.currentVersion, '0.1.0');
+    assert.equal(chk.latestVersion, '0.1.1');
+
+    mode = 'bad-sha';
+    const badShaRun = await runHudAsync(['update', '--json']);
+    assert.ok(badShaRun.error, 'Tampered SHA-256 must fail update');
+    const errOut = JSON.parse(badShaRun.stdout || '{}');
+    assert.equal(errOut.ok, false);
+    assert.match(errOut.error || '', /SHA-256/);
+    assert.ok(readFileSync(join(targetDir, 'lib', 'statusline.mjs'), 'utf8').includes('old-0.1.0'));
+
+    mode = 'normal';
+    const updRun = await runHudAsync(['update', '--json']);
+    assert.equal(updRun.error, null, `Expected update success: ${updRun.stderr || updRun.stdout}`);
+    const upd = JSON.parse(updRun.stdout);
+    assert.equal(upd.ok, true);
+    assert.equal(upd.updated, true);
+    assert.equal(upd.currentVersion, '0.1.1');
+    assert.equal(JSON.parse(readFileSync(join(targetDir, 'plugin.json'), 'utf8')).version, '0.1.1');
+    assert.ok(readFileSync(join(targetDir, 'lib', 'statusline.mjs'), 'utf8').includes('upgraded-0.1.1'));
+
+    pass('CLI auto-updater (lazy import, Zip-Slip/symlink/CRC-32, SHA-256 guard & agy-hud update E2E)');
+  } finally {
+    srv.close();
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   testZeroCdpCompliance();
   testIncrementalJsonlAndRollup();
@@ -1702,6 +1878,7 @@ async function main() {
   await testStatuslineAntiKillHardening();
   await testMockColabApiAndPermissions();
   testIsolatedInstallUninstall();
+  await testAutoUpdater();
   console.log('[agy-cli-hud] All plugin checks passed.');
 }
 
