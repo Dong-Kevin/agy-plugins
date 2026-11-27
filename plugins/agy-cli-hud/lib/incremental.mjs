@@ -28,10 +28,39 @@ import {
   normalizeModelId
 } from './pricing.mjs';
 
-const STATE_VERSION = 1;
+const STATE_VERSION = 2;
 const CONV_ID_RE = /^[0-9a-f-]{8,64}$/i;
 const MAX_CHUNK_BYTES = 8 * 1024 * 1024;
 const DEFAULT_SEEN_STEPS_MAX_AGE_MS = 7 * 86_400_000;
+
+function parseDurationSec(val) {
+  if (val == null) return null;
+  if (typeof val === 'number') {
+    return Number.isFinite(val) && val >= 0 && val <= 86400 ? val : null;
+  }
+  if (typeof val === 'string') {
+    const s = val.trim();
+    const msMatch = s.match(/^([0-9]+(?:\.[0-9]+)?)ms$/i);
+    if (msMatch) {
+      const sec = Number(msMatch[1]) / 1000;
+      return Number.isFinite(sec) && sec >= 0 && sec <= 86400 ? sec : null;
+    }
+    const secMatch = s.match(/^([0-9]+(?:\.[0-9]+)?)s$/i);
+    if (secMatch) {
+      const sec = Number(secMatch[1]);
+      return Number.isFinite(sec) && sec >= 0 && sec <= 86400 ? sec : null;
+    }
+    return null;
+  }
+  if (typeof val === 'object') {
+    const sec = Number(val.seconds ?? 0);
+    const nanos = Number(val.nanos ?? 0);
+    if (Number.isFinite(sec) && Number.isFinite(nanos) && sec >= 0 && sec <= 86400 && nanos >= 0 && nanos < 1e9) {
+      return sec + nanos / 1e9;
+    }
+  }
+  return null;
+}
 
 function emptyDayBucket() {
   return {
@@ -65,8 +94,9 @@ function emptySessionAcc(sessionId, source) {
     prevTurnContextTokens: 0,
     lastTurnStep: -1,
     lastTurnAt: '',
-    prevEventAt: '',
+    pendingTurn: null,
     lastOutputTps: null,
+    lastTurnTtftMs: null,
     costUsd: 0,
     cacheSavedUsd: 0,
     firstSeenAt: '',
@@ -83,6 +113,8 @@ function emptyFileState(sessionId, source) {
     size: 0,
     mtimeMs: 0,
     seenSteps: {},
+    sqliteTimingSig: null,
+    sqliteTiming: null,
     session: emptySessionAcc(sessionId, source),
     byDay: {}
   };
@@ -129,16 +161,38 @@ function extractTurnMetrics(record) {
 
   const rawModel = String(record.model || record.generatorModel || record.chatModel?.model || '').trim();
   const createdAt = String(record.created_at || record.timestamp || '').trim();
+  const status = String(record.status || '').trim().toUpperCase();
   const stepIndex = record.step_index != null ? Number(record.step_index) : null;
+
+  const cm = record.chatModel && typeof record.chatModel === 'object' ? record.chatModel : null;
+  const ttftSec = parseDurationSec(cm?.timeToFirstToken ?? record.time_to_first_token)
+    ?? (Number.isFinite(Number(record.ttft_ms)) && Number(record.ttft_ms) >= 0 ? Number(record.ttft_ms) / 1000 : null);
+  const streamingSec = parseDurationSec(cm?.streamingDuration ?? record.streaming_duration)
+    ?? (Number.isFinite(Number(record.streaming_ms)) && Number(record.streaming_ms) >= 0 ? Number(record.streaming_ms) / 1000 : null);
+  const explicitDurSec = (ttftSec !== null && streamingSec !== null)
+    ? (ttftSec + streamingSec)
+    : (streamingSec ?? ttftSec ?? (
+        Number.isFinite(Number(record.duration_ms)) && Number(record.duration_ms) >= 0
+          ? Number(record.duration_ms) / 1000
+          : null
+      ));
+  const explicitTps = (output > 0 && explicitDurSec !== null && explicitDurSec >= 0.05)
+    ? Number((output / explicitDurSec).toFixed(1))
+    : null;
+  const explicitTtftMs = ttftSec !== null ? Math.round(ttftSec * 1000) : null;
+
   return {
     stepKey: stepIndex !== null && Number.isFinite(stepIndex) ? String(stepIndex) : null,
     stepIndex: stepIndex !== null && Number.isFinite(stepIndex) ? stepIndex : -1,
+    status,
     rawModel,
     createdAt,
     input,
     cacheRead,
     cacheWrite,
-    output
+    output,
+    explicitTps,
+    explicitTtftMs
   };
 }
 
@@ -221,21 +275,38 @@ function applyTurnDelta(fileState, turn, fallbackMtimeMs) {
   }
 
   const contextNow = turn.input + turn.cacheRead + turn.cacheWrite;
-  if (!prev) {
-    if (sess.lastTurnContextTokens > 0) {
-      sess.prevTurnContextTokens = sess.lastTurnContextTokens;
-    }
-    if (turn.createdAt && sess.prevEventAt) {
-      const tNow = Date.parse(turn.createdAt);
-      const tPrev = Date.parse(sess.prevEventAt);
-      if (Number.isFinite(tNow) && Number.isFinite(tPrev) && tNow > tPrev) {
-        const dtSec = (tNow - tPrev) / 1000;
-        if (dtSec >= 0.4 && dtSec <= 180 && turn.output >= 20) {
-          sess.lastOutputTps = Number((turn.output / dtSec).toFixed(1));
+  if (!prev && sess.lastTurnContextTokens > 0) {
+    sess.prevTurnContextTokens = sess.lastTurnContextTokens;
+  }
+
+  const tsMs = turn.createdAt ? Date.parse(turn.createdAt) : NaN;
+  if (turn.explicitTps !== null) {
+    sess.lastOutputTps = turn.explicitTps;
+    if (turn.explicitTtftMs !== null) sess.lastTurnTtftMs = turn.explicitTtftMs;
+    sess.pendingTurn = null;
+  } else if (turn.output > 0 && Number.isFinite(tsMs)) {
+    const pt = sess.pendingTurn;
+    if (pt && turn.stepKey && pt.stepKey === turn.stepKey) {
+      // Same step_index update (e.g. RUNNING -> DONE): keep original startMs
+      pt.output = turn.output;
+      pt.status = turn.status;
+      if (turn.status === 'DONE' && tsMs > pt.startMs) {
+        const dtSec = (tsMs - pt.startMs) / 1000;
+        if (dtSec >= 1 && dtSec <= 180 && pt.output >= 20) {
+          sess.lastOutputTps = Number((pt.output / dtSec).toFixed(1));
         }
+        sess.pendingTurn = null;
       }
+    } else {
+      sess.pendingTurn = {
+        stepKey: turn.stepKey,
+        startMs: tsMs,
+        output: turn.output,
+        status: turn.status
+      };
     }
   }
+
   sess.lastTurnInput = turn.input;
   sess.lastTurnCacheRead = turn.cacheRead;
   sess.lastTurnCacheWrite = turn.cacheWrite;
@@ -246,6 +317,36 @@ function applyTurnDelta(fileState, turn, fallbackMtimeMs) {
     if (!sess.firstSeenAt) sess.firstSeenAt = turn.createdAt;
     sess.lastTurnAt = turn.createdAt;
     sess.lastSeenAt = turn.createdAt;
+  }
+}
+
+function processTranscriptRecord(state, rec, fallbackMtimeMs) {
+  if (!rec || typeof rec !== 'object') return;
+  const type = String(rec.type || '');
+  const ts = String(rec.created_at || rec.timestamp || '').trim();
+  const tsMs = ts ? Date.parse(ts) : NaN;
+  const rawStep = rec.step_index != null ? Number(rec.step_index) : null;
+  const stepKey = rawStep !== null && Number.isFinite(rawStep) ? String(rawStep) : null;
+  const sess = state.session;
+
+  // In agy transcript.jsonl, `created_at` is the step START timestamp (not completion).
+  // Close any open pending model turn once a DIFFERENT subsequent step begins.
+  const pt = sess.pendingTurn;
+  if (pt && (!stepKey || !pt.stepKey || stepKey !== pt.stepKey)) {
+    if (type !== 'USER_INPUT' && Number.isFinite(tsMs) && tsMs > pt.startMs) {
+      const dtSec = (tsMs - pt.startMs) / 1000;
+      if (dtSec >= 1 && dtSec <= 180 && pt.output >= 20) {
+        sess.lastOutputTps = Number((pt.output / dtSec).toFixed(1));
+      }
+    }
+    // Always clear on a new step (including USER_INPUT or same-second tool dispatch)
+    // so human reading pause or subsequent tool runtime never bleeds into model time.
+    sess.pendingTurn = null;
+  }
+
+  const turn = extractTurnMetrics(rec);
+  if (turn) {
+    applyTurnDelta(state, turn, fallbackMtimeMs);
   }
 }
 
@@ -291,14 +392,7 @@ export function scanTranscriptFileIncremental(filePath, prevState, { sessionId, 
         } catch {
           continue;
         }
-        const ts = String(rec.created_at || rec.timestamp || '').trim();
-        const turn = extractTurnMetrics(rec);
-        if (turn) {
-          applyTurnDelta(state, turn, st.mtimeMs);
-        }
-        if (ts) {
-          state.session.prevEventAt = ts;
-        }
+        processTranscriptRecord(state, rec, st.mtimeMs);
       }
     }
 
@@ -307,11 +401,22 @@ export function scanTranscriptFileIncremental(filePath, prevState, { sessionId, 
     if (trimmedCarry && trimmedCarry[0] === '{' && trimmedCarry[trimmedCarry.length - 1] === '}') {
       try {
         const rec = JSON.parse(trimmedCarry);
-        const turn = extractTurnMetrics(rec);
-        if (turn) applyTurnDelta(state, turn, st.mtimeMs);
+        processTranscriptRecord(state, rec, st.mtimeMs);
         carry = '';
       } catch {
         // Keep incomplete JSON line in carry buffer
+      }
+    }
+
+    // Final-turn EOF fallback (when the last record is a completed PLANNER_RESPONSE
+    // with no following tool step yet, e.g. final answer waiting at prompt):
+    // use transcript file flush mtimeMs - startMs without clearing pendingTurn
+    // so a delayed tool step can still refine it while a later USER_INPUT clears it.
+    const openTurn = state.session.pendingTurn;
+    if (openTurn && openTurn.status !== 'RUNNING' && Number.isFinite(st.mtimeMs) && st.mtimeMs > openTurn.startMs) {
+      const dtSec = (st.mtimeMs - openTurn.startMs) / 1000;
+      if (dtSec >= 1 && dtSec <= 180 && openTurn.output >= 20) {
+        state.session.lastOutputTps = Number((openTurn.output / dtSec).toFixed(1));
       }
     }
 
@@ -498,6 +603,7 @@ export function runIncrementalSync({
 
   return {
     changed: changedAny,
+    state,
     todayKey,
     monthKey,
     sessionsById,
@@ -547,6 +653,16 @@ export function buildSessionMetricsFromIncremental(fileState) {
     ? s.lastTurnContextTokens - s.prevTurnContextTokens
     : 0;
 
+  const sqlTiming = fileState.sqliteTiming && typeof fileState.sqliteTiming === 'object'
+    ? fileState.sqliteTiming
+    : null;
+  const resolvedOutputTps = (sqlTiming && typeof sqlTiming.output_tps === 'number' && Number.isFinite(sqlTiming.output_tps) && sqlTiming.output_tps > 0)
+    ? sqlTiming.output_tps
+    : s.lastOutputTps;
+  const resolvedTtftMs = (sqlTiming && typeof sqlTiming.ttft_ms === 'number' && Number.isFinite(sqlTiming.ttft_ms) && sqlTiming.ttft_ms >= 0)
+    ? sqlTiming.ttft_ms
+    : (s.lastTurnTtftMs ?? null);
+
   return {
     conversation_id: s.sessionId,
     agent: 'agy',
@@ -562,8 +678,8 @@ export function buildSessionMetricsFromIncremental(fileState) {
     session_avg_cache_hit_percent: avgCacheHit,
     last_turn_cache_hit_percent: lastCacheHit,
     cold_start_alert: Boolean(lastPrompt >= 8000 && lastCacheHit !== null && lastCacheHit < 25),
-    output_tps: s.lastOutputTps,
-    ttft_ms: null,
+    output_tps: resolvedOutputTps,
+    ttft_ms: resolvedTtftMs,
     session_cost_usd: Number(s.costUsd.toFixed(4)),
     session_cache_saved_usd: Number(s.cacheSavedUsd.toFixed(4)),
     updated_at: s.lastSeenAt || null

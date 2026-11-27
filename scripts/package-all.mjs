@@ -203,6 +203,7 @@ function packageAgyCliHud() {
     ['lib/pricing.mjs', false],
     ['lib/quota.mjs', false],
     ['lib/incremental.mjs', false],
+    ['lib/sqlite_timing.mjs', false],
     ['lib/colab.mjs', false],
     ['lib/snapshot.mjs', false],
     ['lib/themes.mjs', false],

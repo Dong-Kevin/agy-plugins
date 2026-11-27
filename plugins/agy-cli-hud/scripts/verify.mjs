@@ -38,6 +38,11 @@ import {
 import { resolveHudPaths } from '../lib/paths.mjs';
 import { normalizeAgyQuotaMap } from '../lib/quota.mjs';
 import { composeSnapshot } from '../lib/snapshot.mjs';
+import {
+  decodeGenMetadataTimingRow,
+  enrichSessionsWithSqliteTiming,
+  isSqliteAvailable
+} from '../lib/sqlite_timing.mjs';
 import { configureAgyStatusLine, renderStatusLine } from '../lib/statusline.mjs';
 import { hexToAnsi256, hexToAnsiFg, THEME_NAMES, THEMES } from '../lib/themes.mjs';
 
@@ -60,6 +65,7 @@ function testZeroCdpCompliance() {
     'lib/pricing.mjs',
     'lib/quota.mjs',
     'lib/incremental.mjs',
+    'lib/sqlite_timing.mjs',
     'lib/colab.mjs',
     'lib/snapshot.mjs',
     'lib/themes.mjs',
@@ -367,7 +373,8 @@ function testCrossSessionSnapshotIsolation() {
       join(dirA, 'transcript.jsonl'),
       [
         JSON.stringify({ step_index: 1, type: 'USER_INPUT', created_at: '2026-11-26T10:00:00Z' }),
-        JSON.stringify({ step_index: 2, type: 'PLANNER_RESPONSE', created_at: '2026-11-26T10:00:10Z', model: 'gemini-4-neon-xhigh', input_tokens: 60000, cache_read_tokens: 40000, output_tokens: 1428 })
+        JSON.stringify({ step_index: 2, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-26T10:00:00Z', model: 'gemini-4-neon-xhigh', input_tokens: 60000, cache_read_tokens: 40000, output_tokens: 1428 }),
+        JSON.stringify({ step_index: 3, type: 'GENERIC', status: 'DONE', created_at: '2026-11-26T10:00:10Z' })
       ].join('\n') + '\n',
       'utf8'
     );
@@ -375,7 +382,8 @@ function testCrossSessionSnapshotIsolation() {
       join(dirB, 'transcript.jsonl'),
       [
         JSON.stringify({ step_index: 1, type: 'USER_INPUT', created_at: '2026-11-26T10:05:00Z' }),
-        JSON.stringify({ step_index: 2, type: 'PLANNER_RESPONSE', created_at: '2026-11-26T10:05:20Z', model: 'gemini-4-neon-xhigh', input_tokens: 10000, cache_read_tokens: 90000, output_tokens: 1000 })
+        JSON.stringify({ step_index: 2, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-26T10:05:00Z', model: 'gemini-4-neon-xhigh', input_tokens: 10000, cache_read_tokens: 90000, output_tokens: 1000 }),
+        JSON.stringify({ step_index: 3, type: 'GENERIC', status: 'DONE', created_at: '2026-11-26T10:05:20Z' })
       ].join('\n') + '\n',
       'utf8'
     );
@@ -867,6 +875,7 @@ function testIsolatedInstallUninstall() {
     execFileSync('bash', [join(PLUGIN_ROOT, 'install.sh')], { cwd: PLUGIN_ROOT, env, stdio: 'pipe' });
     assert.ok(existsSync(join(tempPlugins, 'agy-cli-hud', 'plugin.json')));
     assert.ok(existsSync(join(tempPlugins, 'agy-cli-hud', 'bin', 'agy-hud.mjs')));
+    assert.ok(existsSync(join(tempPlugins, 'agy-cli-hud', 'lib', 'sqlite_timing.mjs')));
     assert.ok(existsSync(join(tempBin, 'agy-hud')));
 
     const helpOut = execFileSync(join(tempBin, 'agy-hud'), ['--help'], { env, encoding: 'utf8' });
@@ -883,12 +892,222 @@ function testIsolatedInstallUninstall() {
   }
 }
 
+function encodeVarint(value) {
+  let v = BigInt(value);
+  const bytes = [];
+  do {
+    let b = Number(v & 0x7fn);
+    v >>= 7n;
+    if (v > 0n) b |= 0x80;
+    bytes.push(b);
+  } while (v > 0n);
+  return Buffer.from(bytes);
+}
+
+function pbVarintField(fn, value) {
+  return Buffer.concat([encodeVarint((fn << 3) | 0), encodeVarint(value)]);
+}
+
+function pbBytesField(fn, buf) {
+  return Buffer.concat([encodeVarint((fn << 3) | 2), encodeVarint(buf.length), buf]);
+}
+
+function pbDurationField(fn, sec, nanos) {
+  const parts = [];
+  if (sec > 0) parts.push(pbVarintField(1, sec));
+  if (nanos > 0) parts.push(pbVarintField(2, nanos));
+  return pbBytesField(fn, Buffer.concat(parts));
+}
+
+function buildMockGenMetadataBlob({ outputTokens = 0, thinkingTokens = 0, responseTokens = 0, ttft = null, streaming = null, stepIndices = [], padBytes = 0 } = {}) {
+  const f1Parts = [];
+  if (outputTokens > 0 || thinkingTokens > 0 || responseTokens > 0) {
+    const uParts = [];
+    if (outputTokens > 0) uParts.push(pbVarintField(3, outputTokens));
+    if (thinkingTokens > 0) uParts.push(pbVarintField(9, thinkingTokens));
+    if (responseTokens > 0) uParts.push(pbVarintField(10, responseTokens));
+    f1Parts.push(pbBytesField(4, Buffer.concat(uParts)));
+  }
+  if (padBytes > 0) {
+    // Simulated large fn=9 chatStartMetadata payload (>16KB slicing path)
+    f1Parts.push(pbBytesField(9, Buffer.alloc(padBytes, 0x41)));
+  }
+  if (ttft) {
+    f1Parts.push(pbDurationField(11, ttft.sec, ttft.nanos));
+  }
+  if (streaming) {
+    f1Parts.push(pbDurationField(12, streaming.sec, streaming.nanos));
+  }
+  // Trailing anchor field fn=19 responseModel so adjacent-tag validation after fn=12 always succeeds
+  f1Parts.push(pbBytesField(19, Buffer.from('gemini-4-neon-xhigh', 'utf8')));
+
+  const topParts = [pbBytesField(1, Buffer.concat(f1Parts))];
+  if (stepIndices.length) {
+    topParts.push(pbBytesField(2, Buffer.concat(stepIndices.map((n) => encodeVarint(n)))));
+  }
+  return Buffer.concat(topParts);
+}
+
+async function testAccurateSpeedTiming() {
+  const work = mkdtempSync(join(tmpdir(), 'agy-hud-speed-'));
+  const prevHome = process.env.AGY_HUD_HOME;
+  process.env.AGY_HUD_HOME = work;
+  try {
+    const paths = resolveHudPaths();
+    const convA = '00000000-0000-4000-8000-0000000000a1';
+    const convB = '00000000-0000-4000-8000-0000000000b2';
+    const dirA = join(paths.cliBrainDir, convA, '.system_generated', 'logs');
+    const dirB = join(paths.cliBrainDir, convB, '.system_generated', 'logs');
+    mkdirSync(dirA, { recursive: true });
+    mkdirSync(dirB, { recursive: true });
+    const txA = join(dirA, 'transcript.jsonl');
+    const txB = join(dirB, 'transcript.jsonl');
+
+    // 1) Regression: previous tool step took only 2s, while actual PLANNER_RESPONSE took 10s (811 tokens).
+    //    Old buggy formula computed 811 / 2 = 405.5 t/s; fixed forward duration must yield 811 / 10 = 81.1 t/s.
+    //    Subsequent USER_INPUT 120s later (human reading pause) must NOT corrupt 81.1 t/s.
+    writeFileSync(
+      txA,
+      [
+        JSON.stringify({ step_index: 0, type: 'USER_INPUT', created_at: '2026-11-27T01:00:00Z' }),
+        JSON.stringify({ step_index: 1, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-27T01:00:00Z', model: 'gemini-4-neon-xhigh', input_tokens: 10000, cache_read_tokens: 90000, output_tokens: 400 }),
+        JSON.stringify({ step_index: 2, type: 'GENERIC', status: 'DONE', created_at: '2026-11-27T01:00:05Z' }),
+        // Fast 2s gap from step 2 -> step 3 (tool runtime!), then step 3 actually runs 10s (01:00:07 -> 01:00:17)
+        JSON.stringify({ step_index: 3, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-27T01:00:07Z', model: 'gemini-4-neon-xhigh', input_tokens: 5000, cache_read_tokens: 95000, output_tokens: 811 }),
+        JSON.stringify({ step_index: 4, type: 'GENERIC', status: 'DONE', created_at: '2026-11-27T01:00:17Z' }),
+        // Human pause 120s before next USER_INPUT must never clobber 81.1 t/s
+        JSON.stringify({ step_index: 5, type: 'USER_INPUT', created_at: '2026-11-27T01:02:17Z' })
+      ].join('\n') + '\n',
+      'utf8'
+    );
+
+    // Seed stale v1 cursor cache with bogus 405.5 t/s to verify STATE_VERSION=2 invalidates it cleanly
+    mkdirSync(paths.dataDir, { recursive: true });
+    writeFileSync(
+      paths.cursorStatePath,
+      JSON.stringify({
+        version: 1,
+        updatedAt: Date.now(),
+        files: {
+          [txA]: {
+            sessionId: convA,
+            source: 'cli',
+            offset: statSync(txA).size,
+            size: statSync(txA).size,
+            mtimeMs: statSync(txA).mtimeMs,
+            seenSteps: {},
+            session: { sessionId: convA, source: 'cli', turns: 2, lastOutputTps: 405.5 },
+            byDay: {}
+          }
+        }
+      }),
+      'utf8'
+    );
+
+    // 2) Final reply with no following tool step: EOF mtimeMs fallback (start + 8s -> 800 / 8 = 100.0 t/s)
+    const startB = Date.parse('2026-11-27T01:10:00Z');
+    writeFileSync(
+      txB,
+      [
+        JSON.stringify({ step_index: 0, type: 'USER_INPUT', created_at: '2026-11-27T01:10:00Z' }),
+        JSON.stringify({ step_index: 1, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-27T01:10:00Z', model: 'gemini-4-neon-xhigh', input_tokens: 8000, cache_read_tokens: 32000, output_tokens: 800 })
+      ].join('\n') + '\n',
+      'utf8'
+    );
+    const flushB = new Date(startB + 8000);
+    utimesSync(txB, flushB, flushB);
+
+    const inc = runIncrementalSync({ scope: 'cli_only', paths, now: new Date('2026-11-27T01:15:00Z') });
+    const mA = buildSessionMetricsFromIncremental(inc.sessionsById.get(convA));
+    const mB = buildSessionMetricsFromIncremental(inc.sessionsById.get(convB));
+    assert.equal(mA.output_tps, 81.1, `Forward step duration must yield 81.1 t/s (never 405.5 t/s), got ${mA.output_tps}`);
+    assert.equal(mB.output_tps, 100.0, `EOF mtimeMs fallback must yield 100.0 t/s, got ${mB.output_tps}`);
+
+    // Verify protobuf decoder directly on large >16KB blob slicing
+    const largeBlob = buildMockGenMetadataBlob({
+      outputTokens: 1638,
+      thinkingTokens: 728,
+      responseTokens: 910,
+      ttft: { sec: 4, nanos: 952_000_000 },
+      streaming: { sec: 10, nanos: 133_000_000 },
+      stepIndices: [9, 10],
+      padBytes: 24_000
+    });
+    const decodedLarge = decodeGenMetadataTimingRow(largeBlob.subarray(0, 8192), largeBlob.subarray(-4096));
+    assert.equal(decodedLarge.usage?.outputTokens, 1638);
+    assert.equal(decodedLarge.ttft, 4.952);
+    assert.equal(decodedLarge.streamingSec, 10.133);
+
+    // 3) SQLite gen_metadata exact server timing priority + skipping in-progress row + CLI e2e
+    if (await isSqliteAvailable()) {
+      const { DatabaseSync } = await import('node:sqlite');
+      mkdirSync(paths.cliConversationsDir, { recursive: true });
+      const dbPath = join(paths.cliConversationsDir, `${convA}.db`);
+      const db = new DatabaseSync(dbPath);
+      try {
+        db.exec('CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)');
+        const ins = db.prepare('INSERT INTO gen_metadata (idx, data) VALUES (?, ?)');
+        // idx=1: completed large row (1638 / (4.952 + 10.133) = 108.6 t/s, ttft_ms = 4952)
+        ins.run(1, largeBlob);
+        // idx=2: newest row currently IN PROGRESS (no usage / no ttft / no streamingSec)
+        ins.run(2, buildMockGenMetadataBlob({ stepIndices: [11] }));
+      } finally {
+        db.close();
+      }
+
+      const enrich1 = await enrichSessionsWithSqliteTiming({
+        incrementalResult: inc,
+        paths,
+        explicitSessionId: convA
+      });
+      assert.equal(enrich1.changed, true, 'SQLite timing enrichment must detect new DB');
+      const mASql = buildSessionMetricsFromIncremental(inc.sessionsById.get(convA));
+      assert.equal(mASql.output_tps, 108.6, `SQLite exact timing must yield 108.6 t/s (skipping in-progress idx=2), got ${mASql.output_tps}`);
+      assert.equal(mASql.ttft_ms, 4952, `SQLite exact timing must populate ttft_ms=4952, got ${mASql.ttft_ms}`);
+
+      // Second call with unchanged DB signature must hit cache (changed=false)
+      const enrich2 = await enrichSessionsWithSqliteTiming({
+        incrementalResult: inc,
+        paths,
+        explicitSessionId: convA
+      });
+      assert.equal(enrich2.changed, false, 'Unchanged DB signature must skip re-reading SQLite');
+
+      // End-to-end `agy-hud sync` -> `agy-hud statusline` must display 108.6 t/s (never 405.5)
+      const syncSnap = JSON.parse(execFileSync(process.execPath, [BIN_PATH, 'sync', '--session', convA], {
+        env: { ...process.env, AGY_HUD_HOME: work },
+        encoding: 'utf8'
+      }));
+      assert.equal(syncSnap.active_session.output_tps, 108.6);
+      assert.equal(syncSnap.active_session.ttft_ms, 4952);
+
+      const slOut = stripAnsi(execFileSync(process.execPath, [BIN_PATH, 'statusline', '--no-color'], {
+        env: { ...process.env, AGY_HUD_HOME: work, AGY_HUD_NO_BG_SYNC: '1' },
+        input: JSON.stringify({
+          conversation_id: convA,
+          terminal_width: 120,
+          context_window: { context_window_size: 1_000_000, used_percentage: 14 }
+        }),
+        encoding: 'utf8'
+      }));
+      assert.ok(slOut.includes('108.6 t/s') && !slOut.includes('405.5'), `Statusline must render exact 108.6 t/s: ${slOut}`);
+    }
+
+    pass('Accurate speed timing (SQLite exact ttft+streaming, in-progress skip, forward transcript fallback & v1 cache reset)');
+  } finally {
+    if (prevHome === undefined) delete process.env.AGY_HUD_HOME;
+    else process.env.AGY_HUD_HOME = prevHome;
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   testZeroCdpCompliance();
   testIncrementalJsonlAndRollup();
   testDualPoolQuotaAndLayeredStatusline();
   testThemeCliAndPrecedence();
   testCrossSessionSnapshotIsolation();
+  await testAccurateSpeedTiming();
   testSoloBridgeChaining();
   await testStatuslineAntiKillHardening();
   await testMockColabApiAndPermissions();

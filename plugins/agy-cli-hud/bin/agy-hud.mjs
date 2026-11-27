@@ -258,8 +258,14 @@ async function runSync(args) {
   }
   acquireSyncLock(paths);
   try {
-    const [{ buildSessionMetricsFromIncremental, runIncrementalSync }, { composeSnapshot, extractLiveStatuslineFacts, loadHudConfig }, { normalizeAgyQuotaMap }] = await Promise.all([
+    const [
+      { buildSessionMetricsFromIncremental, runIncrementalSync, saveIncrementalState },
+      { enrichSessionsWithSqliteTiming },
+      { composeSnapshot, extractLiveStatuslineFacts, loadHudConfig },
+      { normalizeAgyQuotaMap }
+    ] = await Promise.all([
       import('../lib/incremental.mjs'),
+      import('../lib/sqlite_timing.mjs'),
       import('../lib/snapshot.mjs'),
       import('../lib/quota.mjs')
     ]);
@@ -285,6 +291,15 @@ async function runSync(args) {
         liveFacts = extractLiveStatuslineFacts(parsed);
         writeJsonAtomic(paths.liveSessionPath, liveFacts, { mode: 0o600, pretty: false });
       } catch {}
+    }
+
+    const sqliteRes = await enrichSessionsWithSqliteTiming({
+      incrementalResult: inc,
+      paths,
+      explicitSessionId: sessionId || liveFacts?.conversation_id || null
+    });
+    if (sqliteRes.changed && inc.state) {
+      saveIncrementalState(inc.state, paths);
     }
 
     let colabSummary = null;
@@ -327,9 +342,12 @@ function formatReadableStatus(snap) {
   const colab = snap.colab || {};
   const lines = [];
 
+  const speedPart = s.output_tps != null
+    ? ` | 速度 ${s.output_tps} t/s${s.ttft_ms != null ? ` (TTFT ${(s.ttft_ms / 1000).toFixed(1)}s)` : ''}`
+    : '';
   lines.push(`=== AGY CLI HUD (${snap.rollups?.scope === 'all' ? 'CLI + Desktop' : '仅 CLI'}) ===`);
   lines.push(
-    `当前会话: ${s.model_display || '--'}${s.effort ? ` (${s.effort})` : ''} | 上下文 ${s.context_used_percent ?? '--'}% (${formatTokensCompact(s.context_used_tokens)}/${formatTokensCompact(s.context_window_size)}) | 平均缓存 ${s.session_avg_cache_hit_percent ?? '--'}% | 折算 ${formatUsdCompact(s.session_cost_usd)}`
+    `当前会话: ${s.model_display || '--'}${s.effort ? ` (${s.effort})` : ''} | 上下文 ${s.context_used_percent ?? '--'}% (${formatTokensCompact(s.context_used_tokens)}/${formatTokensCompact(s.context_window_size)}) | 平均缓存 ${s.session_avg_cache_hit_percent ?? '--'}%${speedPart} | 折算 ${formatUsdCompact(s.session_cost_usd)}`
   );
   lines.push(
     `今日用量: ${formatTokensCompact(today.tokens)} tokens (${today.sessions || 0} 会话, 缓存 ${today.cache_hit_percent ?? '--'}%, API 等值 ${formatUsdCompact(today.api_cost_usd)}, 省 ${formatUsdCompact(today.cache_saved_usd)})`

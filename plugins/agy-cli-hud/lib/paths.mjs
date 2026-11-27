@@ -43,8 +43,10 @@ export function resolveHudPaths() {
   return {
     cliHome,
     cliBrainDir: join(cliHome, 'brain'),
+    cliConversationsDir: join(cliHome, 'conversations'),
     cliSettingsPath: join(cliHome, 'settings.json'),
     desktopBrainDir: join(desktopHome, 'brain'),
+    desktopConversationsDir: join(desktopHome, 'conversations'),
     desktopSettingsPath: join(desktopHome, 'sidecar_data', 'context-viewer', 'dashboard', 'data', 'settings_v1.json'),
     desktopHostCachePath: join(desktopHome, 'sidecar_data', 'context-viewer', 'dashboard', 'data', 'host_status_cache_v1.json'),
     legacyColabDataDir: join(desktopHome, 'plugin_data', 'agy-colab-panel'),

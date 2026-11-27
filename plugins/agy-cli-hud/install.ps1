@@ -97,7 +97,7 @@ try {
     $ScriptDir = $FoundManifest.Directory.FullName
   }
 
-  $LibFiles = @("paths.mjs", "pricing.mjs", "quota.mjs", "incremental.mjs", "colab.mjs", "snapshot.mjs", "themes.mjs", "statusline.mjs")
+  $LibFiles = @("paths.mjs", "pricing.mjs", "quota.mjs", "incremental.mjs", "sqlite_timing.mjs", "colab.mjs", "snapshot.mjs", "themes.mjs", "statusline.mjs")
   foreach ($Req in @("plugin.json", "package.json", "assets\logo.svg", "bin\agy-hud.mjs", "skills\agy-cli-hud\SKILL.md")) {
     if (-not (Test-Path (Join-Path $ScriptDir $Req))) {
       throw "安装包缺少必需文件：$Req"

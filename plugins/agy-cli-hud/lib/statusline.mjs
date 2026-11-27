@@ -344,7 +344,9 @@ export function renderStatusLine(stdinPayload, summary, options = {}) {
     if (view.avgCache != null) {
       l1.push(formatCacheSeg(view.avgCache, tierMode === 'wide' ? view.lastCache : null, view.coldStart, C, { compact: tierMode !== 'wide' }));
     }
-    if (tierMode !== 'narrow' && view.tps) l1.push(formatTpsSeg(view.tps, C));
+    if (tierMode !== 'narrow' && view.tps != null && Number.isFinite(Number(view.tps)) && Number(view.tps) > 0) {
+      l1.push(formatTpsSeg(view.tps, C));
+    }
     if (view.sessCost > 0) {
       l1.push(formatSessionCostSeg(view.sessCost, C, {
         labeled: tierMode === 'wide',
@@ -382,7 +384,9 @@ export function renderStatusLine(stdinPayload, summary, options = {}) {
     if (view.avgCache != null) {
       l1.push(formatCacheSeg(view.avgCache, view.lastCache, view.coldStart, C, { compact: false }));
     }
-    if (view.tps) l1.push(formatTpsSeg(view.tps, C));
+    if (view.tps != null && Number.isFinite(Number(view.tps)) && Number(view.tps) > 0) {
+      l1.push(formatTpsSeg(view.tps, C));
+    }
     if (view.sessCost > 0) l1.push(formatSessionCostSeg(view.sessCost, C, { labeled: true }));
     if (view.todayTokens > 0 || view.todayCost > 0) {
       l1.push(formatTodaySeg(view.todayTokens, view.todayCost, C));
