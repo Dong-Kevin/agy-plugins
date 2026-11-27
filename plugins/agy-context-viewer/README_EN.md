@@ -1,6 +1,6 @@
 # Antigravity Context & Token Viewer (`context-viewer`)
 
-Live visibility into **Google Antigravity** (Desktop & `agy` CLI) context window usage, streaming speed (TTFT / `tok/s`), per-turn growth, 53-week activity heatmaps, and unified **Gemini / Non-Gemini (Claude · GPT) 5h + Weekly quota pools** -- zero external dependencies, zero client patching, 100% local read-only telemetry.
+Live visibility for **Google Antigravity Desktop App / IDE** (with unified `agy` CLI history rollups) covering context window usage, 10-category spectrum, session & per-model cache hit rates, streaming speed (TTFT / `tok/s`), 53-week activity heatmaps, Glass / OLED themes, EN / ZH UI toggle, **one-click SHA-256 verified auto-updates**, and unified **Gemini / Non-Gemini (Claude · GPT) 5h + Weekly quota pools** -- zero external dependencies, zero client patching, 100% local read-only telemetry (for lightweight `agy` CLI & Solo prompt telemetry, see [agy-cli-hud](../agy-cli-hud/README_EN.md)).
 
 [简体中文](README.md) | **English** | [Monorepo Home](../../README_EN.md)
 
@@ -30,7 +30,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/m
 irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.ps1 | iex
 ```
 
-- You can also download `context-viewer-v1.9.0.zip` from [Releases](https://github.com/Dong-Kevin/agy-plugins/releases), extract it, and run `./install.sh` (or `agy plugin install ./plugins/agy-context-viewer`).
+- You can also download `context-viewer-v1.10.0.zip` from [Releases](https://github.com/Dong-Kevin/agy-plugins/releases), extract it, and run `./install.sh` (or `agy plugin install ./plugins/agy-context-viewer`).
 - When installed via `agy plugin install` alone, invoke the CLI with `node ~/.gemini/config/plugins/context-viewer/sidecars/dashboard/cli.mjs`.
 
 </details>
@@ -44,7 +44,8 @@ irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-co
 | **Floating Window (macOS)** | **`⌥⌘K`** (`⌘⇧P` pin · `⌘W` close) | Toggles the standalone pinned float window (same as clicking **`📌`**) | **Palette button right of `📌`** -> **`⌥⌘K` record button** (`Host Focus Only` / `Global`)<br/>CLI: `agy-context shortcut [opt+cmd+l\|reset\|off]` |
 | **AGY Aux Pane Jump** | **`⌃⌥K`** (`Ctrl+Alt+Shift+K` Win/Linux) | Wakes Antigravity's Right Aux Pane straight to the Context Dashboard | **Palette button** -> **`⌃⌥K` record button**; **right-click tab -> `Pin Tab`** to persist across threads<br/>CLI: `agy-context aux-shortcut [ctrl+opt+l\|reset\|off]` |
 | **macOS Menu Bar Badge** | **Left-click `<5ms` toggle · Right-click cycle** | Cycles `◈ 86%` / `⚡ 46t/s·33s` / `⏳ 5h·周` modes with full hover tooltip | **Palette button** -> toggle Menu Bar badge & 3 display modes<br/>CLI: `agy-context menubar [context\|speed\|quota\|off]` |
-| **Host Panel & Slash** | **`⌘⇧B`** (`Ctrl+Shift+B` Win/Linux)<br/>**`/context-viewer`** | Toggles host Right Aux Pane; opens dashboard directly from chat | Same **palette drawer** also switches Light/Dark theme and **5 heatmap palettes** (`L0-L4` stops) |
+| **Host Panel & Slash** | **`⌘⇧B`** (`Ctrl+Shift+B` Win/Linux)<br/>**`/context-viewer`** | Toggles host Right Aux Pane; opens dashboard directly from chat | Same **palette drawer** switches **Auto / Light / Dark / OLED**, **Glass toggle**, **EN / ZH language**, and **5 heatmap palettes** (`L0-L4` stops) |
+| **One-Click Auto-Update** | **Toolbar download icon** / **Palette drawer** / **Zero-CLS banner** | Checks official GitHub Releases, enforces HTTPS host allowlist + `.sha256` + CRC-32 verification, and atomically reloads all 3 runtimes | Highlights a notification dot on new releases; automatically guards `.git` source checkouts |
 | **Shared-Plan Split Billing** | -- | Customize monthly discounts, family-group sharing, or split ratios | **`Cost & Quota` tab** top-right -> **`Customize Plan ✎`** |
 
 <details>

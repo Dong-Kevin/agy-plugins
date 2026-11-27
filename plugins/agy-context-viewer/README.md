@@ -1,6 +1,6 @@
 # Antigravity Context & Token Viewer（`context-viewer`）
 
-实时观测 **Google Antigravity**（桌面端与 `agy` CLI）上下文窗口占比、生成速度（TTFT / `tok/s`）、每轮涨跌、53 周热力图，以及 **Gemini / 非 Gemini（Claude · GPT）双池 5h + 周额度** -- 零外部依赖、零客户端文件改动、纯本地只读统计。
+实时观测 **Google Antigravity Desktop App / IDE**（同步汇总本机 `agy` CLI 历史）上下文窗口占比、10 类光谱构成、会话与分模型缓存率、生成速度（TTFT / `tok/s`）、53 周热力图、毛玻璃与 OLED 主题、中英双语界面、**一键安全自动更新**，以及 **Gemini / 非 Gemini（Claude · GPT）双池 5h + 周额度** -- 零外部依赖、零客户端文件改动、纯本地只读统计（`agy` CLI 与 Solo 轻量实时状态栏推荐使用同仓 [agy-cli-hud](../agy-cli-hud/README.md)）。
 
 **简体中文** | [English](README_EN.md) | [合集主页](../../README.md)
 
@@ -30,7 +30,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/m
 irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-context-viewer/install.ps1 | iex
 ```
 
-- 也可直接从 [Releases](https://github.com/Dong-Kevin/agy-plugins/releases) 下载 `context-viewer-v1.9.0.zip` 解压后运行 `./install.sh`（或 `agy plugin install ./plugins/agy-context-viewer`）。
+- 也可直接从 [Releases](https://github.com/Dong-Kevin/agy-plugins/releases) 下载 `context-viewer-v1.10.0.zip` 解压后运行 `./install.sh`（或 `agy plugin install ./plugins/agy-context-viewer`）。
 - 仅通过 `agy plugin install` 安装时，CLI 入口为 `node ~/.gemini/config/plugins/context-viewer/sidecars/dashboard/cli.mjs`。
 
 </details>
@@ -44,7 +44,8 @@ irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-co
 | **独立置顶悬浮窗（macOS）** | **`⌥⌘K`**（`⌘⇧P` 置顶 · `⌘W` 关闭） | 独立窗口呼出与隐藏，点击顶部 **`📌`** 同效 | **顶部 `📌` 右侧调色盘按钮** → **`⌥⌘K 点击修改`**（支持 **`仅宿主前台 / 全局生效`**）<br/>CLI：`agy-context shortcut [opt+cmd+l\|reset\|off]` |
 | **AGY 右侧栏直达** | **`⌃⌥K`**（Win/Linux `Ctrl+Alt+Shift+K`） | 从任何页面或跨插件直接唤醒并切到看板 | **调色盘按钮** → **`⌃⌥K 点击修改`**；标签页 **右键 → `Pin Tab`** 可跨对话常驻<br/>CLI：`agy-context aux-shortcut [ctrl+opt+l\|reset\|off]` |
 | **macOS 顶部菜单栏** | **左键 `<5ms` 显隐 · 右键切模式/置顶** | 轮切 `◈ 86%` / `⚡ 46t/s·33s` / `⏳ 5h·周` 3 种状态，悬停看完整摘要 | **调色盘按钮** → `顶部菜单栏常驻图标` / `菜单栏显示内容`<br/>CLI：`agy-context menubar [context\|speed\|quota\|off]` |
-| **宿主与对话入口** | **`⌘⇧B`**（Win/Linux `Ctrl+Shift+B`）<br/>**`/context-viewer`** | 切换 Antigravity 原生右侧辅助栏显隐；对话输入 Slash 命令直达 | 调色盘内还可切换 **浅/深色主题** 与 **5 套热力图配色**（`L0-L4` 可逐格微调） |
+| **宿主与对话入口** | **`⌘⇧B`**（Win/Linux `Ctrl+Shift+B`）<br/>**`/context-viewer`** | 切换 Antigravity 原生右侧辅助栏显隐；对话输入 Slash 命令直达 | 调色盘内可切换 **自动 / 浅 / 深 / OLED 纯黑主题**、**毛玻璃开关**、**中 / 英双语** 与 **5 套热力图配色**（`L0-L4` 可逐格微调） |
+| **一键安全自动更新** | **顶栏下载图标** / **调色盘版本行** / **底部零 CLS 浮层** | 检查官方 GitHub Release，强制校验 HTTPS 白名单、`.sha256` 与 CRC-32 后临时目录原子替换并自动三端热重载 | 发现新版本时顶栏亮起提醒红点；本地 `.git` 开发仓自动防误覆盖 |
 | **订阅分摊与拼车折算** | -- | 支持按月费折扣、家庭组共享或 AA 拼车比例计算净成本 | **`费用与订阅`** 标签页右上角 → **`自定义订阅设置 ✎`** |
 
 <details>

@@ -6,9 +6,9 @@ An open-source plugin suite for **Google Antigravity** (Desktop & `agy` CLI) -- 
 
 | Plugin | What It Does | Version | Docs |
 | :--- | :--- | :---: | :--- |
-| **`agy-finder`** | Right-side file tree, chat `[📂]` reveal & HTML `[🌐]` browser launch, conversation mentions, native preview & `⌘⇧E` drawer | `v0.2.9` | [EN](plugins/agy-finder/README_EN.md) · [中文](plugins/agy-finder/README.md) |
-| **`context-viewer`** | Context gauge, 10-category spectrum, session & per-model cache rates, Swarm tree, custom date trends, dual quota pools, Menu Bar & pinned float (Desktop App) | `v1.9.0` | [EN](plugins/agy-context-viewer/README_EN.md) · [中文](plugins/agy-context-viewer/README.md) |
-| **`agy-cli-hud`** | Zero-dependency lightweight HUD for `agy` CLI & Solo: 2/3-line layered prompt status bar, incremental JSONL daily/monthly & avg cache rollups, dual 5h/weekly quotas, compliant Google Colab telemetry | `v0.1.0` | [EN](plugins/agy-cli-hud/README_EN.md) · [中文](plugins/agy-cli-hud/README.md) |
+| **`agy-finder`** | Right-side file tree, chat `[📂]` reveal & HTML `[🌐]` browser launch, conversation mentions, native preview, `⌘⇧E` drawer & **one-click auto-updater** | `v0.3.0` | [EN](plugins/agy-finder/README_EN.md) · [中文](plugins/agy-finder/README.md) |
+| **`context-viewer`** | Context gauge, 10-category spectrum, session & per-model cache rates, Swarm tree, custom date trends, Glass/OLED/EN-ZH UI, dual quota pools, Menu Bar, pinned float & **one-click auto-updater** (Desktop App) | `v1.10.0` | [EN](plugins/agy-context-viewer/README_EN.md) · [中文](plugins/agy-context-viewer/README.md) |
+| **`agy-cli-hud`** | Zero-dependency lightweight HUD for `agy` CLI & Solo: 6 curated themes, 2/3-line layered prompt bar, non-blocking Solo async bypass, incremental JSONL rollups, SQLite exact timing, dual 5h/weekly quotas + daily weekly burn (`↻`/`+`), compliant Colab telemetry & CLI auto-updater | `v0.1.0` | [EN](plugins/agy-cli-hud/README_EN.md) · [中文](plugins/agy-cli-hud/README.md) |
 
 ---
 
@@ -64,8 +64,9 @@ $env:AGY_PLUGIN="agy-finder"; irm https://raw.githubusercontent.com/Dong-Kevin/a
 | **Floating Drawer / Window** | **`⌘⇧E`** (macOS slide drawer) | **`⌥⌘K`** (macOS pinned float window) | **In-UI Recorder + CLI**<br/>Finder: **`⌨`** -> **`⇧⌘E` record button** / preset / **`AGY Only`**<br/>Context: **palette icon** -> **`⌥⌘K` record button** / **`Host Focus Only`** |
 | **macOS Menu Bar Badge** | -- | Live **◈ / ⚡ / ⏳** indicator<br/>Left-click `<5ms` toggle · Right-click cycle modes | **Palette icon** -> toggle Menu Bar & 3 display modes<br/>CLI: `agy-context menubar [context\|speed\|quota\|off]` |
 | **Host Panel / Chat** | **`⌘⇧B`** / **`/agy-finder`** · **`[📂]`** | **`⌘⇧B`** / **`/context-viewer`**<br/>`⌘⇧P` pin · `⌘W` close float window | Toggle host Aux Pane visibility via native `⌘⇧B` (`Ctrl+Shift+B` on Win/Linux) |
-| **Terminal CLI** | `agy-finder` · `agy-finder aux [path]` | `agy-context` · `aux` · `float` · `web` | CLI keybinding updates:<br/>`agy-finder shortcut\|aux-shortcut <combo\|reset>`<br/>`agy-context shortcut\|aux-shortcut <combo\|reset>` |
-| **Themes & Split-Billing** | Moon button **`🌙`** toggles light/dark | **5 heatmap palettes** in palette drawer<br/>Custom family/shared plan split-billing | Context: **palette icon** (theme & 5-stop colors)<br/>`Cost & Quota` tab top-right **`Customize Plan ✎`** |
+| **Terminal CLI** | `agy-finder` · `agy-finder aux [path]` · `update` | `agy-context` · `aux` · `float` · `web` | CLI keybinding & HUD controls:<br/>`agy-finder shortcut\|aux-shortcut <combo\|reset>`<br/>`agy-context shortcut\|aux-shortcut <combo\|reset>`<br/>`agy-hud install-statusline\|theme\|status\|colab\|update` |
+| **Themes & Split-Billing** | Theme button toggles Auto / Light / Dark | **Glass / OLED / EN-ZH / 5 heatmap palettes** in palette drawer<br/>Custom family/shared plan split-billing | Context: **palette icon** (appearance & language)<br/>`Cost & Quota` tab top-right **`Customize Plan ✎`**<br/>CLI HUD: `agy-hud theme set <mocha\|latte\|frappe\|macchiato\|nord\|dracula>` |
+| **One-Click Auto-Update** | Toolbar download icon / `⌨` panel / `agy-finder update` | Toolbar download icon / palette drawer / zero-CLS banner | Official GitHub Releases with strict HTTPS host allowlist, `.sha256` & CRC-32 verification, and atomic staging (`agy-cli-hud`: `agy-hud update`) |
 
 <details>
 <summary>Platform Support Notes (macOS · Windows · Linux)</summary>

@@ -9,12 +9,20 @@ Zero-dependency, low-latency CLI HUD & compliant Google Colab telemetry plugin b
 - **Native dual-pool quotas & daily weekly burn**: Reads `gemini-5h`, `gemini-weekly`, `3p-5h`, and `3p-weekly` directly from `agy` callbacks (and syncs Desktop `host_status_cache_v1.json` observations), normalized to remaining percentage, and tracks per-pool **today's weekly quota usage %** via a local daily ledger (`quota_daily.v1.json`) that accumulates pre-reset + post-reset consumption (`↻`) on mid-day resets and transparently marks partial-day baselines with `+`.
 - **Solo native drawer snapshot**: Atomically writes `~/.gemini/antigravity-cli/cache/agy-cli-hud/usage-hud.v1.json` for Solo's native right-side **Usage (`⌘U`)** drawer.
 - **Compliant Google Colab monitoring**: Official OAuth 2.0 (PKCE) + `colaboratory.googleapis.com/v1beta` REST API for tier, CU balance, CU/h rate, GPU RAM/VRAM/utilization/idle countdown, keep-alive, release, and low-frequency queue polling.
+- **On-demand SHA-256 auto-updater**: Run `agy-hud update [--check]` to verify and atomically upgrade from official GitHub Releases (dynamically imported only on explicit invocation; zero hot-path overhead).
 
 ## Quick Install
 
 ```bash
+# macOS / Linux -- remote one-line install or hot-upgrade
+curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.sh | bash -s -- agy-cli-hud
+
+# Or from a local agy-plugins checkout
 ./install.sh agy-cli-hud
 ```
+
+- Windows PowerShell: `$env:AGY_PLUGIN="agy-cli-hud"; irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/install.ps1 | iex`
+- You can also download `agy-cli-hud-v0.1.0.zip` from [Releases](https://github.com/Dong-Kevin/agy-plugins/releases), extract it, and run `./install.sh`.
 
 ## Usage
 
@@ -27,4 +35,6 @@ agy-hud config set lines 3
 agy-hud watch
 agy-hud colab import-secret ./client_secret.json
 agy-hud colab login
+agy-hud update --check
+agy-hud update
 ```

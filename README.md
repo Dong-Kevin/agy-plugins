@@ -6,9 +6,9 @@
 
 | 插件 | 核心能力 | 当前版本 | 文档 |
 | :--- | :--- | :---: | :--- |
-| **`agy-finder`** | 右侧目录树、聊天路径 `[📂]` 定位 / HTML `[🌐]` 默认浏览器打开、对话提及提取、原生弹窗与 `⌘⇧E` 抽屉 | `v0.2.9` | [中文说明](plugins/agy-finder/README.md) · [EN](plugins/agy-finder/README_EN.md) |
-| **`context-viewer`** | 上下文占比 / 10 类光谱 / 会话与分模型缓存率 / Swarm 整树 / 自定义日期趋势、双池配额、异常取证、菜单栏与置顶小窗（Desktop App 专用） | `v1.9.0` | [中文说明](plugins/agy-context-viewer/README.md) · [EN](plugins/agy-context-viewer/README_EN.md) |
-| **`agy-cli-hud`** | `agy` CLI 与 Solo 专用零依赖轻量监控：输入栏下方 2/3 行分层状态栏、增量 JSONL 今日/本月与平均缓存、双池 5h/周额度、合规版 Google Colab 算力监控 | `v0.1.0` | [中文说明](plugins/agy-cli-hud/README.md) · [EN](plugins/agy-cli-hud/README_EN.md) |
+| **`agy-finder`** | 右侧目录树、聊天路径 `[📂]` 定位 / HTML `[🌐]` 默认浏览器打开、对话提及提取、原生弹窗、`⌘⇧E` 抽屉与**一键自动更新** | `v0.3.0` | [中文说明](plugins/agy-finder/README.md) · [EN](plugins/agy-finder/README_EN.md) |
+| **`context-viewer`** | 上下文占比 / 10 类光谱 / 会话与分模型缓存率 / Swarm 整树 / 自定义日期趋势、毛玻璃与 OLED、中英双语、双池配额、异常取证、菜单栏置顶小窗与**一键自动更新**（Desktop App 专用） | `v1.10.0` | [中文说明](plugins/agy-context-viewer/README.md) · [EN](plugins/agy-context-viewer/README_EN.md) |
+| **`agy-cli-hud`** | `agy` CLI 与 Solo 专用零依赖轻量监控：6 套克制主题 2/3 行分层状态栏、非阻塞 Solo 异步旁路、增量 JSONL 今日/本月与平均缓存、SQLite 精确计时、双池 5h/周额度与今日周耗（`↻`/`+`）、合规版 Google Colab 监控与 CLI 自动更新 | `v0.1.0` | [中文说明](plugins/agy-cli-hud/README.md) · [EN](plugins/agy-cli-hud/README_EN.md) |
 
 ---
 
@@ -64,8 +64,9 @@ $env:AGY_PLUGIN="agy-finder"; irm https://raw.githubusercontent.com/Dong-Kevin/a
 | **独立悬浮窗 / 抽屉** | **`⌘⇧E`**（macOS 右侧滑出抽屉） | **`⌥⌘K`**（macOS 独立置顶小窗） | **UI 内录制 + CLI**<br/>Finder：**`⌨`** → **`⇧⌘E 点击修改`** / 预设下拉 / **`仅 AGY 内`**<br/>Context：**调色盘按钮** → **`⌥⌘K 点击修改`** / **`仅宿主前台`** |
 | **macOS 菜单栏状态** | -- | 顶部常驻 **◈ / ⚡ / ⏳**<br/>左键 `<5ms` 显隐 · 右键切模式 | **调色盘按钮** → `顶部菜单栏常驻图标` / `显示内容`<br/>CLI：`agy-context menubar [context\|speed\|quota\|off]` |
 | **宿主快捷键 / 对话** | **`⌘⇧B`** / **`/agy-finder`** · **`[📂]`** | **`⌘⇧B`** / **`/context-viewer`**<br/>`⌘⇧P` 置顶 · `⌘W` 关闭小窗 | 辅助栏切主/副面板用宿主自带 `⌘⇧B`（Win/Linux `Ctrl+Shift+B`） |
-| **终端命令行** | `agy-finder` · `agy-finder aux [path]` | `agy-context` · `aux` · `float` · `web` | 命令行改键：<br/>`agy-finder shortcut\|aux-shortcut <combo\|reset>`<br/>`agy-context shortcut\|aux-shortcut <combo\|reset>` |
-| **外观与订阅分摊** | 工具栏月亮 **`🌙`** 切深浅色 | 调色盘选 **5 套热力图配色**<br/>订阅设置分摊比例 | Context：**调色盘按钮**（主题与色阶）<br/>费用页右上角 **`自定义订阅设置 ✎`**（家庭组共享 / AA 拼车） |
+| **终端命令行** | `agy-finder` · `agy-finder aux [path]` · `update` | `agy-context` · `aux` · `float` · `web` | 命令行改键与终端 HUD：<br/>`agy-finder shortcut\|aux-shortcut <combo\|reset>`<br/>`agy-context shortcut\|aux-shortcut <combo\|reset>`<br/>`agy-hud install-statusline\|theme\|status\|colab\|update` |
+| **外观与订阅分摊** | 工具栏主题图标切自动 / 浅 / 深色 | 调色盘选 **毛玻璃 / OLED / 中英双语 / 5 套热力图配色**<br/>订阅设置分摊比例 | Context：**调色盘按钮**（外观与语言）<br/>费用页右上角 **`自定义订阅设置 ✎`**（家庭组共享 / AA 拼车）<br/>CLI HUD：`agy-hud theme set <mocha\|latte\|frappe\|macchiato\|nord\|dracula>` |
+| **一键安全自动更新** | 顶栏更新图标 / `⌨` 面板 / `agy-finder update` | 顶栏更新图标 / 调色盘抽屉 / 底部零 CLS 提示条 | 均基于 GitHub Releases + HTTPS 域名白名单 + `.sha256` / CRC-32 校验与临时目录原子热替换（`agy-cli-hud` 运行 `agy-hud update`） |
 
 <details>
 <summary>Win / Linux / macOS 自定义键与兼容性说明</summary>

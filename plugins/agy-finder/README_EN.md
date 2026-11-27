@@ -1,6 +1,6 @@
 # AGY Finder (`agy-finder`)
 
-A lightweight project file tree for **Google Antigravity** -- click **`[📂]`** deep links in chat replies or press a hotkey to instantly reveal and highlight the target file, launch `.html` / `.htm` / `.xhtml` pages in your system default browser via **`[🌐]`** links or directly inside the tree, inspect conversation mentions, search files cleanly, and preview code in place or in a macOS slide-over drawer.
+A lightweight project file tree for **Google Antigravity** -- click **`[📂]`** deep links in chat replies or press a hotkey to instantly reveal and highlight the target file, launch `.html` / `.htm` / `.xhtml` pages in your system default browser via **`[🌐]`** links or directly inside the tree, inspect conversation mentions, scroll smoothly with incremental DOM reuse, preview code in place or in a macOS slide-over drawer, and stay current via **one-click SHA-256 verified auto-updates**.
 
 [简体中文](README.md) | **English** | [Monorepo Home](../../README_EN.md)
 
@@ -30,7 +30,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/m
 irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-finder/install.ps1 | iex
 ```
 
-- You can also extract `agy-finder-v0.2.9.zip` from [Releases](https://github.com/Dong-Kevin/agy-plugins/releases) and run `./install.sh`, or run `agy plugin install ./plugins/agy-finder`.
+- You can also extract `agy-finder-v0.3.0.zip` from [Releases](https://github.com/Dong-Kevin/agy-plugins/releases) and run `./install.sh`, or run `agy plugin install ./plugins/agy-finder`.
 
 </details>
 
@@ -43,7 +43,8 @@ irm https://raw.githubusercontent.com/Dong-Kevin/agy-plugins/main/plugins/agy-fi
 | **macOS Slide Drawer** | **`⌘⇧E`** | Toggles the standalone right-edge file drawer, auto-hiding on blur with zero Accessibility permissions | **Top-right `⌨` button (or press `?`)** -> **`⇧⌘E` record button** / presets / **`AGY Only / Global`**<br/>CLI: `agy-finder shortcut [combo\|reset\|off]` · `agy-finder hotkey <preset>` |
 | **AGY Aux Pane Jump** | **`⌥⌘E`** (bind CLI on Win/Linux) | Wakes Antigravity's Right Aux Pane straight to AGY Finder from `Overview`, collapsed, or other tabs | **Top-right `⌨` button** -> **`⌥⌘E` record button**; **right-click tab -> `Pin Tab`** to stay pinned<br/>CLI: `agy-finder aux-shortcut [combo\|reset\|off]` |
 | **Host Panel & Deep Links** | **`⌘⇧B`** (`Ctrl+Shift+B` Win/Linux)<br/>**`/agy-finder`** · **`[🌐]`** · **`[📂]`** | Toggles host Aux Pane; `[📂]` expands & highlights the file; `[🌐]` opens `.html` in your default browser | Ships with local `rules/AGENTS.md` linking convention (zero client core modifications) |
-| **Tree Navigation** | **`↑/↓`** · **`←/→`** · **`Enter`** · **`/`** · **`⌘.`** | Move, expand/collapse, open HTML in browser (`Alt`/`Option` for source), fuzzy search, toggle dotfiles | Toolbar **`🌙`** switches Light/Dark theme; drawer icon opens standalone mode |
+| **Tree Navigation** | **`↑/↓`** · **`←/→`** · **`Enter`** · **`/`** · **`⌘.`** | Move, expand/collapse, open HTML in browser (`Alt`/`Option` for source), fuzzy search, toggle dotfiles | Toolbar theme button switches Auto / Light / Dark; drawer icon opens standalone mode |
+| **One-Click Auto-Update** | **Toolbar download icon** / **`⌨` panel** / `agy-finder update` | Checks official GitHub Releases with HTTPS allowlist, `.sha256`, and CRC-32 verification before atomic hot-reload | Shows a badge dot and zero-CLS bottom banner when a newer release is available |
 
 <details>
 <summary>Quick <code>agy-finder</code> Terminal Commands</summary>
@@ -54,6 +55,7 @@ agy-finder open [path]          # Open the drawer and reveal a target path
 agy-finder browser <path>       # Open a local HTML file in your system default browser
 agy-finder aux [path]           # Jump Antigravity's Right Aux Pane straight to File Tree (Win/Linux OS hotkey friendly)
 agy-finder status [--json]      # Inspect drawer, Aux Pane & dual shortcut settings
+agy-finder update [--check]     # Check or self-update from official GitHub Releases (SHA-256 verified)
 agy-finder shortcut <combo>     # Customize drawer shortcut ('reset' | 'off' | '--global')
 agy-finder aux-shortcut <combo> # Customize AGY Aux Pane jump shortcut
 agy-finder quit                 # Stop the background drawer daemon
