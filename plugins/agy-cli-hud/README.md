@@ -8,7 +8,7 @@
 - **字节偏移增量引擎**：借鉴 `token-tracker` 的 `IncrementalJSONL` 游标思路，只解析新增字节，并按 `step_index` 去重防复算，毫秒级汇总 **当前会话平均缓存**、**今日使用量**、**本月使用量** 与 **API 等值参考 / 订阅回本**。
 - **原生双池额度与今日周耗**：直读 `agy` 回调中的 `gemini-5h`、`gemini-weekly`、`3p-5h`、`3p-weekly` 四桶并统一为 **「剩余 %」** 口径；通过本地日账本（`quota_daily.v1.json`）并联动桌面端 `host_status_cache_v1.json` 逐池累计 **今日周额度消耗 %**（`今用X%`），当天发生周额度重置时自动按 **重置前已用 + 重置后新周期已用** 合并累计并标注 `↻`，首日冷启动或隔夜存在未观测缺口时透明标注 `+`（`今用X%+`），同时防多标签乱序与抖动复算。
 - **Solo 原生联动**：输出原子只读快照 `~/.gemini/antigravity-cli/cache/agy-cli-hud/usage-hud.v1.json`，无缝供给 Solo 右侧原生第 4 页签 **「用量」(`⌘U`)**；安装器默认采用**非阻塞 Solo 异步旁路 + `agy-hud render` 热路径入口**（后台异步喂给 Solo、前台直跑 `agy-hud` 仅 ~65 ms / 旁路 ~103 ms 防 `signal: killed` 超时强杀，且即使被 Solo Hook 巡检切回同步转发也不会被旧版内置快渲染截胡退化为白绿，可选 `--solo-sync`），绝不互覆配置。
-- **合规 Google Colab 监控**：纯官方 Google OAuth 2.0 (PKCE) + `colaboratory.googleapis.com/v1beta` REST API，实时查看订阅等级、剩余 CU、CU/h、活跃 GPU 的 RAM/VRAM/负载/闲置倒计时，并支持续期、释放与低频排队。
+- **合规 Google Colab 监控**：纯官方 Google OAuth 2.0 (PKCE) + `colaboratory.googleapis.com/v1beta` REST API，只读查看订阅等级、活跃 GPU 的 RAM/VRAM/负载/闲置倒计时，并支持手动释放实例（零 CDP、零伪造客户端头直连 `tun/m/ccu-info`、零自动保活/循环抢卡）。
 - **一键安全自动更新**：提供按需加载的 `agy-hud update [--check]` 命令（热路径零引入、零网络请求），基于 GitHub Releases、HTTPS 白名单、`.sha256` 与 CRC-32 校验原子热更新。
 
 ## 快速安装
@@ -59,7 +59,7 @@ agy-hud update
 ```text
 # 2 行模式（默认）
 Ctx ████░░░░ 42% (420K/1.0M) · 缓存均值 86% (本轮 94%) · 58 t/s · 本会话 $1.24 · 今日 2.42M ($6.80)
-Gemini 5h 余78% (2h14m) · 周 余64% (今用14%) │ 非Gemini 5h 余92% (4h51m) · 周 余88% (今用3%) │ Colab A100 · 84.2 CU
+Gemini 5h 余78% (2h14m) · 周 余64% (今用14%) │ 非Gemini 5h 余92% (4h51m) · 周 余88% (今用3%) │ Colab A100
 
 # 3 行模式（agy-hud config set lines 3；未连 Colab 时自动将用量与双池额度分两行舒展展示）
 Ctx ████████░░ 42% (420K/1.0M) · 缓存均值 86% (本轮 94%) · 58 t/s · 本会话 $1.24 (省 $4.80)

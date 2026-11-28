@@ -58,6 +58,7 @@ agy-context watch              # 终端实时盯盘面板（适配 tmux 分屏�
 agy-context aux                # 唤醒 / 切至 Antigravity 右侧辅助栏看板
 agy-context float              # 显隐独立置顶小窗（close 关闭 / quit 退出守护进程）
 agy-context menubar quota      # 菜单栏切为配额剩余（可选 context / speed / quota / on / off / status）
+agy-context quota-rpc off      # 开启「零额度 RPC 模式」（禁用 GetUserStatus/Quota 宿主查询，纯本地统计；也可用 AGY_CV_ZERO_QUOTA_RPC=1）
 agy-context turns [--prompts]  # 查看近 40 轮上下文 Δ、思考占比、整请求吞吐与工具调用，或按 Prompt 诊断冷/热启动
 agy-context heavy              # 查看当前会话上下文重度消耗 Top 10 排行
 agy-context tree               # 查看当前会话 Swarm / Subagent 多代理整树聚合统计

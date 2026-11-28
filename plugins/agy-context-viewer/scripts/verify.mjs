@@ -5393,6 +5393,7 @@ async function main() {
     await verifyCliFollowAndProjectGrouping(cvHtmlSource, cvAppSource);
     await verifyTelemetryCategoriesAndPopover(cvHtmlSource, cvAppSource);
     await verifyAutoUpdater(cvHtmlSource, cvAppSource);
+    await verifyZeroQuotaRpcSwitch(cvHtmlSource, cvAppSource);
 
     // macOS Swift native host typecheck
     if (process.platform === 'darwin' && existsSync('/usr/bin/swiftc')) {
@@ -11056,6 +11057,202 @@ async function verifyAutoUpdater(cvHtmlSource, cvAppSource) {
     );
   } finally {
     await new Promise((r) => mockServer.close(() => r()));
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+}
+
+async function verifyZeroQuotaRpcSwitch(cvHtmlSource, cvAppSource) {
+  assert(
+    cvHtmlSource.includes('id="quota-rpc-row"') &&
+      cvHtmlSource.includes('id="quota-rpc-seg"') &&
+      cvHtmlSource.includes('data-quota-rpc="auto"') &&
+      cvHtmlSource.includes('data-quota-rpc="off"'),
+    'index.html 缺少零额度 RPC 模式切换控件 (#quota-rpc-row / #quota-rpc-seg)'
+  );
+  assert(
+    cvAppSource.includes("'drawer.quotaRpc'") &&
+      cvAppSource.includes('quotaRpcEnabled') &&
+      cvAppSource.includes("quotaStatus?.state === 'disabled'"),
+    'app.js 缺少零额度 RPC 国际化、设置持久化或 disabled 状态渲染分支'
+  );
+
+  const tmpRoot = mkdtempSync(join(tmpdir(), 'cv-zero-rpc-verify-'));
+  const agDir = join(tmpRoot, 'ag');
+  const cliDir = join(tmpRoot, 'cli');
+  const stateDir = join(tmpRoot, 'state');
+  const convId = '11111111-2222-3333-4444-555555555555';
+  const logsDir = join(agDir, 'brain', convId, '.system_generated', 'logs');
+  mkdirSync(logsDir, { recursive: true });
+  mkdirSync(cliDir, { recursive: true });
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(
+    join(logsDir, 'transcript.jsonl'),
+    [
+      JSON.stringify({ step_index: 0, type: 'USER_INPUT', created_at: '2026-11-28T01:00:00Z', content: 'ping' }),
+      JSON.stringify({
+        step_index: 1,
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        created_at: '2026-11-28T01:00:05Z',
+        model: 'gemini-4-neon-xhigh',
+        input_tokens: 12000,
+        cache_read_tokens: 48000,
+        output_tokens: 400
+      })
+    ].join('\n') + '\n',
+    'utf-8'
+  );
+
+  const rpcCalls = [];
+  const mockLs = http.createServer((req, res) => {
+    const method = String(req.url || '').split('/').pop() || '';
+    rpcCalls.push(method);
+    req.resume();
+    req.on('end', () => {
+      if (method === 'GetUserStatus') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          userStatus: {
+            email: 'user@example.com',
+            planStatus: { planInfo: { planName: 'Google AI Pro', monthlyPromptCredits: 1000 } },
+            cascadeModelConfigData: {
+              clientModelConfigs: [
+                {
+                  label: 'Gemini 4 Neon',
+                  modelOrAlias: { model: 'gemini-4-neon' },
+                  quotaInfo: { remainingFraction: 0.72, resetTime: new Date(Date.now() + 3600_000).toISOString() }
+                }
+              ]
+            }
+          }
+        }));
+        return;
+      }
+      if (method === 'RetrieveUserQuotaSummary') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          groups: [
+            {
+              displayName: 'Gemini Models',
+              buckets: [
+                { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.72, resetTime: new Date(Date.now() + 3600_000).toISOString() }
+              ]
+            }
+          ]
+        }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{}');
+    });
+  });
+
+  await new Promise((r) => mockLs.listen(0, '127.0.0.1', r));
+  const lsPort = mockLs.address().port;
+  const savedEnv = {
+    AG_DIR: process.env.AG_DIR,
+    AG_CLI_DIR: process.env.AG_CLI_DIR,
+    ANTIGRAVITY_EXECUTABLE_DATA_DIR: process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR,
+    ANTIGRAVITY_LS_ADDRESS: process.env.ANTIGRAVITY_LS_ADDRESS,
+    ANTIGRAVITY_CSRF_TOKEN: process.env.ANTIGRAVITY_CSRF_TOKEN,
+    AGY_CV_ZERO_QUOTA_RPC: process.env.AGY_CV_ZERO_QUOTA_RPC
+  };
+
+  try {
+    process.env.AG_DIR = agDir;
+    process.env.AG_CLI_DIR = cliDir;
+    process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR = stateDir;
+    process.env.ANTIGRAVITY_LS_ADDRESS = `127.0.0.1:${lsPort}`;
+    process.env.ANTIGRAVITY_CSRF_TOKEN = 'verify-zero-rpc-csrf';
+    delete process.env.AGY_CV_ZERO_QUOTA_RPC;
+
+    const collectorUrl = `${pathToFileURL(join(ROOT, 'sidecars', 'dashboard', 'collector.mjs')).href}?zeroRpc=${Date.now()}`;
+    const floatUrl = `${pathToFileURL(join(ROOT, 'sidecars', 'dashboard', 'float_window.mjs')).href}?zeroRpc=${Date.now()}`;
+    const {
+      callLanguageServerWithStatus,
+      collectTokenHistory,
+      getQuotaRpcConfig,
+      getSettings,
+      saveSettings,
+      scanConversation,
+      setQuotaRpcEnabled
+    } = await import(collectorUrl);
+    const { formatStatusItemFromSnapshot } = await import(floatUrl);
+
+    // 1. Default auto-sync mode calls GetUserStatus & RetrieveUserQuotaSummary normally
+    assert(getQuotaRpcConfig().enabled === true, '默认模式应为自动同步 (quotaRpcEnabled=true)');
+    const snapOn = await scanConversation(convId, { force: true, allowDiskCacheWithoutLs: true });
+    assert(
+      rpcCalls.includes('GetUserStatus') && rpcCalls.includes('RetrieveUserQuotaSummary'),
+      `默认模式下应正常发起配额 RPC，实际记录：${JSON.stringify(rpcCalls)}`
+    );
+    assert(snapOn.quotas.length > 0 && snapOn.quotaStatus?.state === 'live', '默认模式下应返回 live 配额');
+
+    // 2. Switching to Zero-Quota-RPC via saveSettings MUST emit zero quota RPCs during AND after switch
+    rpcCalls.length = 0;
+    const savedOff = await saveSettings({ uiPreferences: { quotaRpcEnabled: false } });
+    assert(savedOff.quotaRpc?.enabled === false && savedOff.uiPreferences?.quotaRpcEnabled === false, 'saveSettings 应正确持久化 quotaRpcEnabled=false');
+    assert(
+      !rpcCalls.includes('GetUserStatus') && !rpcCalls.includes('RetrieveUserQuotaSummary'),
+      `关闭开关瞬间绝不能触发任何额度 RPC，实际调用：${JSON.stringify(rpcCalls)}`
+    );
+
+    const directStatus = await callLanguageServerWithStatus('GetUserStatus', {});
+    const directSummary = await callLanguageServerWithStatus('RetrieveUserQuotaSummary', {});
+    assert(directStatus.data === null && directStatus.errorCode === 'QUOTA_RPC_DISABLED', '底层保险丝必须拦截 GetUserStatus');
+    assert(directSummary.data === null && directSummary.errorCode === 'QUOTA_RPC_DISABLED', '底层保险丝必须拦截 RetrieveUserQuotaSummary');
+
+    const [settingsOff, ctxOff, histOff] = await Promise.all([
+      getSettings({ allowDiskCacheWithoutLs: true }),
+      scanConversation(convId, { force: true, allowDiskCacheWithoutLs: true }),
+      collectTokenHistory({ force: true, allowDiskCacheWithoutLs: true })
+    ]);
+    const leakedQuotaRpcs = rpcCalls.filter((m) => m === 'GetUserStatus' || m === 'RetrieveUserQuotaSummary');
+    assert(leakedQuotaRpcs.length === 0, `零额度 RPC 模式下绝不能发出任何 GetUserStatus / RetrieveUserQuotaSummary，实际泄露：${JSON.stringify(leakedQuotaRpcs)}`);
+    assert(settingsOff.quotaRpc?.zeroQuotaRpc === true, 'getSettings 应报告 zeroQuotaRpc=true');
+    assert(ctxOff.quotaStatus?.state === 'disabled' && Array.isArray(ctxOff.quotas) && ctxOff.quotas.length === 0, 'scanConversation 应返回 disabled 状态且不回显旧配额');
+    assert(histOff.quotaStatus?.state === 'disabled' && Array.isArray(histOff.modelQuotas) && histOff.modelQuotas.length === 0, 'collectTokenHistory 应返回 disabled 状态且不回显旧配额');
+
+    const barFormatted = formatStatusItemFromSnapshot(ctxOff, 'quota');
+    assert(
+      barFormatted.title.includes('零RPC') && barFormatted.tooltip.includes('零额度 RPC 模式'),
+      `菜单栏 quota 模式在零 RPC 下应清晰提示：${JSON.stringify(barFormatted)}`
+    );
+
+    // 3. CLI commands (`quota-rpc` / `zero-rpc`) & AGY_CV_ZERO_QUOTA_RPC=1 hard override
+    const cliPath = join(ROOT, 'sidecars', 'dashboard', 'cli.mjs');
+    const cliEnv = {
+      ...process.env,
+      AG_DIR: agDir,
+      AG_CLI_DIR: cliDir,
+      ANTIGRAVITY_EXECUTABLE_DATA_DIR: stateDir,
+      ANTIGRAVITY_LS_ADDRESS: `127.0.0.1:${lsPort}`,
+      ANTIGRAVITY_CSRF_TOKEN: 'verify-zero-rpc-csrf'
+    };
+    delete cliEnv.AGY_CV_ZERO_QUOTA_RPC;
+
+    const cliOn = JSON.parse(execFileSync(process.execPath, [cliPath, 'quota-rpc', 'on', '--json'], { env: cliEnv, encoding: 'utf-8' }));
+    assert(cliOn.ok === true && cliOn.enabled === true && cliOn.zeroQuotaRpc === false, 'agy-context quota-rpc on 应恢复自动同步');
+    const cliZeroOn = JSON.parse(execFileSync(process.execPath, [cliPath, 'zero-rpc', 'on', '--json'], { env: cliEnv, encoding: 'utf-8' }));
+    assert(cliZeroOn.ok === true && cliZeroOn.enabled === false && cliZeroOn.zeroQuotaRpc === true, 'agy-context zero-rpc on 应开启零额度 RPC 模式');
+
+    setQuotaRpcEnabled(true);
+    process.env.AGY_CV_ZERO_QUOTA_RPC = '1';
+    rpcCalls.length = 0;
+    const envBlocked = await scanConversation(convId, { force: true, allowDiskCacheWithoutLs: true });
+    assert(
+      getQuotaRpcConfig().forcedByEnv === true &&
+        envBlocked.quotaStatus?.state === 'disabled' &&
+        !rpcCalls.includes('GetUserStatus') &&
+        !rpcCalls.includes('RetrieveUserQuotaSummary'),
+      'AGY_CV_ZERO_QUOTA_RPC=1 必须最高优先级强制阻断额度 RPC'
+    );
+  } finally {
+    await new Promise((r) => mockLs.close(() => r()));
     for (const [k, v] of Object.entries(savedEnv)) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;

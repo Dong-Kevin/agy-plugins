@@ -71,6 +71,7 @@ node "<skill-dir>/scripts/status.mjs" --json "<conversation-id>"
    agy-context compact           # 查看上下文压缩历史与摘要（追加 --full 看原文）
    agy-context events            # 查看跨会话 429 / 安全过滤浪费 / 重试次数与 requestId / 灰度路由取证及按项目排行
    agy-context pricing [--sync|--reset] # 离线查看内置/已同步模型费率与分段调价预告（--sync 手动同步官方定价）
+   agy-context quota-rpc [on|off|status] # 开关「零额度 RPC 模式」（off = 纯本地统计，禁发 GetUserStatus/Quota RPC）
    agy-context menubar on        # (macOS) 开启顶部菜单栏常驻图标，切换会话自动跟随
    agy-context float             # 弹出屏幕右侧独立置顶小窗（可配 agy-context shortcut --global 在终端前台用 ⌥⌘K 呼出）
    agy-context web               # 在 127.0.0.1:18970 启动完整 Web 热力图与双池配额看板并打开浏览器

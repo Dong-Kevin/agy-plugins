@@ -424,8 +424,11 @@ function formatReadableStatus(snap) {
     lines.push('额度: 暂无实时配额缓存（将在下次 agy 对话回调时自动同步）');
   }
   if (colab.connected) {
+    const cuPart = colab.cu_balance != null
+      ? `剩余 ${colab.cu_balance} CU${colab.cu_rate_hourly != null ? ` | 速率 ${colab.cu_rate_hourly} CU/h` : ''} | `
+      : '';
     lines.push(
-      `Colab [${colab.tier || 'ON'}]: 剩余 ${colab.cu_balance ?? '--'} CU | 速率 ${colab.cu_rate_hourly ?? '--'} CU/h | 活跃实例 ${(colab.runtimes || []).length} 台`
+      `Colab [${colab.tier || 'ON'}]: ${cuPart}活跃实例 ${(colab.runtimes || []).length} 台`
     );
     for (const rt of colab.runtimes || []) {
       lines.push(
@@ -472,7 +475,7 @@ async function runColabCommand(args) {
   if (sub === 'login') {
     await colab.runColabOAuthLogin({ paths, openBrowser: !args.includes('--no-browser') });
     const status = await colab.refreshColabStatus({ paths, force: true });
-    console.log(asJson ? JSON.stringify(status, null, 2) : `[agy-hud] Google Colab 登录成功（${status.tier || '已连接'}，剩余 ${status.cu_balance ?? '--'} CU）。`);
+    console.log(asJson ? JSON.stringify(status, null, 2) : `[agy-hud] Google Colab 登录成功（${status.tier || '已连接'}，活跃实例 ${(status.runtimes || []).length} 台）。`);
     return;
   }
   if (sub === 'logout') {
@@ -485,96 +488,24 @@ async function runColabCommand(args) {
     console.log(JSON.stringify(status, null, 2));
     return;
   }
-  if (sub === 'keepalive') {
-    const id = args[1] && !args[1].startsWith('--') ? args[1] : null;
-    const status = await colab.keepAliveColabRuntime(id, { paths });
-    console.log(JSON.stringify(status, null, 2));
-    return;
-  }
   if (sub === 'release') {
     const id = args[1];
     const status = await colab.releaseColabRuntime(id, { paths });
     console.log(JSON.stringify(status, null, 2));
     return;
   }
+  if (sub === 'keepalive') {
+    throw new Error('基于 Google Colab 服务条款合规要求，已移除 colab keepalive 自动保活功能。');
+  }
   if (sub === 'snipe') {
     if (args.includes('--stop') || args[1] === 'stop') {
-      const st = colab.stopColabSniper(paths);
-      console.log(JSON.stringify(st, null, 2));
+      const st = colab.stopLegacyColabSniper(paths);
+      console.log(asJson ? JSON.stringify(st, null, 2) : `[agy-hud] ${st.message}`);
       return;
     }
-    const gpu = (args[1] && !args[1].startsWith('--')) ? args[1] : (parseFlagValue(args, '--gpu', 'T4') || 'T4');
-    const shape = parseFlagValue(args, '--shape', 'STANDARD') || 'STANDARD';
-    const intervalSec = Math.max(15, Number(parseFlagValue(args, '--interval', '30')) || 30);
-    if (args.includes('--once')) {
-      const op = await colab.tryAcquireColabRuntimeOnce({ accelerator: gpu, shape, paths });
-      console.log(JSON.stringify({ ok: true, operation: op }, null, 2));
-      return;
-    }
-    // Start a detached low-frequency sniper worker
-    if (args.includes('--worker')) {
-      let attempts = 0;
-      while (true) {
-        attempts += 1;
-        writeJsonAtomic(paths.colabSniperPath, {
-          active: true,
-          pid: process.pid,
-          target_accelerator: gpu.toUpperCase(),
-          interval_sec: intervalSec,
-          attempts,
-          status_text: `第 ${attempts} 次尝试申请 ${gpu.toUpperCase()}...`,
-          updated_at: Math.floor(Date.now() / 1000)
-        }, { mode: 0o600, pretty: false });
-        try {
-          const op = await colab.tryAcquireColabRuntimeOnce({ accelerator: gpu, shape, paths });
-          if (op && !op.error) {
-            writeJsonAtomic(paths.colabSniperPath, {
-              active: false,
-              pid: null,
-              target_accelerator: gpu.toUpperCase(),
-              interval_sec: intervalSec,
-              attempts,
-              status_text: `已提交 ${gpu.toUpperCase()} 分配请求`,
-              updated_at: Math.floor(Date.now() / 1000)
-            }, { mode: 0o600, pretty: false });
-            await colab.refreshColabStatus({ paths, force: true }).catch(() => {});
-            process.exit(0);
-          }
-        } catch (err) {
-          writeJsonAtomic(paths.colabSniperPath, {
-            active: true,
-            pid: process.pid,
-            target_accelerator: gpu.toUpperCase(),
-            interval_sec: intervalSec,
-            attempts,
-            status_text: `第 ${attempts} 次暂未分配，${intervalSec}s 后重试`,
-            last_error: String(err.message || err),
-            updated_at: Math.floor(Date.now() / 1000)
-          }, { mode: 0o600, pretty: false });
-        }
-        await new Promise((r) => setTimeout(r, intervalSec * 1000));
-      }
-    }
-    colab.stopColabSniper(paths);
-    const child = spawn(process.execPath, [SELF_PATH, 'colab', 'snipe', gpu, '--shape', shape, '--interval', String(intervalSec), '--worker'], {
-      detached: true,
-      stdio: 'ignore',
-      env: process.env
-    });
-    child.unref();
-    const st = {
-      active: true,
-      pid: child.pid,
-      target_accelerator: gpu.toUpperCase(),
-      interval_sec: intervalSec,
-      attempts: 0,
-      status_text: `排队中 (${gpu.toUpperCase()} · ${intervalSec}s)`
-    };
-    writeJsonAtomic(paths.colabSniperPath, st, { mode: 0o600, pretty: false });
-    console.log(JSON.stringify(st, null, 2));
-    return;
+    throw new Error('基于 Google Colab 服务条款合规要求，已移除 colab snipe 自动循环抢卡功能（如需停止升级前遗留旧进程，请运行 agy-hud colab snipe --stop）。');
   }
-  throw new Error(`未知 colab 子命令：${sub}`);
+  throw new Error(`未知 colab 子命令：${sub}（支持：import-secret | login | logout | status | release）`);
 }
 
 async function runConfigCommand(args) {
@@ -650,7 +581,7 @@ function buildThemeSample(themeName, { color = true, colorDepth = null, lines = 
       { id: 'gemini', weekly_remaining_percent: 64, weekly_resets_at: nowSec + 280000, weekly_used_today_percent: 14, weekly_reset_count_today: 0, weekly_pre_reset_used_percent: 0 },
       { id: 'non_gemini', weekly_remaining_percent: 88, weekly_resets_at: nowSec + 471600, weekly_used_today_percent: 3, weekly_reset_count_today: 0, weekly_pre_reset_used_percent: 0 }
     ],
-    colab: { tier: 'PRO+', cu: 84.2, rate: 13.1, hrs: 6.4, rt: { gpu: 'A100', ram_u: 14, ram_t: 83, vram_u: 22, vram_t: 40, idle_m: 72 } }
+    colab: { tier: 'PRO+', rt: { gpu: 'A100', ram_u: 14, ram_t: 83, vram_u: 22, vram_t: 40, idle_m: 72 } }
   };
   return renderStatusLine(samplePayload, sampleSummary, {
     lines,
@@ -785,7 +716,7 @@ function printHelp() {
   agy-hud install-statusline --uninstall           移除 HUD 底栏并完好保留 Solo 桥接
   agy-hud config show | set <key> <value>          配置分层行数（1/2/3）、主题、统计范围、月费折算
   agy-hud update [--check|--apply] [--json]        检查或自动更新至最新 GitHub Release（含 SHA-256 校验）
-  agy-hud colab <import-secret|login|logout|status|keepalive|release|snipe>
+  agy-hud colab <import-secret|login|logout|status|release>
 `);
 }
 

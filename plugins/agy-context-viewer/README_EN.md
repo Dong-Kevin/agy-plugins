@@ -58,6 +58,7 @@ agy-context watch              # Live terminal monitor panel (tmux-friendly, aut
 agy-context aux                # Reveal and switch Antigravity's Right Aux Pane straight to Context Dashboard
 agy-context float              # Toggle pinned floating window ('close' to hide, 'quit' to stop daemon)
 agy-context menubar quota      # Switch Menu Bar mode ('context' | 'speed' | 'quota' | 'on' | 'off' | 'status')
+agy-context quota-rpc off      # Enable Zero-Quota-RPC mode (disable GetUserStatus/Quota RPCs for local-only telemetry; or set AGY_CV_ZERO_QUOTA_RPC=1)
 agy-context turns [--prompts]  # Inspect per-turn context ±Delta, thinking share, effective tok/s & tools, or Prompt cold/hot startup
 agy-context heavy              # Show Top 10 heavyweight context consumers in the current session
 agy-context tree               # Show aggregated Swarm / Subagent tree throughput and API cost

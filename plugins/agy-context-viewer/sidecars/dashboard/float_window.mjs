@@ -1423,6 +1423,9 @@ export function formatStatusItemFromSnapshot(snap, rawMode = 'context') {
       title = `⚡ ${durStr}`;
     }
   } else if (mode === 'quota') {
+    if (snap?.quotaStatus?.state === 'disabled') {
+      title = '⏳ 零RPC';
+    } else {
     const q = cx?.quota || (Array.isArray(snap?.quotas) && snap.quotas.length ? snap.quotas[0] : null);
     const hasFiveHourObj = Boolean(q?.fiveHour);
     const p5 = isKnownNum(q?.fiveHour?.remainingPercent)
@@ -1461,6 +1464,7 @@ export function formatStatusItemFromSnapshot(snap, rawMode = 'context') {
       const icon = remPct <= 15 ? '⚠ ' : '⏳ ';
       title = countdown ? `${icon}Week ${remPct}%·${countdown}` : `${icon}Week ${remPct}%`;
     }
+    }
   }
 
   // Structured multi-block tooltip: every line stays <= 36 display cols to avoid awkward wrapping
@@ -1496,7 +1500,9 @@ export function formatStatusItemFromSnapshot(snap, rawMode = 'context') {
 
   const quotaLines = [];
   const qs = snap?.quotaStatus;
-  if (qs?.stale) {
+  if (qs?.state === 'disabled') {
+    quotaLines.push('同步：零额度 RPC 模式（纯本地统计）');
+  } else if (qs?.stale) {
     quotaLines.push('同步：语言服务离线（展示缓存）');
   } else if (qs?.summaryStale) {
     quotaLines.push('同步：多窗口配额摘要暂不可用');
@@ -1614,7 +1620,11 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
     return getSettings({ background: true, allowDiskCacheWithoutLs: true });
   }
   if (u.pathname === '/api/settings' && method === 'POST') {
-    return saveSettings(data);
+    const saved = await saveSettings(data);
+    if (data?.uiPreferences?.quotaRpcEnabled !== undefined) {
+      hooks.onRefreshMenubar?.();
+    }
+    return saved;
   }
   if (u.pathname === '/api/launch-cli' && method === 'POST') {
     return launchCliTerminal(data);

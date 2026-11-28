@@ -29,7 +29,6 @@ import { deflateRawSync } from 'node:zlib';
 
 import {
   importClientSecretFile,
-  keepAliveColabRuntime,
   refreshColabStatus,
   releaseColabRuntime,
   saveColabToken
@@ -60,6 +59,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = resolve(__dirname, '..');
 const BIN_PATH = join(PLUGIN_ROOT, 'bin', 'agy-hud.mjs');
 
+// Ensure isolated AGY_HUD_HOME tests never leak into host-injected CLI/Desktop home env vars
+delete process.env.CLI_AGENTS_AGY_HOME;
+delete process.env.AGY_CLI_HOME;
+delete process.env.AGY_DESKTOP_HOME;
+delete process.env.AGY_HUD_DATA_DIR;
+
 function pass(msg) {
   console.log(`[PASS] ${msg}`);
 }
@@ -85,8 +90,13 @@ function testZeroCdpCompliance() {
     assert.ok(!/DevToolsActivePort/i.test(src), `${rel} must never touch DevToolsActivePort / CDP`);
     assert.ok(!/app\.asar/i.test(src), `${rel} must never touch app.asar`);
     assert.ok(!/config\/config\.json/i.test(src), `${rel} must never modify host config.json`);
+    assert.ok(!/X-Colab-Client-Agent/i.test(src), `${rel} must never spoof X-Colab-Client-Agent`);
+    assert.ok(!/X-Colab-Tunnel/i.test(src), `${rel} must never spoof X-Colab-Tunnel`);
+    assert.ok(!/tun\/m\/ccu-info/i.test(src), `${rel} must never call private tun/m/ccu-info endpoint`);
+    assert.ok(!/keepAliveColabRuntime|tryAcquireColabRuntimeOnce/i.test(src), `${rel} must not contain auto-keepalive or GPU acquisition logic`);
+    assert.ok(!/POST['"],\s*['"]\/v1beta\/runtimes/i.test(src), `${rel} must not POST /v1beta/runtimes for GPU sniping`);
   }
-  pass('Compliance gate: zero CDP, zero host config mutation, zero app.asar access');
+  pass('Compliance gate: zero CDP, zero host config mutation, zero app.asar access & zero high-risk Colab logic');
 }
 
 function testIncrementalJsonlAndRollup() {
@@ -809,7 +819,6 @@ async function testMockColabApiAndPermissions() {
   process.env.AGY_HUD_HOME = work;
 
   let released = false;
-  let keepAliveHit = false;
   const mockJsonRes = (body, status = 200) => ({
     ok: status >= 200 && status < 300,
     status,
@@ -820,6 +829,13 @@ async function testMockColabApiAndPermissions() {
   const mockFetch = async (url, init = {}) => {
     const u = String(url);
     const method = String(init.method || 'GET').toUpperCase();
+    const hdrKeys = Object.keys(init.headers || {}).map((k) => k.toLowerCase());
+    assert.ok(!hdrKeys.includes('x-colab-client-agent'), 'Must never send spoofed X-Colab-Client-Agent header');
+    assert.ok(!hdrKeys.includes('x-colab-tunnel'), 'Must never send spoofed X-Colab-Tunnel header');
+    assert.ok(!u.includes('ccu-info'), 'Must never call private tun/m/ccu-info endpoint');
+    assert.ok(!u.includes('/api/kernels'), 'Must never call /api/kernels keepalive endpoint');
+    assert.ok(!(u.endsWith('/v1beta/runtimes') && method === 'POST'), 'Must never auto-acquire/snipe runtimes via POST');
+
     if (u.endsWith('/v1beta/subscription')) {
       return mockJsonRes({ tier: 'SUBSCRIPTION_TIER_PRO_PLUS' });
     }
@@ -838,9 +854,6 @@ async function testMockColabApiAndPermissions() {
       released = true;
       return mockJsonRes({ done: true });
     }
-    if (u.includes('ccu-info')) {
-      return mockJsonRes(`)]}'\n${JSON.stringify({ currentBalance: 84.25, consumptionRateHourly: 13.08 })}`);
-    }
     if (u.endsWith('/api/status')) {
       return mockJsonRes({
         started: new Date(Date.now() - 40 * 60_000).toISOString(),
@@ -854,10 +867,6 @@ async function testMockColabApiAndPermissions() {
         memory: { totalBytes: 83.5 * 1024 ** 3, freeBytes: 69.3 * 1024 ** 3 },
         gpus: [{ name: 'NVIDIA A100-SXM4-40GB', memoryTotalBytes: 40 * 1024 ** 3, memoryUsedBytes: 22 * 1024 ** 3, gpuUtilization: 0.62 }]
       })}`);
-    }
-    if (u.endsWith('/api/kernels')) {
-      keepAliveHit = true;
-      return mockJsonRes([{ id: 'k1', name: 'python3' }]);
     }
     return mockJsonRes({}, 404);
   };
@@ -876,7 +885,9 @@ async function testMockColabApiAndPermissions() {
     const st = await refreshColabStatus({ paths, force: true, fetchImpl: mockFetch });
     assert.equal(st.connected, true);
     assert.equal(st.tier, 'PRO+');
-    assert.equal(st.cu_balance, 84.25);
+    assert.equal(st.cu_balance, null);
+    assert.equal(st.cu_rate_hourly, null);
+    assert.equal(st.estimated_hours_left, null);
     assert.equal(st.runtimes.length, 1);
     assert.equal(st.runtimes[0].accelerator, 'A100');
     assert.equal(st.runtimes[0].region, 'us-central1');
@@ -885,11 +896,70 @@ async function testMockColabApiAndPermissions() {
     assert.equal(st.runtimes[0].vram_used_gb, 22);
     assert.ok(st.runtimes[0].idle_remaining_minutes >= 70 && st.runtimes[0].idle_remaining_minutes <= 73);
 
-    await keepAliveColabRuntime('rt-mock-1', { paths, fetchImpl: mockFetch });
-    assert.equal(keepAliveHit, true);
-
     const afterRelease = await releaseColabRuntime('rt-mock-1', { paths, fetchImpl: mockFetch });
     assert.equal(afterRelease.runtimes.length, 0);
+
+    // Removed high-risk CLI subcommands (keepalive / snipe start) must fail closed with clear compliance message
+    for (const removedSub of [['colab', 'keepalive'], ['colab', 'snipe', 'A100'], ['colab', 'snipe', '--once']]) {
+      let failedMsg = '';
+      try {
+        execFileSync(process.execPath, [BIN_PATH, ...removedSub], {
+          env: { ...process.env, AGY_HUD_HOME: work },
+          encoding: 'utf8',
+          stdio: 'pipe'
+        });
+      } catch (err) {
+        failedMsg = String(err.stderr || err.message || '');
+      }
+      assert.ok(failedMsg.includes('合规') && failedMsg.includes('已移除'), `Subcommand ${removedSub.join(' ')} must fail closed with compliance message: ${failedMsg}`);
+    }
+
+    // Stop-only compatibility cleanup: `colab snipe --stop` must terminate a legacy worker and never kill an unrelated reused PID
+    if (process.platform !== 'win32') {
+      const legacyStatePath = join(paths.colabDir, 'sniper_state.v1.json');
+      const legacyProc = spawn(
+        process.execPath,
+        ['-e', 'setInterval(() => {}, 1000)', 'agy-hud', 'colab', 'snipe', '--worker'],
+        { stdio: 'ignore' }
+      );
+      const unrelatedProc = spawn(
+        process.execPath,
+        ['-e', 'setInterval(() => {}, 1000)', 'unrelated-process'],
+        { stdio: 'ignore' }
+      );
+      try {
+        writeFileSync(legacyStatePath, JSON.stringify({ active: true, pid: legacyProc.pid }), 'utf8');
+        const stopRes = JSON.parse(execFileSync(process.execPath, [BIN_PATH, 'colab', 'snipe', '--stop', '--json'], {
+          env: { ...process.env, AGY_HUD_HOME: work },
+          encoding: 'utf8'
+        }));
+        assert.equal(stopRes.ok, true);
+        assert.equal(stopRes.stopped, true, `Legacy worker PID ${legacyProc.pid} must be terminated`);
+        assert.equal(stopRes.removed, true, 'Legacy sniper_state.v1.json must be removed');
+        assert.ok(!existsSync(legacyStatePath), 'Legacy state file must no longer exist');
+        await new Promise((r) => {
+          if (legacyProc.exitCode !== null || legacyProc.signalCode !== null) return r();
+          legacyProc.once('exit', r);
+          setTimeout(r, 1500);
+        });
+        assert.ok(legacyProc.exitCode !== null || legacyProc.signalCode !== null, 'Legacy worker process must have exited');
+
+        // Reused/unrelated PID must NOT be signalled
+        writeFileSync(legacyStatePath, JSON.stringify({ active: true, pid: unrelatedProc.pid }), 'utf8');
+        const skipRes = JSON.parse(execFileSync(process.execPath, [BIN_PATH, 'colab', 'snipe', '--stop', '--json'], {
+          env: { ...process.env, AGY_HUD_HOME: work },
+          encoding: 'utf8'
+        }));
+        assert.equal(skipRes.ok, true);
+        assert.equal(skipRes.stopped, false, 'Unrelated PID must never be signalled');
+        assert.equal(skipRes.skipped_pid_reuse, true);
+        assert.equal(skipRes.removed, true);
+        assert.doesNotThrow(() => process.kill(unrelatedProc.pid, 0), 'Unrelated process must stay alive');
+      } finally {
+        try { legacyProc.kill('SIGKILL'); } catch {}
+        try { unrelatedProc.kill('SIGKILL'); } catch {}
+      }
+    }
 
     // Compose full snapshot & verify CLI hot path + Solo usage_hud.py contract fields
     const inc = runIncrementalSync({ scope: 'cli_only', paths });
@@ -898,10 +968,10 @@ async function testMockColabApiAndPermissions() {
     assert.ok(existsSync(paths.summaryPath));
     assert.ok(statSync(paths.summaryPath).size < 4096, 'statusline_summary.v1.json must stay < 4KB');
     assert.equal(snapshot.generated_at, snapshot.updated_at);
-    assert.equal(snapshot.colab.balance_cu, 84.25);
+    assert.equal(snapshot.colab.balance_cu, null);
     assert.equal(snapshot.usage.today.total_tokens, snapshot.rollups.today.tokens);
     assert.equal(summary.colab_connected, true);
-    assert.equal(summary.colab_cu, 84.25);
+    assert.equal(summary.colab_cu, null);
     assert.equal(summary.colab_gpu, 'A100');
     assert.equal(summary.colab_ram_total, 83.5);
     assert.equal(summary.colab_vram_used, 22);
@@ -918,9 +988,9 @@ async function testMockColabApiAndPermissions() {
       }),
       encoding: 'utf8'
     });
-    assert.ok(cliOut.includes('25%') && cliOut.includes('$0.42') && cliOut.includes('Gemini') && cliOut.includes('非Gemini') && cliOut.includes('84.3 CU'));
+    assert.ok(cliOut.includes('25%') && cliOut.includes('$0.42') && cliOut.includes('Gemini') && cliOut.includes('非Gemini') && cliOut.includes('Colab A100'));
 
-    pass('Mock Colab REST API (CCU/RAM/VRAM/GPU/idle/keepalive/release), mode 0600 & CLI statusline e2e');
+    pass('Compliant Colab REST API (read-only runtime status/release, zero ccu-info/keepalive/snipe), mode 0600 & CLI statusline e2e');
   } finally {
     if (prevHome === undefined) delete process.env.AGY_HUD_HOME;
     else process.env.AGY_HUD_HOME = prevHome;

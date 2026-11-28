@@ -85,7 +85,13 @@ function createHandlers(getDefaultConvId, makeResponse, handlerOpts = {}) {
     },
 
     apiGetSettings: async () => getSettings({ allowDiskCacheWithoutLs }),
-    apiSaveSettings: async (data = {}) => saveSettings(data),
+    apiSaveSettings: async (data = {}) => {
+      const saved = await saveSettings(data);
+      if (data?.uiPreferences?.quotaRpcEnabled !== undefined) {
+        controlFloatWindow({ action: 'refresh-session' }).catch(() => {});
+      }
+      return saved;
+    },
     apiLaunchCli: async (data = {}) => launchCliTerminal(data),
     apiFloatStatus: async () => getFloatWindowStatus(),
     apiFloatControl: async (data = {}) => controlFloatWindow(data),

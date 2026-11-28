@@ -1,9 +1,10 @@
 /**
  * Compliant Google Colab OAuth 2.0 (PKCE) & official REST API client for agy-cli-hud.
- * Strictly zero CDP / DOM injection. Credentials stored with mode 0600 only.
+ * Strictly zero CDP / DOM injection, zero spoofed client headers, zero auto-keepalive or GPU sniping.
+ * Credentials stored with mode 0600 only.
  */
 
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import { existsSync, unlinkSync } from 'node:fs';
 import http from 'node:http';
@@ -20,10 +21,6 @@ const OAUTH_SCOPE = [
 
 function getColabApiBase() {
   return (process.env.AGY_HUD_COLAB_API_BASE || 'https://colaboratory.googleapis.com').replace(/\/$/, '');
-}
-
-function getColabCcuUrl() {
-  return process.env.AGY_HUD_COLAB_CCU_URL || 'https://colab.research.google.com/tun/m/ccu-info?authuser=0';
 }
 
 function parseClientSecretJson(rawObj) {
@@ -328,33 +325,6 @@ function bytesToGb(bytes) {
   return Number((n / (1024 ** 3)).toFixed(1));
 }
 
-async function fetchCcuInfo(accessToken, { fetchImpl = globalThis.fetch } = {}) {
-  try {
-    const res = await fetchImpl(getColabCcuUrl(), {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        Accept: 'application/json',
-        'X-Colab-Client-Agent': 'colab-cli',
-        'X-Colab-Tunnel': 'Google'
-      },
-      signal: AbortSignal.timeout(8000)
-    });
-    if (!res.ok) return { ok: false, status: res.status };
-    const raw = await res.text();
-    const clean = raw.replace(/^\)\]\}'\s*/, '');
-    const json = JSON.parse(clean);
-    const balRaw = json.currentBalance ?? json.paidComputeUnitsBalance ?? json.paidBalance;
-    const rateRaw = json.consumptionRateHourly;
-    return {
-      ok: true,
-      balance: Number.isFinite(Number(balRaw)) ? Number(Number(balRaw).toFixed(2)) : null,
-      hourly_rate: Number.isFinite(Number(rateRaw)) ? Number(Number(rateRaw).toFixed(2)) : null
-    };
-  } catch {
-    return { ok: false };
-  }
-}
-
 async function probeRuntimeProxy(rt, { fetchImpl = globalThis.fetch } = {}) {
   const conn = rt?.connectionInfo || {};
   if (!conn.url || !conn.token) return { jupyterStatus: null, resources: null };
@@ -420,29 +390,9 @@ function normalizeRuntimeSummary(rt, { jupyterStatus, resources }, nowMs = Date.
   };
 }
 
-export function readColabSniperState(paths = resolveHudPaths()) {
-  const saved = readJsonSafe(paths.colabSniperPath, null);
-  if (!saved || typeof saved !== 'object') {
-    return { active: false, target_accelerator: null, interval_sec: 30, attempts: 0 };
-  }
-  // Check if recorded sniper PID is still alive
-  let active = Boolean(saved.active);
-  if (active && Number.isInteger(saved.pid) && saved.pid > 1) {
-    try { process.kill(saved.pid, 0); } catch { active = false; }
-  }
-  return {
-    active,
-    target_accelerator: saved.target_accelerator || null,
-    interval_sec: Number(saved.interval_sec || 30),
-    attempts: Number(saved.attempts || 0),
-    status_text: saved.status_text || (active ? '排队中' : '空闲')
-  };
-}
-
 export async function refreshColabStatus({ paths = resolveHudPaths(), force = false, fetchImpl = globalThis.fetch } = {}) {
   const cfg = loadColabConfig(paths);
   const configured = Boolean(cfg.client_id);
-  const sniper = readColabSniperState(paths);
   const cached = readJsonSafe(paths.colabCachePath, null);
 
   const accessToken = await getValidColabAccessToken(paths, { fetchImpl });
@@ -455,7 +405,6 @@ export async function refreshColabStatus({ paths = resolveHudPaths(), force = fa
       cu_rate_hourly: null,
       estimated_hours_left: null,
       runtimes: [],
-      sniper,
       updated_at: Math.floor(Date.now() / 1000)
     };
     writeJsonAtomic(paths.colabCachePath, empty, { mode: 0o600, pretty: false });
@@ -463,20 +412,23 @@ export async function refreshColabStatus({ paths = resolveHudPaths(), force = fa
   }
 
   if (!force && cached && cached.connected && (Math.floor(Date.now() / 1000) - (cached.updated_at || 0)) < 25) {
-    return { ...cached, sniper };
+    return {
+      ...cached,
+      cu_balance: null,
+      cu_rate_hourly: null,
+      estimated_hours_left: null
+    };
   }
 
-  const [subRes, rtRes, ccuRes] = await Promise.allSettled([
+  const [subRes, rtRes] = await Promise.allSettled([
     colabApiRequest('GET', '/v1beta/subscription', { paths, fetchImpl }),
-    colabApiRequest('GET', '/v1beta/runtimes', { paths, fetchImpl }),
-    fetchCcuInfo(accessToken, { fetchImpl })
+    colabApiRequest('GET', '/v1beta/runtimes', { paths, fetchImpl })
   ]);
 
   const sub = subRes.status === 'fulfilled' ? subRes.value : {};
   const rawRuntimes = rtRes.status === 'fulfilled' && Array.isArray(rtRes.value?.runtimes)
     ? rtRes.value.runtimes
     : [];
-  const ccu = ccuRes.status === 'fulfilled' ? ccuRes.value : { ok: false };
 
   const enriched = await Promise.all(
     rawRuntimes.map(async (rt) => {
@@ -485,53 +437,18 @@ export async function refreshColabStatus({ paths = resolveHudPaths(), force = fa
     })
   );
 
-  const balance = ccu.ok ? ccu.balance : (cached?.cu_balance ?? null);
-  const rate = ccu.ok ? ccu.hourly_rate : (cached?.cu_rate_hourly ?? null);
-  const hoursLeft = balance !== null && rate !== null && rate > 0
-    ? Number((balance / rate).toFixed(1))
-    : null;
-
   const summary = {
     connected: true,
     configured,
     tier: formatTierLabel(sub) || cached?.tier || null,
-    cu_balance: balance,
-    cu_rate_hourly: rate,
-    estimated_hours_left: hoursLeft,
+    cu_balance: null,
+    cu_rate_hourly: null,
+    estimated_hours_left: null,
     runtimes: enriched,
-    sniper,
     updated_at: Math.floor(Date.now() / 1000)
   };
   writeJsonAtomic(paths.colabCachePath, summary, { mode: 0o600, pretty: false });
   return summary;
-}
-
-export async function keepAliveColabRuntime(runtimeId, { paths = resolveHudPaths(), fetchImpl = globalThis.fetch } = {}) {
-  const list = await colabApiRequest('GET', '/v1beta/runtimes', { paths, fetchImpl });
-  const runtimes = Array.isArray(list?.runtimes) ? list.runtimes : [];
-  const target = runtimeId
-    ? runtimes.find((r) => r.name === runtimeId || String(r.name || '').endsWith(`/${runtimeId}`))
-    : runtimes[0];
-  if (!target) throw new Error('未找到目标运行中 Colab 实例');
-  const conn = target.connectionInfo || {};
-  if (!conn.url || !conn.token) throw new Error('该实例缺少代理连接信息');
-
-  const base = String(conn.url).replace(/\/$/, '');
-  const headers = { 'X-Colab-Runtime-Proxy-Token': conn.token, 'Content-Type': 'application/json' };
-  const kRes = await fetchImpl(`${base}/api/kernels`, { headers, signal: AbortSignal.timeout(7000) });
-  if (kRes.ok) {
-    const kernels = await kRes.json().catch(() => []);
-    if (!Array.isArray(kernels) || kernels.length === 0) {
-      await fetchImpl(`${base}/api/kernels`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ name: 'python3' }),
-        signal: AbortSignal.timeout(8000)
-      }).catch(() => {});
-    }
-  }
-  await fetchImpl(`${base}/api/status`, { headers, signal: AbortSignal.timeout(7000) }).catch(() => {});
-  return await refreshColabStatus({ paths, force: true, fetchImpl });
 }
 
 export async function releaseColabRuntime(runtimeId, { paths = resolveHudPaths(), fetchImpl = globalThis.fetch } = {}) {
@@ -541,43 +458,89 @@ export async function releaseColabRuntime(runtimeId, { paths = resolveHudPaths()
   return await refreshColabStatus({ paths, force: true, fetchImpl });
 }
 
-export async function tryAcquireColabRuntimeOnce({
-  accelerator = 'T4',
-  shape = 'STANDARD',
-  variant = 'GPU',
-  paths = resolveHudPaths(),
-  fetchImpl = globalThis.fetch
-} = {}) {
-  const normAccel = String(accelerator || 'T4').toUpperCase();
-  const normVariant = normAccel === 'NONE' || normAccel === 'CPU' ? 'DEFAULT' : String(variant || 'GPU').toUpperCase();
-  const op = await colabApiRequest('POST', '/v1beta/runtimes', {
-    paths,
-    fetchImpl,
-    body: {
-      runtimeSpec: {
-        variant: normVariant,
-        accelerator: normAccel === 'CPU' ? 'NONE' : normAccel,
-        shape: String(shape || 'STANDARD').toUpperCase()
-      }
-    }
-  });
-  return op;
+function inspectLegacyWorkerCmdline(pid) {
+  if (process.platform === 'win32') return null;
+  try {
+    return execFileSync('ps', ['-o', 'command=', '-p', String(pid)], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 1500
+    }).trim();
+  } catch {
+    return null;
+  }
 }
 
-export function stopColabSniper(paths = resolveHudPaths()) {
-  const saved = readJsonSafe(paths.colabSniperPath, null);
-  if (saved && Number.isInteger(saved.pid) && saved.pid > 1) {
-    try { process.kill(saved.pid, 'SIGTERM'); } catch {}
+function isLegacyColabWorkerCmdline(cmdline) {
+  if (!cmdline || typeof cmdline !== 'string') return false;
+  return /\bagy-hud\b/.test(cmdline) && /\bcolab\b/.test(cmdline) && /\bsnipe\b/.test(cmdline) && /--worker\b/.test(cmdline);
+}
+
+/**
+ * Stop-only compatibility cleanup for detached legacy workers started before upgrading.
+ * Verifies process command line on POSIX to avoid signalling a reused PID.
+ */
+export function stopLegacyColabSniper(paths = resolveHudPaths()) {
+  const legacyPath = join(paths.colabDir, 'sniper_state.v1.json');
+  if (!existsSync(legacyPath)) {
+    return {
+      ok: true,
+      active: false,
+      stopped: false,
+      removed: false,
+      skipped_pid_reuse: false,
+      message: '未发现旧版遗留的 Colab 后台抢卡进程。'
+    };
   }
-  const next = {
+  const saved = readJsonSafe(legacyPath, null);
+  const pid = Number(saved?.pid);
+  let stopped = false;
+  let skippedPidReuse = false;
+  let alive = false;
+
+  if (Number.isInteger(pid) && pid > 1 && pid !== process.pid) {
+    try {
+      process.kill(pid, 0);
+      alive = true;
+    } catch (err) {
+      alive = err?.code === 'EPERM';
+    }
+    if (alive) {
+      const cmdline = inspectLegacyWorkerCmdline(pid);
+      if (cmdline !== null) {
+        if (isLegacyColabWorkerCmdline(cmdline)) {
+          try {
+            process.kill(pid, 'SIGTERM');
+            stopped = true;
+          } catch {}
+        } else {
+          skippedPidReuse = true;
+        }
+      } else {
+        skippedPidReuse = true;
+      }
+    }
+  }
+
+  let removed = false;
+  try {
+    unlinkSync(legacyPath);
+    removed = true;
+  } catch {}
+
+  const message = stopped
+    ? `已终止升级前遗留的旧版 Colab 后台进程（PID ${pid}）并清理状态文件。`
+    : skippedPidReuse
+      ? `检测到记录的 PID ${pid} 非旧版 agy-hud worker（疑似 PID 复用或无法校验），已跳过发信号并清理旧状态文件。`
+      : '已清理旧版遗留的 Colab 后台状态文件（未发现存活旧进程）。';
+
+  return {
+    ok: true,
     active: false,
-    pid: null,
-    target_accelerator: saved?.target_accelerator || null,
-    interval_sec: Number(saved?.interval_sec || 30),
-    attempts: Number(saved?.attempts || 0),
-    status_text: '已停止',
-    updated_at: Math.floor(Date.now() / 1000)
+    pid: stopped ? pid : null,
+    stopped,
+    removed,
+    skipped_pid_reuse: skippedPidReuse,
+    message
   };
-  writeJsonAtomic(paths.colabSniperPath, next, { mode: 0o600, pretty: false });
-  return next;
 }

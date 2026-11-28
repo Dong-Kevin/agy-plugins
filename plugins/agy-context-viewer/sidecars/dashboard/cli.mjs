@@ -279,7 +279,15 @@ function hasCrossedQuotaResetBoundaryFast(quotas, cachedAtMs, nowMs) {
   return false;
 }
 
+function isZeroQuotaRpcFast(stateDir) {
+  const envRaw = String(process.env.AGY_CV_ZERO_QUOTA_RPC || '').trim().toLowerCase();
+  if (envRaw === '1' || envRaw === 'true' || envRaw === 'on' || envRaw === 'yes') return true;
+  const settings = readJsonSafeFast(join(stateDir, 'settings_v1.json'), null);
+  return settings?.uiPreferences?.quotaRpcEnabled === false;
+}
+
 function readDiskQuotasFallbackFast(stateDir, lsDiskHash = '', nowMs = Date.now()) {
+  if (isZeroQuotaRpcFast(stateDir)) return [];
   const raw = readJsonSafeFast(join(stateDir, 'host_status_cache_v1.json'), null);
   if (raw?.version !== 1 || !raw.entries || typeof raw.entries !== 'object') return [];
   let entry = (lsDiskHash && raw.entries[lsDiskHash] && typeof raw.entries[lsDiskHash] === 'object')
@@ -314,6 +322,9 @@ function tryFastStatuslineSnapHit(convId, nowMs = Date.now()) {
   const snapCache = loadStatuslineSnapCacheFast(stateDir);
   const snap = snapCache.convs[convId] || null;
   if (!snap) {
+    return { hit: false, staleSnap: null, stateDir, lsDiskHash };
+  }
+  if (isZeroQuotaRpcFast(stateDir) && Array.isArray(snap.quotas) && snap.quotas.length > 0) {
     return { hit: false, staleSnap: null, stateDir, lsDiskHash };
   }
 
@@ -669,6 +680,7 @@ function printHelp() {
     '  agy-context watch [conversationId] [--once]     终端实时盯盘面板（适配 tmux 分屏，自动跟随最新会话变化）',
     '  agy-context menubar [context|speed|quota]       定制 macOS 顶部菜单栏显示：上下文占比 / 速度与耗时 / 5h或Week额度',
     '  agy-context menubar [on|off|toggle|status]      开启、关闭或查看顶部菜单栏常驻图标（切换会话时自动跟随）',
+    '  agy-context quota-rpc [on|off|status]           开关宿主额度 RPC（off = 零额度 RPC 纯本地统计；也可用 AGY_CV_ZERO_QUOTA_RPC=1）',
     '  agy-context float [toggle|close|quit]           切换屏幕右侧独立置顶小窗（不受右侧栏切换影响，随时可取消置顶或收回）',
     '  agy-context aux [toggle|open]                   一键打开或切换 Antigravity 右侧辅助栏「上下文看板」',
     '  agy-context shortcut [combo|reset|off|--global] 查看或自定义独立悬浮窗快捷键（macOS 默认 ⌥⌘K，零辅助功能权限）',
@@ -1340,6 +1352,9 @@ function printPrettyStatus(ctx, hist) {
       }
       out.push(`  ${renderBar(q.remainingPercent, 12, true)} ${pctCol}  ${q.label}${q.resetText ? ` ${c.dim}(重置：${q.resetText})${c.reset}` : ''}`);
     }
+  } else if (s.quotaStatus?.state === 'disabled') {
+    out.push('');
+    out.push(`${c.bold}实时配额池余量${c.reset} ${c.dim}(已开启零额度 RPC 模式 · 纯本地统计)${c.reset}`);
   } else if (s.quotaStatus?.state === 'error') {
     out.push('');
     out.push(`${c.bold}实时配额池余量${c.reset} ${c.yellow}(${s.quotaStatus.reason || '宿主语言服务请求失败，暂未获取到配额池'})${c.reset}`);
@@ -2279,6 +2294,9 @@ function renderWatchPanel(ctx, width = 60, intervalMs = 1500) {
       const qTitle = q.displayTitle || q.title || q.label || '模型池';
       lines.push(`  ${renderBar(eff, Math.min(12, barW), true)} ${pctStr} ${c.dim}${qTitle}${c.reset}`);
     }
+  } else if (ctx.quotaStatus?.state === 'disabled') {
+    lines.push('');
+    lines.push(`${c.bold}配额池余量${c.reset} ${c.dim}(零额度 RPC 模式 · 纯本地统计)${c.reset}`);
   }
 
   lines.push(`${c.dim}${'─'.repeat(Math.min(cols, 72))}${c.reset}`);
@@ -2461,6 +2479,63 @@ async function runPricingCommand(rawArgs) {
   printPricingCatalogTable(catalog);
 }
 
+async function runQuotaRpcCommand(rawArgs, { invertedAlias = false } = {}) {
+  const { getQuotaRpcConfig, setQuotaRpcEnabled } = await loadCollectorMod();
+  const sub = (rawArgs.filter((a) => !a.startsWith('-'))[1] || 'status').toLowerCase();
+  const wantJson = rawArgs.includes('--json');
+
+  const formatStatusLine = (cfg) => {
+    if (cfg.forcedByEnv) {
+      return `${c.cyan}●${c.reset} 零额度 RPC 模式：已由环境变量 AGY_CV_ZERO_QUOTA_RPC=1 强制开启（持久化配置：${cfg.persistedEnabled ? '自动同步' : '零额度 RPC'}）`;
+    }
+    return cfg.enabled
+      ? `${c.green}●${c.reset} 额度查询策略：自动同步（通过本机官方语言服务分级节流拉取配额）`
+      : `${c.cyan}●${c.reset} 额度查询策略：零额度 RPC 模式（完全禁发 GetUserStatus / RetrieveUserQuotaSummary，纯本地统计）`;
+  };
+
+  if (rawArgs.includes('--status') || sub === 'status' || sub === 'show') {
+    const cfg = getQuotaRpcConfig();
+    if (wantJson) {
+      console.log(JSON.stringify({ ok: true, ...cfg }, null, 2));
+      return;
+    }
+    console.log(formatZh(formatStatusLine(cfg)));
+    return;
+  }
+
+  let nextEnabled = null;
+  const isOn = ['on', 'enable', 'enabled', 'true', '1', 'auto'].includes(sub) || rawArgs.includes('--on');
+  const isOff = ['off', 'disable', 'disabled', 'false', '0', 'zero'].includes(sub) || rawArgs.includes('--off');
+  if (sub === 'toggle') {
+    nextEnabled = !getQuotaRpcConfig().persistedEnabled;
+  } else if (isOn) {
+    nextEnabled = invertedAlias ? false : true;
+  } else if (isOff) {
+    nextEnabled = invertedAlias ? true : false;
+  } else {
+    console.error(formatZh(`${c.red}✗${c.reset} 未知参数：${sub}（用法：agy-context quota-rpc [on|off|toggle|status]）`));
+    process.exitCode = 1;
+    return;
+  }
+
+  const cfg = setQuotaRpcEnabled(nextEnabled);
+  try {
+    const { controlFloatWindow } = await loadFloatWindowMod();
+    await controlFloatWindow({ action: 'refresh-session' }).catch(() => {});
+  } catch {}
+
+  if (wantJson) {
+    console.log(JSON.stringify({ ok: true, ...cfg }, null, 2));
+    return;
+  }
+  const msg = cfg.forcedByEnv
+    ? `已更新持久化偏好为「${cfg.persistedEnabled ? '自动同步' : '零额度 RPC'}」，但当前进程存在 AGY_CV_ZERO_QUOTA_RPC=1，仍强制保持零额度 RPC 模式`
+    : cfg.enabled
+      ? '已恢复自动同步额度模式（按分级节流策略通过本机宿主语言服务同步配额）'
+      : '已开启零额度 RPC 模式：不再发送 GetUserStatus / RetrieveUserQuotaSummary 请求，仅保留本地日志与 SQLite 统计';
+  console.log(formatZh(`${c.green}✓${c.reset} ${msg}`));
+}
+
 async function main() {
   const rawArgs = process.argv.slice(2);
   if (rawArgs.includes('--sync-manifest')) {
@@ -2479,8 +2554,13 @@ async function main() {
   }
 
   const firstPositional = rawArgs.find((a) => !a.startsWith('-')) || 'status';
-  const knownCmds = new Set(['status', 'statusline', 'watch', 'turns', 'heavy', 'tree', 'compact', 'events', 'diag', 'projects', 'pricing', 'json', 'web', 'serve', 'open', 'float', 'pin', 'aux', 'menubar', 'sidebar', 'shortcut', 'hotkey', 'aux-shortcut', 'aux-hotkey']);
+  const knownCmds = new Set(['status', 'statusline', 'watch', 'turns', 'heavy', 'tree', 'compact', 'events', 'diag', 'projects', 'pricing', 'json', 'web', 'serve', 'open', 'float', 'pin', 'aux', 'menubar', 'sidebar', 'shortcut', 'hotkey', 'aux-shortcut', 'aux-hotkey', 'quota-rpc', 'zero-rpc']);
   const cmd = knownCmds.has(firstPositional.toLowerCase()) ? firstPositional.toLowerCase() : 'status';
+
+  if (cmd === 'quota-rpc' || cmd === 'zero-rpc') {
+    await runQuotaRpcCommand(rawArgs, { invertedAlias: cmd === 'zero-rpc' });
+    return;
+  }
 
   if (cmd === 'pricing') {
     await runPricingCommand(rawArgs);

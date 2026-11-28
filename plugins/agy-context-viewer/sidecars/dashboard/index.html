@@ -134,6 +134,14 @@
         </div>
       </div>
 
+      <div id="quota-rpc-row" class="palette-row">
+        <span class="field-lbl" title="开启后彻底禁发 GetUserStatus 与 RetrieveUserQuotaSummary 宿主查询，仅基于本地日志与 SQLite 统计（完全零额度 RPC）" data-i18n="drawer.quotaRpc" data-i18n-title="drawer.quotaRpc.title">额度查询策略</span>
+        <div class="seg-group" id="quota-rpc-seg">
+          <button type="button" class="seg-btn active" data-quota-rpc="auto" title="按分级节流策略通过本机宿主语言服务同步配额" data-i18n="quotaRpc.auto" data-i18n-title="quotaRpc.auto.title">自动同步</button>
+          <button type="button" class="seg-btn" data-quota-rpc="off" title="开启零额度 RPC 模式：关闭全部额度与账号状态 RPC，纯本地统计" data-i18n="quotaRpc.off" data-i18n-title="quotaRpc.off.title">零额度 RPC</button>
+        </div>
+      </div>
+
       <div class="drawer-sep"></div>
 
       <div class="palette-row">

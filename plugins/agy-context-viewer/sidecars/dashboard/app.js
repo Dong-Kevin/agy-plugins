@@ -120,8 +120,10 @@
       lang: 'zh',
       preset: 'violet',
       customLevels: null, // [c0, c1, c2, c3, c4] or null
-      customAccent: ''
+      customAccent: '',
+      quotaRpcEnabled: true
     },
+    quotaRpcForcedByEnv: false,
 
     presetsPopulated: false,
     menubarEnabled: window.__CV_MENUBAR_ENABLED__ ?? true,
@@ -489,6 +491,12 @@
     'scope.app.title': 'Active only when Antigravity or viewer window is focused',
     'scope.global': 'Global',
     'scope.global.title': 'Toggle panel from any application',
+    'drawer.quotaRpc': 'Quota Query Mode',
+    'drawer.quotaRpc.title': 'Disable GetUserStatus & RetrieveUserQuotaSummary RPCs completely; local transcripts & SQLite only',
+    'quotaRpc.auto': 'Auto Sync',
+    'quotaRpc.auto.title': 'Sync quota via local host language server with tiered TTL throttling',
+    'quotaRpc.off': 'Zero Quota RPC',
+    'quotaRpc.off.title': 'Strict zero-quota-RPC mode: local telemetry only, no quota or user status RPCs',
     'drawer.theme': 'Theme',
     'theme.auto': 'Auto',
     'theme.light': 'Light',
@@ -910,6 +918,13 @@
     document.querySelectorAll('#lang-seg .seg-btn').forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.langMode === langVal);
     });
+    const quotaRpcVal = (state.quotaRpcForcedByEnv || state.ui.quotaRpcEnabled === false) ? 'off' : 'auto';
+    document.querySelectorAll('#quota-rpc-seg .seg-btn').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.quotaRpc === quotaRpcVal);
+      if (btn.dataset.quotaRpc === 'auto') {
+        btn.disabled = Boolean(state.quotaRpcForcedByEnv);
+      }
+    });
     document.querySelectorAll('#heat-presets .preset-chip').forEach((chip) => {
       const active = !state.ui.customLevels && chip.dataset.preset === state.ui.preset;
       chip.classList.toggle('active', active);
@@ -967,7 +982,8 @@
             lang: isEn() ? 'en' : 'zh',
             preset: state.ui.preset,
             customLevels: state.ui.customLevels,
-            customAccent: state.ui.customAccent
+            customAccent: state.ui.customAccent,
+            quotaRpcEnabled: state.ui.quotaRpcEnabled !== false
           }
         }
       });
@@ -1232,6 +1248,12 @@
       }
       if (typeof prefs.customAccent === 'string') {
         state.ui.customAccent = prefs.customAccent;
+      }
+      state.quotaRpcForcedByEnv = Boolean(s.quotaRpc?.forcedByEnv);
+      if (typeof s.quotaRpc?.enabled === 'boolean') {
+        state.ui.quotaRpcEnabled = s.quotaRpc.enabled;
+      } else if (typeof prefs.quotaRpcEnabled === 'boolean') {
+        state.ui.quotaRpcEnabled = prefs.quotaRpcEnabled;
       }
       if (typeof s.entrypoints?.sidebarEnabled === 'boolean') {
         state.sidebarEntryEnabled = s.entrypoints.sidebarEnabled;
@@ -5360,6 +5382,11 @@
       ]);
     } else if (quotaStatus?.summaryStale) {
       planRows.push([tr('配额同步状态', 'Quota Sync'), tr('多窗口配额摘要暂不可用，仅展示基础池', 'Multi-window summary unavailable; showing base pool')]);
+    } else if (quotaStatus?.state === 'disabled') {
+      planRows.push([
+        tr('配额同步状态', 'Quota Sync'),
+        quotaStatus.reason || tr('已开启零额度 RPC 模式（仅本地日志与 SQLite 统计）', 'Zero-Quota-RPC mode enabled (local logs & SQLite only)')
+      ]);
     } else if (quotaStatus?.state === 'error') {
       planRows.push([tr('配额同步状态', 'Quota Sync'), quotaStatus.reason || tr('语言服务请求失败，暂未获取到配额池', 'Language service request failed; quota pools unavailable')]);
     } else if (quotaStatus?.state === 'unavailable') {
@@ -5391,6 +5418,9 @@
       } else if (quotaStatus?.summaryStale) {
         qSyncPill.className = 'status-pill warn';
         setText(qSyncPill, tr('摘要降级', 'Summary Degraded'));
+      } else if (quotaStatus?.state === 'disabled') {
+        qSyncPill.className = 'status-pill neutral';
+        setText(qSyncPill, tr('零 RPC 模式', 'Zero-RPC Mode'));
       } else if (quotaStatus?.state === 'error') {
         qSyncPill.className = 'status-pill danger';
         setText(qSyncPill, tr('连接失败', 'Connection Error'));
@@ -5518,6 +5548,9 @@
             `</div>`
           );
         }).join('');
+      } else if (quotaStatus?.state === 'disabled') {
+        qWrap.classList.remove('hidden');
+        qList.innerHTML = `<div class="kv-row"><span class="muted">${escZh(quotaStatus.reason || tr('已开启零额度 RPC 模式：不向宿主发送 GetUserStatus / RetrieveUserQuotaSummary 请求，仅基于本地日志与 SQLite 统计。可随时在右上角设置抽屉中切换回自动同步。', 'Zero-Quota-RPC mode enabled: no GetUserStatus / RetrieveUserQuotaSummary RPCs are sent; local logs & SQLite only. Switch back anytime in the top-right settings drawer.'))}</span></div>`;
       } else if (quotaStatus?.state === 'error') {
         qWrap.classList.remove('hidden');
         qList.innerHTML = `<div class="kv-row"><span class="muted">${escZh(quotaStatus.reason || tr('宿主语言服务暂不可达，尚未获取到模型配额池数据', 'Host language service unreachable; model quota pools unavailable'))}</span></div>`;
@@ -7079,6 +7112,29 @@
       });
     });
 
+    document.querySelectorAll('#quota-rpc-seg .seg-btn').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const wantEnabled = btn.dataset.quotaRpc !== 'off';
+        if (state.quotaRpcForcedByEnv && wantEnabled) {
+          showToast(tr('环境变量 AGY_CV_ZERO_QUOTA_RPC=1 已强制锁定为零额度 RPC 模式', 'Locked to Zero-Quota-RPC by AGY_CV_ZERO_QUOTA_RPC=1'));
+          return;
+        }
+        if ((state.ui.quotaRpcEnabled !== false) === wantEnabled) return;
+        state.ui.quotaRpcEnabled = wantEnabled;
+        applyAppearanceToDom({ animate: true });
+        syncSegIndicator($('quota-rpc-seg'), { animate: true });
+        await persistUiPreferences();
+        state.contextEtag = '';
+        state.historyEtag = '';
+        Promise.all([loadContext(true), loadHistory(true)]).catch(() => {});
+        showToast(
+          wantEnabled
+            ? tr('已恢复自动同步额度模式', 'Restored auto quota sync mode')
+            : tr('已开启零额度 RPC 模式（纯本地统计）', 'Zero-Quota-RPC mode enabled (local telemetry only)')
+        );
+      });
+    });
+
     const refreshOnLanguageChange = () => {
       applyAppearanceToDom();
       syncFloatButtonUi();
@@ -7143,7 +7199,16 @@
 
     $('btn-reset-appearance')?.addEventListener('click', () => {
       const langChanged = state.ui.lang !== 'zh';
-      state.ui = { themeMode: 'auto', glass: true, lang: 'zh', preset: 'violet', customLevels: null, customAccent: '' };
+      const keepQuotaRpcEnabled = state.ui.quotaRpcEnabled;
+      state.ui = {
+        themeMode: 'auto',
+        glass: true,
+        lang: 'zh',
+        preset: 'violet',
+        customLevels: null,
+        customAccent: '',
+        quotaRpcEnabled: keepQuotaRpcEnabled
+      };
       if (langChanged) {
         triggerThemeTransition();
         refreshOnLanguageChange();

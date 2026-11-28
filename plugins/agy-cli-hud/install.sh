@@ -112,6 +112,11 @@ TMP_MANIFEST="$TARGET_DIR/.plugin.json.tmp.$$"
 cp "$STAGE_DIR/plugin.json" "$TMP_MANIFEST"
 mv -f "$TMP_MANIFEST" "$TARGET_DIR/plugin.json"
 
+# Stop any detached legacy sniper worker left running from an older version during non-isolated upgrades
+if [[ -z "$ORIG_PLUGINS_DIR" ]] && [[ -f "$TARGET_DIR/bin/agy-hud.mjs" ]]; then
+  node "$TARGET_DIR/bin/agy-hud.mjs" colab snipe --stop >/dev/null 2>&1 || true
+fi
+
 if [[ -n "${AGY_BIN_DIR:-}${ANTIGRAVITY_BIN_DIR:-}" ]] || [[ -z "$ORIG_PLUGINS_DIR" ]]; then
   mkdir -p "$BIN_DIR"
   ln -sf "$TARGET_DIR/bin/agy-hud.mjs" "$BIN_DIR/agy-hud"

@@ -336,7 +336,8 @@ function formatColabCompact(colab, { tierMode = 'wide', C } = {}) {
   if (cu === null && !gpu) return '';
 
   if (tierMode === 'narrow') {
-    return cu !== null ? paint(`${cu} CU`, C.colab) : '';
+    if (cu !== null) return paint(`${cu} CU`, C.colab);
+    return gpu ? paint(gpu, C.colab) : '';
   }
   if (tierMode === 'mid') {
     if (cu !== null && gpu) {

@@ -63,8 +63,7 @@ export function resolveHudPaths() {
     colabDir,
     colabConfigPath: join(colabDir, 'config.json'),
     colabTokenPath: join(colabDir, 'token.json'),
-    colabCachePath: join(colabDir, 'colab_cache.v1.json'),
-    colabSniperPath: join(colabDir, 'sniper_state.v1.json')
+    colabCachePath: join(colabDir, 'colab_cache.v1.json')
   };
 }
 

@@ -646,10 +646,84 @@ function getObservedActivityMs() {
 }
 
 // ---------------------------------------------------------------------------
+// Zero-Quota-RPC Guard & Settings Helpers
+// ---------------------------------------------------------------------------
+
+const QUOTA_RPC_METHODS = new Set(['GetUserStatus', 'RetrieveUserQuotaSummary']);
+
+function isEnvZeroQuotaRpcForced() {
+  const raw = String(process.env.AGY_CV_ZERO_QUOTA_RPC || '').trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'on' || raw === 'yes';
+}
+
+function resetQuotaRuntimeCaches() {
+  cachedHostStatus = {
+    at: 0,
+    lsKey: '',
+    sig: 'init',
+    raw: null,
+    plan: null,
+    quotas: [],
+    modelConfigs: [],
+    quotaSummaryGroups: [],
+    dynamicModelMap: {},
+    quotaStatus: {
+      state: 'unavailable',
+      stale: false,
+      summaryStale: false,
+      source: 'none',
+      lastSuccessAt: null,
+      summaryLastSuccessAt: null,
+      reason: ''
+    }
+  };
+  lastGoodHostData = null;
+  cachedHistoryResult.at = 0;
+  try { scanSnapCache.clear(); } catch {}
+  try {
+    const snapPath = join(getPluginStateDir(), 'statusline_snap_v1.json');
+    if (existsSync(snapPath)) unlinkSync(snapPath);
+  } catch {}
+}
+
+export function getQuotaRpcConfig() {
+  const settings = loadRawSettings();
+  const persistedEnabled = settings.uiPreferences?.quotaRpcEnabled !== false;
+  const forcedByEnv = isEnvZeroQuotaRpcForced();
+  const enabled = forcedByEnv ? false : persistedEnabled;
+  return {
+    enabled,
+    zeroQuotaRpc: !enabled,
+    forcedByEnv,
+    persistedEnabled
+  };
+}
+
+export function getQuotaRpcEnabled() {
+  return getQuotaRpcConfig().enabled;
+}
+
+export function setQuotaRpcEnabled(enabled) {
+  const wantEnabled = Boolean(enabled);
+  const settings = loadRawSettings();
+  settings.uiPreferences = {
+    ...settings.uiPreferences,
+    quotaRpcEnabled: wantEnabled,
+    updatedAt: new Date().toISOString()
+  };
+  writeJsonAtomic(getSettingsPath(), settings);
+  resetQuotaRuntimeCaches();
+  return getQuotaRpcConfig();
+}
+
+// ---------------------------------------------------------------------------
 // Official Language Server Connect RPC (uses env vars injected by Sidecar SDK)
 // ---------------------------------------------------------------------------
 
 export function callLanguageServerWithStatus(method, payload = {}, timeoutMs = 4500, options = {}) {
+  if (QUOTA_RPC_METHODS.has(method) && !getQuotaRpcEnabled()) {
+    return Promise.resolve({ data: null, errorCode: 'QUOTA_RPC_DISABLED' });
+  }
   const lsAddr = process.env.ANTIGRAVITY_LS_ADDRESS;
   const csrf = process.env.ANTIGRAVITY_CSRF_TOKEN;
   const signal = options?.signal || null;
@@ -1327,9 +1401,36 @@ function readLatestDiskHostFallback(nowMs) {
 }
 
 async function getHostUserStatus(force = false, options = {}) {
+  const nowMs = Number(options.nowMs) || Date.now();
+  const quotaRpcCfg = getQuotaRpcConfig();
+  if (!quotaRpcCfg.enabled) {
+    const reason = quotaRpcCfg.forcedByEnv
+      ? '已通过环境变量 AGY_CV_ZERO_QUOTA_RPC=1 强制开启零额度 RPC 模式（纯本地统计）'
+      : '已开启零额度 RPC 模式（不向宿主请求配额与账号状态，仅使用本地日志与 SQLite 统计）';
+    const quotaStatus = makeQuotaStatus('disabled', {
+      stale: false,
+      summaryStale: false,
+      source: 'disabled',
+      lastSuccessAt: null,
+      summaryLastSuccessAt: null,
+      reason,
+      errorCode: 'QUOTA_RPC_DISABLED'
+    });
+    return {
+      at: nowMs,
+      lsKey: '',
+      sig: quotaRpcCfg.forcedByEnv ? 'quota-rpc-disabled:env' : 'quota-rpc-disabled',
+      raw: null,
+      plan: parseUserPlanStatus(null),
+      quotas: [],
+      modelConfigs: [],
+      quotaSummaryGroups: [],
+      dynamicModelMap: {},
+      quotaStatus
+    };
+  }
   const lsAddr = process.env.ANTIGRAVITY_LS_ADDRESS;
   const csrf = process.env.ANTIGRAVITY_CSRF_TOKEN;
-  const nowMs = Number(options.nowMs) || Date.now();
   if (!lsAddr || !csrf) {
     if (options.allowDiskCacheWithoutLs) {
       const fb = readLatestDiskHostFallback(nowMs);
@@ -1709,6 +1810,7 @@ function loadRawSettings() {
 }
 
 export async function getSettings(options = {}) {
+  const quotaRpc = getQuotaRpcConfig();
   const host = await getHostUserStatus(false, { background: true, ...options });
   const settings = loadRawSettings();
   const acctKey = host.plan?.accountKey || settings.lastAccountKey || 'default';
@@ -1718,7 +1820,11 @@ export async function getSettings(options = {}) {
     ok: true,
     planStatus: effectivePlan,
     customPlan,
-    uiPreferences: settings.uiPreferences || {},
+    quotaRpc,
+    uiPreferences: {
+      ...(settings.uiPreferences || {}),
+      quotaRpcEnabled: quotaRpc.enabled
+    },
     entrypoints: getSidebarEntryStatus(),
     presets: {
       regions: SUBSCRIPTION_REGIONS_PRESET,
@@ -3088,9 +3194,16 @@ const VALID_UI_THEME_MODES = new Set(['auto', 'light', 'dark', 'oled']);
 const VALID_UI_LANGS = new Set(['zh', 'en']);
 
 export async function saveSettings(payload = {}) {
-  const host = await getHostUserStatus(false, { background: true });
   const settings = loadRawSettings();
-  const acctKey = host.plan?.accountKey || settings.lastAccountKey || 'default';
+  const prevQuotaRpcEnabled = settings.uiPreferences?.quotaRpcEnabled !== false;
+  const incomingQuotaRpc = (payload.uiPreferences && typeof payload.uiPreferences.quotaRpcEnabled === 'boolean')
+    ? payload.uiPreferences.quotaRpcEnabled
+    : prevQuotaRpcEnabled;
+  const shouldSkipHostRpc = isEnvZeroQuotaRpcForced() || !incomingQuotaRpc || !prevQuotaRpcEnabled;
+  const host = shouldSkipHostRpc
+    ? null
+    : await getHostUserStatus(false, { background: true });
+  const acctKey = host?.plan?.accountKey || settings.lastAccountKey || 'default';
 
   if (payload.clearPlan === true) {
     delete settings.accounts[acctKey];
@@ -3103,6 +3216,7 @@ export async function saveSettings(payload = {}) {
     settings.lastAccountKey = acctKey;
   }
 
+  let quotaRpcChanged = false;
   if (payload.uiPreferences && typeof payload.uiPreferences === 'object') {
     const nextPrefs = {
       ...settings.uiPreferences,
@@ -3118,12 +3232,20 @@ export async function saveSettings(payload = {}) {
     if (nextPrefs.lang !== undefined) {
       nextPrefs.lang = VALID_UI_LANGS.has(nextPrefs.lang) ? nextPrefs.lang : 'zh';
     }
+    if (nextPrefs.quotaRpcEnabled !== undefined) {
+      nextPrefs.quotaRpcEnabled = Boolean(nextPrefs.quotaRpcEnabled);
+      quotaRpcChanged = nextPrefs.quotaRpcEnabled !== prevQuotaRpcEnabled;
+    }
     delete nextPrefs.budgetOverride;
     settings.uiPreferences = nextPrefs;
   }
 
   writeJsonAtomic(getSettingsPath(), settings);
-  cachedHistoryResult.at = 0; // Invalidate history cache so updated plan reflects immediately
+  if (quotaRpcChanged) {
+    resetQuotaRuntimeCaches();
+  } else {
+    cachedHistoryResult.at = 0; // Invalidate history cache so updated plan reflects immediately
+  }
   return getSettings();
 }
 

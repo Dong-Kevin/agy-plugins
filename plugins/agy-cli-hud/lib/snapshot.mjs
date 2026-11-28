@@ -24,8 +24,7 @@ export const DEFAULT_CONFIG = {
   plan_tier: 'auto', // auto | free | plus | pro | ultra
   monthly_paid_usd: null,
   sync_interval_ms: 2000,
-  colab_poll_interval_ms: 45000,
-  colab_keep_alive: true
+  colab_poll_interval_ms: 45000
 };
 
 export function loadHudConfig(paths = resolveHudPaths()) {
@@ -335,8 +334,7 @@ export function composeSnapshot({
     cu_balance: null,
     cu_rate_hourly: null,
     estimated_hours_left: null,
-    runtimes: [],
-    sniper: { active: false, target_accelerator: null, interval_sec: 30, attempts: 0 }
+    runtimes: []
   };
   const colab = {
     ...rawColab,

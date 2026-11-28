@@ -8,7 +8,7 @@ Zero-dependency, low-latency CLI HUD & compliant Google Colab telemetry plugin b
 - **Incremental JSONL rollup**: Byte-offset cursor with `step_index` deduplication computes session average cache hit rate, today/month token usage, and API retail reference cost / subscription leverage in milliseconds.
 - **Native dual-pool quotas & daily weekly burn**: Reads `gemini-5h`, `gemini-weekly`, `3p-5h`, and `3p-weekly` directly from `agy` callbacks (and syncs Desktop `host_status_cache_v1.json` observations), normalized to remaining percentage, and tracks per-pool **today's weekly quota usage %** via a local daily ledger (`quota_daily.v1.json`) that accumulates pre-reset + post-reset consumption (`↻`) on mid-day resets and transparently marks partial-day baselines with `+`.
 - **Solo native drawer snapshot**: Atomically writes `~/.gemini/antigravity-cli/cache/agy-cli-hud/usage-hud.v1.json` for Solo's native right-side **Usage (`⌘U`)** drawer.
-- **Compliant Google Colab monitoring**: Official OAuth 2.0 (PKCE) + `colaboratory.googleapis.com/v1beta` REST API for tier, CU balance, CU/h rate, GPU RAM/VRAM/utilization/idle countdown, keep-alive, release, and low-frequency queue polling.
+- **Compliant Google Colab monitoring**: Official OAuth 2.0 (PKCE) + `colaboratory.googleapis.com/v1beta` REST API for read-only tier, GPU RAM/VRAM/utilization/idle countdown, and manual runtime release (strictly zero CDP, zero spoofed headers to `tun/m/ccu-info`, zero auto-keepalive or GPU sniping).
 - **On-demand SHA-256 auto-updater**: Run `agy-hud update [--check]` to verify and atomically upgrade from official GitHub Releases (dynamically imported only on explicit invocation; zero hot-path overhead).
 
 ## Quick Install

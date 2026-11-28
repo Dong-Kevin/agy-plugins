@@ -1,11 +1,11 @@
 # agy-plugins ROADMAP
 
-更新时间：2026-11-27 14:56（Asia/Shanghai）。
+更新时间：2026-11-28 16:22（Asia/Shanghai）。
 
 ## 本次交付目标
 
-1. 完成三插件全系安全自动更新接入（`agy-finder v0.3.0` 顶栏/设置面板/零 CLS 浮层 + 三端热重载 + `agy-finder update`，`agy-cli-hud v0.1.0` 按需 `agy-hud update`，`context-viewer v1.10.0` 保持既有全链路自动更新），统一升级中英 README 并正式发布 **`v2026.11.27`** GitHub Release。
-2. 保持三插件全仓严格校验（`node scripts/verify.mjs --strict-git-identity`）与独立发布打包（`node scripts/package-all.mjs`）全部通过并同步推送 `main` 与 Release 标签。
+1. 完成面向防风控/合规场景的双插件加固：为 `agy-context-viewer` 增加全链路「零额度 RPC 模式」开关（双层拦截 `GetUserStatus` / `RetrieveUserQuotaSummary` + UI/CLI/环境变量控制），并彻底清理 `agy-cli-hud` 的 Colab 高敏逻辑（移除仿 `colab-cli` 头直连 `tun/m/ccu-info`、`keepalive` 保活与 `snipe` 循环抢卡，保留只读官方 REST 状态、手动 `release` 及带 PID 校验的旧 worker 停机兼容）。
+2. 保持三插件全仓严格校验（`node scripts/verify.mjs --strict-git-identity`）、独立发布打包（`node scripts/package-all.mjs`）与本机热同步全部通过并推送 `main`。
 
 ## 后置与挂起事项
 
@@ -14,17 +14,18 @@
 
 ## 近期里程碑（滚动 5 条）
 
+- **2026-11-28 · 合规加固：`agy-context-viewer` 零额度 RPC 开关与 `agy-cli-hud` Colab 高敏清理**：为 `agy-context-viewer` 增加双层硬拦截（`getHostUserStatus` + `callLanguageServerWithStatus`）、设置抽屉/菜单栏/CLI（`agy-context quota-rpc` / `zero-rpc`）及 `AGY_CV_ZERO_QUOTA_RPC=1` 强制开关；从 `agy-cli-hud` 移除仿 `colab-cli` 头 `tun/m/ccu-info` 直连、`keepalive` 自动保活与 `snipe` 抢卡循环，保留官方 OAuth/REST 只读状态、手动 `release` 及带 POSIX PID 命令行校验的 `snipe --stop` 遗留停机兼容；补齐双插件模拟回归与合规门禁并通过 Codex 2 轮审查（`approve`）。详录见 [2026-11-p4.md](./docs/log/2026-11-p4.md#2026-11-28-零额度-rpc-开关与-colab-合规清理)。
 - **2026-11-27 · `v2026.11.27` 发版、全系安全自动更新接入与中英 README 同步**：为 `agy-finder` 升级至 `v0.3.0` 并补齐零依赖 `updater.mjs`（HTTPS 白名单/SHA-256/CRC-32/Zip-Slip/临时目录原子替换）、Sidecar/Standalone/macOS 抽屉热重载、顶栏/设置面板/零 CLS 浮层与 `agy-finder update`；为 `agy-cli-hud v0.1.0` 补齐按需动态加载的 `agy-hud update`；将 `context-viewer` 升级至 `v1.10.0`；全面同步根仓库与三插件共 8 份中英 README 并发布 `v2026.11.27` GitHub Release。详录见 [2026-11-p4.md](./docs/log/2026-11-p4.md#2026-11-27-全系自动更新与发版)。
 - **2026-11-27 · `agy-cli-hud` 主题、防强杀、精确计时与今日周耗升级（已推送 `a425638`）**：重构 6 套克制主题与 `theme` 命令；默认启用 Solo 异步旁路 + `agy-hud render` 免疫旧版快渲染截胡并压缩 `>24h` 增量缓存；引入 `sqlite_timing.mjs` 修复 `t/s` 虚高；上线每池今日周耗账本（日内重置 `↻`、8 分钟心跳保活零点桥接、联动桌面端 `host_status_cache_v1.json` 同日早锚回填与 `+` 透明缺口标注）及 1/2/3 行 CJK 防折行矩阵。详录见 [2026-11-p4.md](./docs/log/2026-11-p4.md#2026-11-27-agy-cli-hud-体验与周耗升级)。
 - **2026-11-26 · 新增 `agy-cli-hud v0.1.0` 轻量 CLI 与 Solo 遥测插件（已推送 `dd636ce`）**：新建零依赖 [plugins/agy-cli-hud](./plugins/agy-cli-hud)（`agy-hud`），实现增量 JSONL 字节游标今日/本月/7 日与会话平均缓存滚存、API 零售分段折算与订阅杠杆、Gemini/非 Gemini 双池 5h/周剩余额度、合规 OAuth 2.0 PKCE + 官方 Colab REST 算力监控（零 CDP）、原子共享快照 `usage-hud.v1.json` / `<4 KB` 摘要与 Solo 零冲突共存分层底栏，并接入总仓 `verify.mjs` / `package-all.mjs` / 统一安装器。详录见 [2026-11-p4.md](./docs/log/2026-11-p4.md#2026-11-26-新增-agy-cli-hud)。
 - **2026-11-25 · `agy-context-viewer` 热力图右侧今日色块裁切修复（已推送 `4f48b29`）**：根因系悬停展开 `#day-inspector` 触发 8px 纵向滚动条挤压 `#chart-stage` 且右内边距被溢出忽略；以 `scrollbar-gutter: stable`、子元素承接左右留白及 `ResizeObserver` 贴右保活根治，补齐 R2 回归并完成本机热同步。详录见 [2026-11-p4.md](./docs/log/2026-11-p4.md#2026-11-25-热力图裁切修复)。
-- **2026-11-25 · `agy-context-viewer` 版本更新提示与一键自动更新（已推送 `4f48b29`）**：新建零依赖 [updater.mjs](./plugins/agy-context-viewer/sidecars/dashboard/updater.mjs)（HTTPS 白名单含重定向、SHA-256、CRC-32/Zip-Slip 防护、临时目录原子替换与 `.git` 源码保护），打通三端热重载、顶栏/抽屉/零 CLS 浮层与 `verifyAutoUpdater` 回归并完成本机热同步。详录见 [2026-11-p4.md](./docs/log/2026-11-p4.md#2026-11-25-一键自动更新)。
 - **已发布与归档基线**：最新 GitHub Release 为 `v2026.11.27`（`context-viewer v1.10.0`、`agy-finder v0.3.0`、`agy-cli-hud v0.1.0`）；更早 `v2026.11.21`、`v1.8.0`、`v2026.11.15.1`、`v2026.11.15` 及全部历史迭代与 14 轮复查详录见 [docs/log/INDEX.md](./docs/log/INDEX.md)。
 
 ## 最新验证基线
 
-- **全仓门禁（2026-11-27 14:55）**：`node scripts/verify.mjs --strict-git-identity` -- 全仓结构/语法、开源隐私与 Git 身份门禁、三插件测试（`agy-cli-hud` 12/12、`agy-context-viewer v1.10.0` 9/9 与 `agy-finder v0.3.0` 13/13）、根安装器及跨插件 8 进程锁与 V1 守护边界全部通过（`exit 0`）。
-- **三插件打包（2026-11-27 14:51）**：`node scripts/package-all.mjs` -- 构建并校验通过（`agy-finder-v0.3.0.zip` `123.6 KB`、`context-viewer-v1.10.0.zip` `342.6 KB`、`agy-cli-hud-v0.1.0.zip` `77.7 KB`）。
+- **全仓门禁（2026-11-28 16:11）**：`node scripts/verify.mjs --strict-git-identity` -- 全仓结构/语法、开源隐私与 Git 身份门禁、三插件测试（`agy-cli-hud` 12/12 含 Colab 合规门禁与旧 worker 停机回归、`agy-context-viewer v1.10.0` 全套含 `verifyZeroQuotaRpcSwitch`、`agy-finder v0.3.0` 13/13）、根安装器及跨插件 8 进程锁与 V1 守护边界全部通过（`exit 0`）。
+- **三插件打包（2026-11-28 16:09）**：`node scripts/package-all.mjs` -- 构建并校验通过（`agy-finder-v0.3.0.zip` `123.6 KB`、`context-viewer-v1.10.0.zip` `346.2 KB`、`agy-cli-hud-v0.1.0.zip` `77.1 KB`）。
+- **Codex 审查（2026-11-28 16:13）**：`agy-codex review`（`gpt-6.1-sol high`）第 1 轮检出升级后旧 worker 停机 P1，补齐带 PID 命令行校验的 `colab snipe --stop` 兼容后第 2 轮复核 `approve`。
 
 ## 关键入口
 
